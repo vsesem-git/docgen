@@ -44,10 +44,12 @@ a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:ce
   <section class="card">
     <h2>Настройки рассылки</h2>
     <div class="grid">
-      <div class="field"><label for="lettersPerMinute">Писем в минуту (1–60)</label><input id="lettersPerMinute" type="number" min="1" max="60" value="1"></div>
-      <div class="field"><label>&nbsp;</label><button class="btn primary" id="saveMailingBtn" type="button">Сохранить лимит</button><span class="feedback" id="mailingFeedback"></span></div>
+      <div class="field"><label for="lettersPerMinute">Лимит по умолчанию (1–60)</label><input id="lettersPerMinute" type="number" min="1" max="60" value="1"></div>
+      <div class="field"><label>&nbsp;</label><button class="btn primary" id="saveMailingBtn" type="button">Сохранить лимиты</button><span class="feedback" id="mailingFeedback"></span></div>
     </div>
-    <p class="hint">Планировщик запускается раз в минуту. За один запуск отправляется не больше указанного числа писем; интервал между письмами соблюдается. Автоотправка включается только для пакетов, где оператор явно поставил галочку и выбрал «в расписание».</p>
+    <h3 style="font-size:13px;margin:16px 0 8px;color:#173b60">Лимит для каждого SMTP-ящика</h3>
+    <div class="grid" id="mailingAccounts">Загружаем ящики…</div>
+    <p class="hint">Лимит задаётся отдельно для каждого уникального ящика. Разные ящики отправляют независимо: у каждого свой поток и свой лимит писем в минуту. Ящик без собственного значения использует лимит по умолчанию. Планировщик запускается раз в минуту; автоотправка включается только для пакетов, где оператор явно поставил галочку и выбрал «в расписание».</p>
   </section>
   <section class="card">
     <h2>Пачки писем</h2>
@@ -103,13 +105,28 @@ async function runBatchAction(action,id){
   catch(e){if(target)target.textContent=e.message;showToast(e.message,'error');}
 }
 function showToast(text,kind){const el=document.createElement('div');el.className='pill '+(kind==='success'?'sent':'failed');el.textContent=text;document.querySelector('main').prepend(el);setTimeout(()=>el.remove(),5000);}
+function renderMailingAccounts(accounts){
+  $('mailingAccounts').innerHTML=accounts.length?accounts.map(account=>{
+    const id=String(account.id||'');
+    const label=`${account.label||'Ящик'} · ${account.fromEmail||'без адреса'}${account.limitCustom?' · свой лимит':''}`;
+    return `<div class="field"><label for="limit-${esc(id)}">${esc(label)}</label><input id="limit-${esc(id)}" data-account-limit="${esc(id)}" type="number" min="1" max="60" value="${Number(account.limit||1)}"></div>`;
+  }).join(''):'<p class="muted">SMTP-ящики ещё не настроены.</p>';
+}
 $('saveMailingBtn').addEventListener('click',async()=>{
   const fd=new FormData();fd.append('lettersPerMinute',$('lettersPerMinute').value.trim());
-  try{const payload=await post('save_mailing_settings',fd,'Лимит сохранён.');$('lettersPerMinute').value=payload.settings.lettersPerMinute;$('mailingFeedback').textContent='Сохранено.';}
+  document.querySelectorAll('[data-account-limit]').forEach(input=>fd.append('accountLimits['+input.dataset.accountLimit+']',input.value.trim()));
+  try{const payload=await post('save_mailing_settings',fd,'Лимиты сохранены.');$('lettersPerMinute').value=payload.settings.lettersPerMinute;renderMailingAccounts(payload.accounts||[]);$('mailingFeedback').textContent='Сохранено.';}
   catch(e){$('mailingFeedback').textContent=e.message;}
 });
+async function loadMailingSettings(){
+  const response=await fetch('?action=mailing_settings',{cache:'no-store'});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось загрузить лимиты.');
+  $('lettersPerMinute').value=payload.settings.lettersPerMinute;
+  renderMailingAccounts(payload.accounts||[]);
+}
 (async()=>{
-  try{const response=await fetch('?action=mailing_settings');const payload=await response.json();if(payload.ok)$('lettersPerMinute').value=payload.settings.lettersPerMinute;await load();}
+  try{await loadMailingSettings();await load();}
   catch(e){$('batches').textContent=e.message||'Ошибка загрузки.';}
 })();
 </script>

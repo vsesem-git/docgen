@@ -18,6 +18,7 @@ define('DOCGEN_MAILING_SETTINGS_FILE', DOCGEN_SETTINGS_DIR . '/mailing.json');
 define('DOCGEN_BATCH_DIR', DOCGEN_STORAGE_DIR . '/batches');
 define('DOCGEN_CRON_LOCK_FILE', DOCGEN_STORAGE_DIR . '/mailer-cron.lock');
 define('DOCGEN_CRON_STATE_FILE', DOCGEN_STORAGE_DIR . '/mailer-cron-state.json');
+define('DOCGEN_CRON_ACCOUNT_DIR', DOCGEN_STORAGE_DIR . '/mailer-accounts');
 define('DOCGEN_DADATA_SECRET_FILE', DOCGEN_SECRETS_DIR . '/dadata-api-key.json');
 define('DOCGEN_MANAGER_CHECKS_FILE', DOCGEN_STORAGE_DIR . '/manager_checks.json');
 define('DOCGEN_TABLE_DATA_FILE', DOCGEN_STORAGE_DIR . '/table_data.json');
@@ -1657,7 +1658,42 @@ function docgenBatchItems(string $batchId): array
 
 function docgenMailingSettings(): array
 {
-    return array_merge(['lettersPerMinute' => 1], docgenReadJson(DOCGEN_MAILING_SETTINGS_FILE, []));
+    $settings = docgenReadJson(DOCGEN_MAILING_SETTINGS_FILE, []);
+    $limits = is_array($settings['accountLimits'] ?? null) ? $settings['accountLimits'] : [];
+    return [
+        'lettersPerMinute' => max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1))),
+        'accountLimits' => $limits,
+    ];
+}
+
+function docgenCronAccountLimit(string $accountId, ?array $settings = null): int
+{
+    $settings = $settings ?? docgenMailingSettings();
+    $limits = is_array($settings['accountLimits'] ?? null) ? $settings['accountLimits'] : [];
+    if (array_key_exists($accountId, $limits)) {
+        $raw = (string) $limits[$accountId];
+        if (ctype_digit($raw)) {
+            $limit = (int) $raw;
+            if ($limit >= 1 && $limit <= 60) {
+                return $limit;
+            }
+        }
+    }
+    return max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1)));
+}
+
+function docgenMailingAccounts(): array
+{
+    $settings = docgenMailingSettings();
+    $accounts = [];
+    foreach (docgenSmtpPublicPayload()['accounts'] as $account) {
+        $id = (string) ($account['id'] ?? '');
+        $accounts[] = array_merge($account, [
+            'limit' => docgenCronAccountLimit($id, $settings),
+            'limitCustom' => array_key_exists($id, (array) ($settings['accountLimits'] ?? [])),
+        ]);
+    }
+    return $accounts;
 }
 
 function docgenSaveMailingSettings(): never
@@ -1667,13 +1703,35 @@ function docgenSaveMailingSettings(): never
     if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 60) {
         sendJson(['ok' => false, 'error' => 'Укажите от 1 до 60 писем в минуту.'], 422);
     }
-    $settings = ['lettersPerMinute' => $perMinute];
+    $existingLimits = docgenMailingSettings()['accountLimits'];
+    $limits = $existingLimits;
+    if (array_key_exists('accountLimits', $_POST)) {
+        $posted = $_POST['accountLimits'];
+        if (!is_array($posted)) {
+            sendJson(['ok' => false, 'error' => 'Некорректный список лимитов ящиков.'], 422);
+        }
+        $knownIds = array_column(docgenSmtpAccountStore()['accounts'], 'id');
+        $limits = [];
+        foreach ($posted as $accountId => $value) {
+            $accountId = (string) $accountId;
+            if (!in_array($accountId, $knownIds, true)) {
+                sendJson(['ok' => false, 'error' => 'Неизвестный SMTP-ящик в лимитах: ' . $accountId], 422);
+            }
+            $text = (string) $value;
+            $limit = (int) $text;
+            if (!ctype_digit($text) || $limit < 1 || $limit > 60) {
+                sendJson(['ok' => false, 'error' => 'Для каждого ящика укажите от 1 до 60 писем в минуту.'], 422);
+            }
+            $limits[$accountId] = $limit;
+        }
+    }
+    $settings = ['lettersPerMinute' => $perMinute, 'accountLimits' => $limits];
     try {
         docgenWriteJson(DOCGEN_MAILING_SETTINGS_FILE, $settings);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
     }
-    sendJson(['ok' => true, 'settings' => $settings]);
+    sendJson(['ok' => true, 'settings' => $settings, 'accounts' => docgenMailingAccounts()]);
 }
 
 function docgenReviewBatch(): never
@@ -2965,11 +3023,128 @@ function docgenSendQueueItem(): never
         sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
     }
 }
-/** One CLI run: at most N letters across all opt-in batches, rate limited. */
-function docgenCronSend(): array
+/** Per-mailbox clock: restore the first run from the old global state file. */
+function docgenCronAccountPath(string $accountId, string $suffix): string
 {
-    $result = ['sent' => 0, 'failed' => 0, 'skipped' => 0, 'reason' => '', 'batches' => []];
-    $lock = @fopen(DOCGEN_CRON_LOCK_FILE, 'c');
+    if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $accountId) !== 1) {
+        throw new RuntimeException('Некорректный идентификатор SMTP-ящика.');
+    }
+    return DOCGEN_CRON_ACCOUNT_DIR . '/' . $accountId . '.' . $suffix;
+}
+
+function docgenCronAccountLastSend(string $accountId): float
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    if (isset($state['lastSendAt'])) {
+        return (float) $state['lastSendAt'];
+    }
+    $legacy = docgenReadJson(DOCGEN_CRON_STATE_FILE, []);
+    return (float) ($legacy['lastSendAt'] ?? 0);
+}
+
+function docgenCronItemAccountId(array $item): string
+{
+    $id = trim((string) ($item['smtpAccountId'] ?? ''));
+    if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $id) === 1) {
+        return $id;
+    }
+    return (string) docgenSmtpAccountStore()['defaultId'];
+}
+
+/** Mark "sending" letters whose delivery was interrupted as retryable. */
+function docgenCronRecoverStale(?string $accountId): void
+{
+    $batchById = [];
+    foreach (docgenBatchList() as $batch) {
+        $batchById[(string) $batch['id']] = $batch;
+    }
+    foreach (docgenQueueList() as $item) {
+        if (($item['status'] ?? '') !== 'sending') {
+            continue;
+        }
+        if ($accountId !== null && docgenCronItemAccountId($item) !== $accountId) {
+            continue;
+        }
+        $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
+        if (!in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
+            continue;
+        }
+        $started = strtotime((string) ($item['sendStartedAt'] ?? ''));
+        if ($started !== false && time() - $started > 600) {
+            $item['status'] = 'scheduled';
+            $item['lastError'] = 'Отправка прервана, повтор по расписанию.';
+            unset($item['sendStartedAt']);
+            docgenSaveQueueItem($item);
+        }
+    }
+}
+
+/** Scheduled letters of one mailbox (or all of them for the coordinator). */
+function docgenCronDueItems(?string $accountId): array
+{
+    $batchById = [];
+    foreach (docgenBatchList() as $batch) {
+        $batchById[(string) $batch['id']] = $batch;
+    }
+    $due = [];
+    foreach (docgenQueueList() as $item) {
+        if (($item['status'] ?? '') !== 'scheduled') {
+            continue;
+        }
+        if ($accountId !== null && docgenCronItemAccountId($item) !== $accountId) {
+            continue;
+        }
+        $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
+        if (in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
+            $due[] = $item;
+        }
+    }
+    usort($due, static function (array $a, array $b) use ($batchById): int {
+        $priorityA = (int) ($batchById[(string) ($a['batchId'] ?? '')]['priority'] ?? 0);
+        $priorityB = (int) ($batchById[(string) ($b['batchId'] ?? '')]['priority'] ?? 0);
+        if ($priorityA !== $priorityB) {
+            return $priorityA <=> $priorityB;
+        }
+        return strcmp((string) ($a['createdAt'] ?? ''), (string) ($b['createdAt'] ?? ''));
+    });
+    return $due;
+}
+
+function docgenCronRefreshBatch(string $batchId): array
+{
+    $batch = docgenBatchMeta($batchId);
+    if (!$batch || $batchId === 'legacy') {
+        return [];
+    }
+    $sent = 0;
+    $failed = 0;
+    $pending = 0;
+    foreach (docgenBatchItems($batchId) as $batchItem) {
+        $status = (string) ($batchItem['status'] ?? '');
+        if ($status === 'sent') {
+            $sent++;
+        } elseif ($status === 'failed') {
+            $failed++;
+        } elseif (in_array($status, ['queued', 'scheduled', 'sending', 'paused'], true)) {
+            $pending++;
+        }
+    }
+    $batch['sentCount'] = $sent;
+    $batch['failedCount'] = $failed;
+    $batch['status'] = $pending > 0 ? 'scheduled' : 'done';
+    $batch['updatedAt'] = date(DATE_ATOM);
+    docgenSaveBatch($batch);
+    return ['id' => $batchId, 'status' => $batch['status'], 'sent' => $sent, 'failed' => $failed];
+}
+
+/** Send one mailbox's due letters at its own pace. */
+function docgenCronSendAccount(string $accountId): array
+{
+    $result = ['sent' => 0, 'failed' => 0, 'skipped' => 0, 'reason' => '', 'batches' => [], 'id' => $accountId, 'accountId' => $accountId];
+    docgenEnsureDir(DOCGEN_CRON_ACCOUNT_DIR);
+    $lockPath = docgenCronAccountPath($accountId, 'lock');
+    $lock = @fopen($lockPath, 'c');
     if (!is_resource($lock) || !flock($lock, LOCK_EX | LOCK_NB)) {
         if (is_resource($lock)) {
             fclose($lock);
@@ -2978,55 +3153,14 @@ function docgenCronSend(): array
         return $result;
     }
     try {
-        $limit = max(1, min(60, (int) docgenMailingSettings()['lettersPerMinute']));
-        $state = docgenReadJson(DOCGEN_CRON_STATE_FILE, []);
-        $lastSendAt = (float) ($state['lastSendAt'] ?? 0);
-        $batches = docgenBatchList();
-        $batchById = [];
-        foreach ($batches as $batch) {
-            $batchById[(string) $batch['id']] = $batch;
-        }
-        $items = docgenQueueList();
-        foreach ($items as $item) {
-            if (($item['status'] ?? '') !== 'sending') {
-                continue;
-            }
-            $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
-            if (!in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
-                continue;
-            }
-            $started = strtotime((string) ($item['sendStartedAt'] ?? ''));
-            if ($started !== false && time() - $started > 600) {
-                $item['status'] = 'scheduled';
-                $item['lastError'] = 'Отправка прервана, повтор по расписанию.';
-                unset($item['sendStartedAt']);
-                docgenSaveQueueItem($item);
-            }
-        }
-        $due = [];
-        foreach ($items as $item) {
-            if (($item['status'] ?? '') !== 'scheduled') {
-                continue;
-            }
-            $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
-            if (!in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
-                continue;
-            }
-            $due[] = $item;
-        }
+        docgenCronRecoverStale($accountId);
+        $limit = docgenCronAccountLimit($accountId);
+        $due = array_slice(docgenCronDueItems($accountId), 0, $limit);
         if (!$due) {
             $result['reason'] = 'no_due';
             return $result;
         }
-        usort($due, static function (array $a, array $b) use ($batchById): int {
-            $priorityA = (int) ($batchById[(string) ($a['batchId'] ?? '')]['priority'] ?? 0);
-            $priorityB = (int) ($batchById[(string) ($b['batchId'] ?? '')]['priority'] ?? 0);
-            if ($priorityA !== $priorityB) {
-                return $priorityA <=> $priorityB;
-            }
-            return strcmp((string) ($a['createdAt'] ?? ''), (string) ($b['createdAt'] ?? ''));
-        });
-        $due = array_slice($due, 0, $limit);
+        $lastSendAt = docgenCronAccountLastSend($accountId);
         $affected = [];
         foreach ($due as $index => $item) {
             $target = $lastSendAt + ($index + 1) * (60.0 / $limit);
@@ -3062,35 +3196,111 @@ function docgenCronSend(): array
                 }
             }
             $lastSendAt = microtime(true);
-            docgenWriteJson(DOCGEN_CRON_STATE_FILE, ['lastSendAt' => $lastSendAt, 'updatedAt' => date(DATE_ATOM)]);
+            docgenWriteJson(docgenCronAccountPath($accountId, 'state.json'), [
+                'lastSendAt' => $lastSendAt,
+                'updatedAt' => date(DATE_ATOM),
+            ]);
         }
-        foreach (array_keys($affected) as $batchId) {
-            $batch = docgenBatchMeta((string) $batchId);
-            if (!$batch || $batchId === 'legacy') {
-                continue;
+        foreach (array_keys($affected) as $affectedBatchId) {
+            $info = docgenCronRefreshBatch((string) $affectedBatchId);
+            if ($info) {
+                $result['batches'][] = $info;
             }
-            $batchItems = docgenBatchItems((string) $batchId);
-            $sent = 0;
-            $failed = 0;
-            $pending = 0;
-            foreach ($batchItems as $batchItem) {
-                $status = (string) ($batchItem['status'] ?? '');
-                if ($status === 'sent') {
-                    $sent++;
-                } elseif ($status === 'failed') {
-                    $failed++;
-                } elseif (in_array($status, ['queued', 'scheduled', 'sending', 'paused'], true)) {
-                    $pending++;
-                }
-            }
-            $batch['sentCount'] = $sent;
-            $batch['failedCount'] = $failed;
-            $batch['status'] = $pending > 0 ? 'scheduled' : 'done';
-            $batch['updatedAt'] = date(DATE_ATOM);
-            docgenSaveBatch($batch);
-            $result['batches'][] = ['id' => $batchId, 'status' => $batch['status'], 'sent' => $sent, 'failed' => $failed];
         }
         if ($result['sent'] === 0 && $result['failed'] === 0 && $result['skipped'] > 0) {
+            $result['reason'] = 'rate_limited';
+        }
+        return $result;
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+/**
+ * One CLI run. The coordinator gives every mailbox its own worker process, so
+ * different SMTP accounts really send in parallel, each at its own limit.
+ * Direct calls (harnesses, CLI without process support) fall back to a
+ * sequential loop with the same per-account locks and clocks.
+ */
+function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): array
+{
+    if ($accountId !== null && $accountId !== '') {
+        return docgenCronSendAccount($accountId);
+    }
+    $result = ['sent' => 0, 'failed' => 0, 'skipped' => 0, 'reason' => '', 'batches' => [], 'accounts' => []];
+    $lock = @fopen(DOCGEN_CRON_LOCK_FILE, 'c');
+    if (!is_resource($lock) || !flock($lock, LOCK_EX | LOCK_NB)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        $result['reason'] = 'already_running';
+        return $result;
+    }
+    try {
+        docgenCronRecoverStale(null);
+        $grouped = [];
+        foreach (docgenCronDueItems(null) as $item) {
+            $grouped[docgenCronItemAccountId($item)][] = $item;
+        }
+        if (!$grouped) {
+            $result['reason'] = 'no_due';
+            return $result;
+        }
+        $workers = [];
+        if ($spawnWorkers && count($grouped) > 1 && function_exists('proc_open') && function_exists('proc_close')) {
+            $phpBinary = PHP_BINARY !== '' ? PHP_BINARY : 'php';
+            $script = __DIR__ . '/cron_send.php';
+            foreach (array_keys($grouped) as $id) {
+                $command = escapeshellarg($phpBinary) . ' ' . escapeshellarg($script) . ' --account=' . escapeshellarg((string) $id);
+                $pipes = [];
+                $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+                if (!is_resource($process)) {
+                    foreach ($workers as $opened) {
+                        fclose($opened['pipes'][0]);
+                        fclose($opened['pipes'][1]);
+                        proc_close($opened['process']);
+                    }
+                    $workers = [];
+                    break;
+                }
+                fclose($pipes[0]);
+                $workers[] = ['id' => (string) $id, 'process' => $process, 'pipes' => [$pipes[1], $pipes[2]]];
+            }
+        }
+        if ($workers) {
+            foreach ($workers as $worker) {
+                $out = stream_get_contents($worker['pipes'][0]);
+                $err = stream_get_contents($worker['pipes'][1]);
+                fclose($worker['pipes'][0]);
+                fclose($worker['pipes'][1]);
+                $code = proc_close($worker['process']);
+                $parsed = json_decode(trim((string) $out), true);
+                if (!is_array($parsed) || ($parsed['ok'] ?? false) !== true) {
+                    $parsed = ['sent' => 0, 'failed' => 1, 'reason' => 'worker_error', 'error' => mb_substr(trim((string) $err), 0, 400)];
+                }
+                $result['accounts'][] = ['id' => $worker['id']] + $parsed;
+                $result['sent'] += (int) ($parsed['sent'] ?? 0);
+                $result['failed'] += (int) ($parsed['failed'] ?? 0);
+                $result['skipped'] += (int) ($parsed['skipped'] ?? 0);
+                foreach ($parsed['batches'] ?? [] as $info) {
+                    $result['batches'][] = $info;
+                }
+                unset($code);
+            }
+        } else {
+            foreach (array_keys($grouped) as $id) {
+                $parsed = docgenCronSendAccount((string) $id);
+                $result['accounts'][] = $parsed;
+                $result['sent'] += $parsed['sent'];
+                $result['failed'] += $parsed['failed'];
+                $result['skipped'] += $parsed['skipped'];
+                foreach ($parsed['batches'] as $info) {
+                    $result['batches'][] = $info;
+                }
+            }
+        }
+        if ($result['sent'] === 0 && $result['failed'] === 0 && ($result['skipped'] > 0 || $result['accounts'])) {
             $result['reason'] = 'rate_limited';
         }
         return $result;
@@ -3130,7 +3340,7 @@ function docgenDispatch(string $action): void
             $letter = docgenLetterTemplate();
             sendJson(['ok' => true, 'settings' => $letter, 'accountId' => $letter['smtpAccountId']]);
         case 'mailing_settings':
-            sendJson(['ok' => true, 'settings' => docgenMailingSettings()]);
+            sendJson(['ok' => true, 'settings' => docgenMailingSettings(), 'accounts' => docgenMailingAccounts()]);
         case 'save_mailing_settings':
             docgenSaveMailingSettings();
         case 'save_smtp_settings':
