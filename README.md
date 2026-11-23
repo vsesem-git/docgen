@@ -51,7 +51,8 @@ cd /opt/docgen-src && sudo DOCGEN_HEALTH_HOST=127.0.0.1 ./deploy.sh
 3. копирует `project/` в `/opt/docgen-handoff/app`, сохраняя `/etc/docgen/app.env`
    и всё приватное хранилище `/var/lib/docgen` нетронутыми;
 4. перезапускает `docgen.service` и проверяет, что приложение отвечает;
-5. при ошибке автоматически возвращает предыдущую версию кода.
+5. обновляет и включает `docgen-mailer.timer` — планировщик очередных писем (раз в минуту);
+6. при ошибке автоматически возвращает предыдущую версию кода.
 
 Если нужно обновить только код без обращения к Git (например, конфликт локальных правок):
 
@@ -65,6 +66,8 @@ cd /opt/docgen-src && sudo ./deploy.sh --no-pull
 systemctl status docgen.service
 journalctl -u docgen.service -f
 sudo systemctl restart docgen.service
+systemctl status docgen-mailer.timer
+journalctl -u docgen-mailer.service -f
 ```
 
 ### Локальный preview (без установки системных зависимостей)

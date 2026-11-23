@@ -44,7 +44,7 @@ fi
 
 # Never publish a broken revision: lint the entrypoints before swapping code.
 if command -v php >/dev/null 2>&1; then
-  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php"; do
+  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php" "$SOURCE/public/queue.php" "$SOURCE/queue_manager.php" "$SOURCE/cron_send.php"; do
     php -l "$file" >/dev/null || die "Ошибка синтаксиса PHP в $file — обновление отменено."
   done
   # Without OpenSSL, PHP has no ssl:// transport and PHPMailer reports
@@ -110,6 +110,12 @@ if command -v curl >/dev/null 2>&1; then
     trap - INT TERM HUP
     die "Приложение не отвечает на http://$PORT_HEALTH_HOST:$PORT/ после обновления."
   fi
+fi
+
+STORAGE_DIR=$(sed -n 's/^DOCGEN_STORAGE_DIR=//p' "$ENV_FILE" | tail -n 1)
+STORAGE_DIR=${STORAGE_DIR:-/var/lib/docgen}
+if [ -f "$HERE/install_queue_timer.sh" ]; then
+  sh "$HERE/install_queue_timer.sh" "$APP_DIR" "$STORAGE_DIR"
 fi
 
 rm -rf "$OLD_DIR"

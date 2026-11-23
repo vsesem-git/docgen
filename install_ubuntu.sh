@@ -159,6 +159,11 @@ if ! systemctl enable --now "$SERVICE_NAME"; then
   exit 1
 fi
 
+# Schedule the opt-in mail queue worker. Safe to rerun; it never touches app.env.
+if [ -f "$HERE/install_queue_timer.sh" ]; then
+  sh "$HERE/install_queue_timer.sh" "$APP_DIR" "$STORAGE_DIR"
+fi
+
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "$IP" ] || IP=127.0.0.1
 echo

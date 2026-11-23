@@ -14,6 +14,10 @@ define('DOCGEN_SMTP_ACCOUNTS_FILE', DOCGEN_SETTINGS_DIR . '/smtp-accounts.json')
 define('DOCGEN_SMTP_ACCOUNT_SECRETS_FILE', DOCGEN_SECRETS_DIR . '/smtp-account-secrets.json');
 define('DOCGEN_SMTP_MAX_ACCOUNTS', 20);
 define('DOCGEN_LETTER_TEMPLATE_FILE', DOCGEN_SETTINGS_DIR . '/letter-template.json');
+define('DOCGEN_MAILING_SETTINGS_FILE', DOCGEN_SETTINGS_DIR . '/mailing.json');
+define('DOCGEN_BATCH_DIR', DOCGEN_STORAGE_DIR . '/batches');
+define('DOCGEN_CRON_LOCK_FILE', DOCGEN_STORAGE_DIR . '/mailer-cron.lock');
+define('DOCGEN_CRON_STATE_FILE', DOCGEN_STORAGE_DIR . '/mailer-cron-state.json');
 define('DOCGEN_DADATA_SECRET_FILE', DOCGEN_SECRETS_DIR . '/dadata-api-key.json');
 define('DOCGEN_MANAGER_CHECKS_FILE', DOCGEN_STORAGE_DIR . '/manager_checks.json');
 define('DOCGEN_TABLE_DATA_FILE', DOCGEN_STORAGE_DIR . '/table_data.json');
@@ -68,6 +72,17 @@ function docgenWriteJson(string $path, array $payload): void
 function docgenEsc(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function safeFilename(string $value): string
+{
+    $value = preg_replace('/[\\\\\\/\\:\\*\\?\"<>\\|\\x00-\\x1F]+/u', ' ', $value) ?? '';
+    $value = preg_replace('/\\s+/u', ' ', trim($value)) ?? trim($value);
+    $value = trim($value, ' .-_');
+    if ($value === '') {
+        $value = 'Документ';
+    }
+    return mb_substr($value, 0, 110, 'UTF-8');
 }
 
 function docgenAuthHash(): string
@@ -982,6 +997,211 @@ function docgenQueueList(): array
     return array_slice($items, 0, 500);
 }
 
+function docgenBatchPath(string $id): string
+{
+    return DOCGEN_BATCH_DIR . '/' . $id;
+}
+
+function docgenBatchMeta(string $id): array
+{
+    if ($id === 'legacy') {
+        $items = array_values(array_filter(docgenQueueList(), static fn(array $item): bool => empty($item['batchId'])));
+        $state = docgenReadJson(DOCGEN_BATCH_DIR . '/legacy-status.json', []);
+        return [
+            'id' => 'legacy', 'name' => 'Письма без пачки', 'itemCount' => count($items), 'subject' => '',
+            'status' => (string) ($state['status'] ?? 'review'),
+            'mode' => (string) ($state['mode'] ?? ''),
+            'createdAt' => $items[0]['createdAt'] ?? ($state['createdAt'] ?? date(DATE_ATOM)),
+            'reviewedAt' => $state['reviewedAt'] ?? null,
+            'sentCount' => 0, 'failedCount' => 0, 'lastError' => '',
+        ];
+    }
+    if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+        return [];
+    }
+    $meta = docgenReadJson(docgenBatchPath($id) . '/meta.json', []);
+    return ($meta['id'] ?? '') === $id ? $meta : [];
+}
+
+function docgenSaveBatch(array $batch): void
+{
+    $id = (string) ($batch['id'] ?? '');
+    if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+        throw new RuntimeException('Некорректный идентификатор пачки.');
+    }
+    docgenEnsureDir(docgenBatchPath($id));
+    docgenWriteJson(docgenBatchPath($id) . '/meta.json', $batch);
+}
+
+function docgenSaveLegacyBatchState(array $batch): void
+{
+    docgenEnsureDir(DOCGEN_BATCH_DIR);
+    docgenWriteJson(DOCGEN_BATCH_DIR . '/legacy-status.json', [
+        'status' => (string) ($batch['status'] ?? 'review'),
+        'mode' => (string) ($batch['mode'] ?? ''),
+        'createdAt' => (string) ($batch['createdAt'] ?? date(DATE_ATOM)),
+        'reviewedAt' => $batch['reviewedAt'] ?? null,
+    ]);
+}
+
+function docgenBatchList(?string $status = null): array
+{
+    $batches = [];
+    if (is_dir(DOCGEN_BATCH_DIR)) {
+        foreach (scandir(DOCGEN_BATCH_DIR) ?: [] as $id) {
+            if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+                continue;
+            }
+            $batch = docgenBatchMeta($id);
+            if ($batch && ($status === null || ($batch['status'] ?? '') === $status)) {
+                $batches[] = $batch;
+            }
+        }
+    }
+    $legacy = docgenBatchMeta('legacy');
+    if (($legacy['itemCount'] ?? 0) > 0 && ($status === null || $status === 'review')) {
+        $batches[] = $legacy;
+    }
+    usort($batches, static fn(array $a, array $b): int => strcmp((string) ($b['createdAt'] ?? ''), (string) ($a['createdAt'] ?? '')));
+    return $batches;
+}
+
+function docgenBatchItems(string $batchId): array
+{
+    $items = docgenQueueList();
+    if ($batchId === 'legacy') {
+        return array_values(array_filter($items, static fn(array $item): bool => empty($item['batchId'])));
+    }
+    return array_values(array_filter($items, static fn(array $item): bool => ($item['batchId'] ?? '') === $batchId));
+}
+
+function docgenMailingSettings(): array
+{
+    return array_merge(['lettersPerMinute' => 1], docgenReadJson(DOCGEN_MAILING_SETTINGS_FILE, []));
+}
+
+function docgenSaveMailingSettings(): never
+{
+    $raw = (string) ($_POST['lettersPerMinute'] ?? '1');
+    $perMinute = (int) $raw;
+    if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 60) {
+        sendJson(['ok' => false, 'error' => 'Укажите от 1 до 60 писем в минуту.'], 422);
+    }
+    $settings = ['lettersPerMinute' => $perMinute];
+    try {
+        docgenWriteJson(DOCGEN_MAILING_SETTINGS_FILE, $settings);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+    sendJson(['ok' => true, 'settings' => $settings]);
+}
+
+function docgenReviewBatch(): never
+{
+    $batchId = trim((string) ($_POST['batch_id'] ?? ''));
+    $mode = (string) ($_POST['mode'] ?? '');
+    if (!in_array($mode, ['manual', 'auto'], true)) {
+        sendJson(['ok' => false, 'error' => 'Выберите режим очереди.'], 422);
+    }
+    if ((string) ($_POST['confirmed'] ?? '') !== '1') {
+        sendJson(['ok' => false, 'error' => 'Подтвердите, что проверили все письма пачки.'], 422);
+    }
+    $batch = docgenBatchMeta($batchId);
+    if (!$batch || ($batch['status'] ?? '') !== 'review') {
+        sendJson(['ok' => false, 'error' => 'Пачка не найдена или уже передана в очередь.'], 404);
+    }
+    $items = docgenBatchItems($batchId);
+    if (!$items) {
+        sendJson(['ok' => false, 'error' => 'В пачке нет писем.'], 422);
+    }
+    if ($mode === 'auto') {
+        $broken = 0;
+        foreach ($items as $item) {
+            $dir = docgenQueuePath((string) $item['id']);
+            if (docgenEmailAddresses((string) ($item['to'] ?? '')) === []
+                || !is_file($dir . '/document.pdf')
+                || filesize($dir . '/document.pdf') === 0) {
+                $broken++;
+            }
+        }
+        if ($broken > 0) {
+            sendJson(['ok' => false, 'error' => 'В ' . $broken . ' письмах нет получателя или PDF. Исправьте их перед автоотправкой.'], 422);
+        }
+    }
+    $batch['status'] = $mode === 'auto' ? 'scheduled' : 'manual';
+    $batch['mode'] = $mode;
+    $batch['reviewedAt'] = date(DATE_ATOM);
+    $batch['updatedAt'] = date(DATE_ATOM);
+    foreach ($items as $item) {
+        if (($item['status'] ?? '') !== 'queued') {
+            continue;
+        }
+        if ($mode === 'auto') {
+            $item['status'] = 'scheduled';
+        }
+        $item['batchReviewedAt'] = $batch['reviewedAt'];
+        docgenSaveQueueItem($item);
+    }
+    if ($batchId !== 'legacy') {
+        docgenSaveBatch($batch);
+    } else {
+        docgenSaveLegacyBatchState($batch);
+    }
+    sendJson(['ok' => true, 'batch' => $batch, 'itemCount' => count($items)]);
+}
+
+function docgenCancelBatch(): never
+{
+    $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
+    if (!$batch || !in_array(($batch['status'] ?? ''), ['manual', 'scheduled', 'sending'], true)) {
+        sendJson(['ok' => false, 'error' => 'Пачку нельзя остановить.'], 404);
+    }
+    foreach (docgenBatchItems((string) $batch['id']) as $item) {
+        if (in_array(($item['status'] ?? ''), ['sent', 'cancelled'], true)) {
+            continue;
+        }
+        $item['status'] = 'cancelled';
+        $item['lastError'] = 'Пачка остановлена оператором.';
+        docgenSaveQueueItem($item);
+    }
+    $batch['status'] = 'cancelled';
+    $batch['updatedAt'] = date(DATE_ATOM);
+    if ($batch['id'] !== 'legacy') {
+        docgenSaveBatch($batch);
+    } else {
+        docgenSaveLegacyBatchState($batch);
+    }
+    sendJson(['ok' => true, 'batch' => $batch]);
+}
+
+function docgenRetryBatch(): never
+{
+    $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
+    if (!$batch || !in_array(($batch['status'] ?? ''), ['done', 'cancelled', 'scheduled', 'manual', 'sending'], true)) {
+        sendJson(['ok' => false, 'error' => 'Для этой пачки повтор недоступен.'], 404);
+    }
+    $mode = ($batch['mode'] ?? 'manual') === 'auto' ? 'auto' : 'manual';
+    $retried = 0;
+    foreach (docgenBatchItems((string) $batch['id']) as $item) {
+        if (($item['status'] ?? '') !== 'failed') {
+            continue;
+        }
+        $item['status'] = $mode === 'auto' ? 'scheduled' : 'queued';
+        $item['lastError'] = '';
+        unset($item['failedAt'], $item['sendStartedAt']);
+        docgenSaveQueueItem($item);
+        $retried++;
+    }
+    $batch['status'] = $mode === 'auto' ? 'scheduled' : 'manual';
+    $batch['updatedAt'] = date(DATE_ATOM);
+    if ($batch['id'] !== 'legacy') {
+        docgenSaveBatch($batch);
+    } else {
+        docgenSaveLegacyBatchState($batch);
+    }
+    sendJson(['ok' => true, 'batch' => $batch, 'retried' => $retried]);
+}
+
 function docgenRegisterDownload(string $sourcePath, string $filename, string $format, int $created, int $skipped): string
 {
     if (!in_array($format, ['zip', 'docx', 'pdf'], true)) {
@@ -1283,6 +1503,17 @@ function docgenGenerate(): never
     $store = docgenSmtpAccountStore();
     $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
     $letter = docgenLetterTemplate();
+    $batchId = bin2hex(random_bytes(16));
+    docgenEnsureDir(docgenBatchPath($batchId));
+    $sourceNames = [];
+    foreach ($ids as $selectedId) {
+        if (isset($byId[$selectedId])) {
+            $sourceNames[(string) ($byId[$selectedId]['source'] ?? '')] = true;
+        }
+    }
+    $sourceNames = array_values(array_filter(array_keys($sourceNames), static fn(string $name): bool => $name !== ''));
+    $batchName = count($sourceNames) === 1 ? $sourceNames[0] : (count($sourceNames) > 1 ? 'Несколько наборов' : 'Все наборы');
+    $batchSubject = '';
     $queueCreated = 0;
     $downloadedDocuments = 0;
     $archivePath = $jobDir . '/Пакет_документов.zip';
@@ -1333,6 +1564,7 @@ function docgenGenerate(): never
                 $body = docgenReplaceCodes((string) $letter['bodyPattern'], $emailValues);
                 $meta = [
                     'id' => $queueId,
+                    'batchId' => $batchId,
                     'recordId' => $item['id'],
                     'region' => $region,
                     'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
@@ -1356,6 +1588,9 @@ function docgenGenerate(): never
                 ];
                 docgenSaveQueueItem($meta);
                 $queueCreated++;
+                if ($batchSubject === '') {
+                    $batchSubject = trim((string) ($meta['subject'] ?? ''));
+                }
             } catch (Throwable $e) {
                 cleanupTree($queuePath);
                 $errors[] = ['id' => $item['id'], 'region' => $region, 'reason' => 'Не удалось добавить письмо в очередь: ' . $e->getMessage()];
@@ -1395,6 +1630,7 @@ function docgenGenerate(): never
     $archive->close();
     if ($queueCreated === 0) {
         $summary = array_map(static fn(array $item): string => ($item['region'] !== '' ? $item['region'] . ': ' : '') . ($item['id'] ?? '') . ' — ' . $item['reason'], $errors);
+        @rmdir(docgenBatchPath($batchId));
         cleanupTree($jobDir);
         sendJson(['ok' => false, 'error' => 'Ни один PDF не попал в очередь. Проверьте LibreOffice и обязательные поля.', 'details' => $summary], 422);
     }
@@ -1407,10 +1643,26 @@ function docgenGenerate(): never
         }
     }
     cleanupTree($jobDir);
+    docgenSaveBatch([
+        'id' => $batchId,
+        'name' => mb_substr($batchName, 0, 160, 'UTF-8'),
+        'itemCount' => $queueCreated,
+        'subject' => $batchSubject,
+        'status' => 'review',
+        'mode' => '',
+        'createdAt' => date(DATE_ATOM),
+        'reviewedAt' => null,
+        'smtpAccountId' => (string) ($settings['id'] ?? ''),
+        'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
+        'sentCount' => 0,
+        'failedCount' => 0,
+        'lastError' => '',
+    ]);
     sendJson([
         'ok' => true,
         'downloadUrl' => $downloadUrl,
         'filename' => 'Пакет_документов.zip',
+        'batchId' => $batchId,
         'created' => $queueCreated,
         'documents' => $downloadedDocuments,
         'skipped' => count($errors),
@@ -1874,6 +2126,71 @@ function docgenUpdateQueueItem(): never
     sendJson(['ok' => true, 'item' => $meta]);
 }
 
+/** Deliver one already validated queue item. Marks it sending/failed/sent. */
+function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, array $to, array $cc): array
+{
+    $id = (string) ($meta['id'] ?? '');
+    $lock = @fopen($dir . '/.send.lock', 'c');
+    if (!is_resource($lock) || !flock($lock, LOCK_EX | LOCK_NB)) {
+        if (is_resource($lock)) {
+            fclose($lock);
+        }
+        throw new RuntimeException('Это письмо уже обрабатывается.');
+    }
+    try {
+        $current = docgenReadQueueItem($id);
+        if (($current['status'] ?? '') === 'sent' || ($current['status'] ?? '') === 'sending') {
+            throw new RuntimeException('Статус письма уже изменился. Обновите очередь.');
+        }
+        $current['status'] = 'sending';
+        $current['sendStartedAt'] = date(DATE_ATOM);
+        $current['lastError'] = '';
+        docgenSaveQueueItem($current);
+        $queueAccountId = trim((string) ($current['smtpAccountId'] ?? ''));
+        if ($queueAccountId !== '') {
+            $queueAccount = docgenSmtpAccount($queueAccountId);
+            if (($queueAccount['id'] ?? '') !== $queueAccountId) {
+                throw new RuntimeException('SMTP-ящик, выбранный при формировании письма, был удалён. Восстановите его или сформируйте очередь заново.');
+            }
+            $mailer = docgenBuildMailer($queueAccount, docgenSmtpAccountSecret($queueAccountId));
+        } else {
+            $mailer = docgenBuildMailer();
+        }
+        foreach ($to as $email) {
+            $mailer->addAddress($email);
+        }
+        $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
+        foreach ($cc as $email) {
+            if (!isset($toKeys[mb_strtolower($email, 'UTF-8')])) {
+                $mailer->addCC($email);
+            }
+        }
+        $mailer->Subject = trim((string) ($current['subject'] ?? ''));
+        $mailer->Body = (string) ($current['body'] ?? '');
+        $mailer->addAttachment($pdfPath, safeFilename((string) ($current['filename'] ?? 'Документ')) . '.pdf', 'base64', 'application/pdf');
+        $mailer->send();
+        $current['status'] = 'sent';
+        $current['sentAt'] = date(DATE_ATOM);
+        $current['lastError'] = '';
+        $current['reviewedAt'] = date(DATE_ATOM);
+        docgenSaveQueueItem($current);
+        return ['ok' => true, 'item' => $current];
+    } catch (Throwable $e) {
+        try {
+            $failed = docgenReadQueueItem($id);
+            $failed['status'] = 'failed';
+            $failed['lastError'] = mb_substr($e->getMessage(), 0, 1000, 'UTF-8');
+            $failed['failedAt'] = date(DATE_ATOM);
+            docgenSaveQueueItem($failed);
+        } catch (Throwable $ignored) {
+        }
+        throw $e;
+    } finally {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
 function docgenSendQueueItem(): never
 {
     if ((string) ($_POST['confirmed'] ?? '') !== '1') {
@@ -1906,72 +2223,145 @@ function docgenSendQueueItem(): never
     if (!$to) {
         sendJson(['ok' => false, 'error' => 'Укажите хотя бы один корректный основной email (поле «Кому»).'], 422);
     }
-    $lock = @fopen($dir . '/.send.lock', 'c');
+    try {
+        $result = docgenDeliverPreparedItem($meta, $dir, $pdfPath, $to, $cc);
+        sendJson(['ok' => true, 'item' => $result['item'], 'message' => 'Письмо отправлено одному адресату/группе получателей.']);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
+    }
+}
+/** One CLI run: at most N letters across all opt-in batches, rate limited. */
+function docgenCronSend(): array
+{
+    $result = ['sent' => 0, 'failed' => 0, 'skipped' => 0, 'reason' => '', 'batches' => []];
+    $lock = @fopen(DOCGEN_CRON_LOCK_FILE, 'c');
     if (!is_resource($lock) || !flock($lock, LOCK_EX | LOCK_NB)) {
         if (is_resource($lock)) {
             fclose($lock);
         }
-        sendJson(['ok' => false, 'error' => 'Это письмо уже обрабатывается.'], 409);
+        $result['reason'] = 'already_running';
+        return $result;
     }
     try {
-        $meta = docgenReadQueueItem($id);
-        if (($meta['status'] ?? '') === 'sent' || ($meta['status'] ?? '') === 'sending') {
-            sendJson(['ok' => false, 'error' => 'Статус письма уже изменился. Обновите очередь.'], 409);
+        $limit = max(1, min(60, (int) docgenMailingSettings()['lettersPerMinute']));
+        $state = docgenReadJson(DOCGEN_CRON_STATE_FILE, []);
+        $lastSendAt = (float) ($state['lastSendAt'] ?? 0);
+        $batches = docgenBatchList();
+        $batchById = [];
+        foreach ($batches as $batch) {
+            $batchById[(string) $batch['id']] = $batch;
         }
-        $meta['status'] = 'sending';
-        $meta['sendStartedAt'] = date(DATE_ATOM);
-        $meta['lastError'] = '';
-        docgenSaveQueueItem($meta);
-        $queueAccountId = trim((string) ($meta['smtpAccountId'] ?? ''));
-        if ($queueAccountId !== '') {
-            $queueAccount = docgenSmtpAccount($queueAccountId);
-            if (($queueAccount['id'] ?? '') !== $queueAccountId) {
-                throw new RuntimeException('SMTP-ящик, выбранный при формировании письма, был удалён. Восстановите его или сформируйте очередь заново.');
+        $items = docgenQueueList();
+        foreach ($items as $item) {
+            if (($item['status'] ?? '') !== 'sending') {
+                continue;
             }
-            $mailer = docgenBuildMailer($queueAccount, docgenSmtpAccountSecret($queueAccountId));
-        } else {
-            $mailer = docgenBuildMailer();
-        }
-        foreach ($to as $email) {
-            $mailer->addAddress($email);
-        }
-        $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
-        foreach ($cc as $email) {
-            if (!isset($toKeys[mb_strtolower($email, 'UTF-8')])) {
-                $mailer->addCC($email);
+            $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
+            if (!in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
+                continue;
+            }
+            $started = strtotime((string) ($item['sendStartedAt'] ?? ''));
+            if ($started !== false && time() - $started > 600) {
+                $item['status'] = 'scheduled';
+                $item['lastError'] = 'Отправка прервана, повтор по расписанию.';
+                unset($item['sendStartedAt']);
+                docgenSaveQueueItem($item);
             }
         }
-        $mailer->Subject = trim((string) ($meta['subject'] ?? ''));
-        $mailer->Body = (string) ($meta['body'] ?? '');
-        $mailer->addAttachment($pdfPath, safeFilename((string) ($meta['filename'] ?? 'Документ')) . '.pdf', 'base64', 'application/pdf');
-        $mailer->send();
-        $meta['status'] = 'sent';
-        $meta['sentAt'] = date(DATE_ATOM);
-        $meta['lastError'] = '';
-        $meta['reviewedAt'] = date(DATE_ATOM);
-        docgenSaveQueueItem($meta);
-        flock($lock, LOCK_UN);
-        fclose($lock);
-        sendJson(['ok' => true, 'item' => $meta, 'message' => 'Письмо отправлено одному адресату/группе получателей.']);
-    } catch (Throwable $e) {
-        try {
-            $meta = docgenReadQueueItem($id);
-            $meta['status'] = 'failed';
-            $meta['lastError'] = mb_substr($e->getMessage(), 0, 1000, 'UTF-8');
-            $meta['failedAt'] = date(DATE_ATOM);
-            docgenSaveQueueItem($meta);
-        } catch (Throwable $ignored) {
+        $due = [];
+        foreach ($items as $item) {
+            if (($item['status'] ?? '') !== 'scheduled') {
+                continue;
+            }
+            $batch = $batchById[(string) ($item['batchId'] ?? '')] ?? [];
+            if (!in_array(($batch['status'] ?? ''), ['scheduled', 'sending'], true)) {
+                continue;
+            }
+            $due[] = $item;
         }
+        if (!$due) {
+            $result['reason'] = 'no_due';
+            return $result;
+        }
+        usort($due, static fn(array $a, array $b): int => strcmp((string) ($a['createdAt'] ?? ''), (string) ($b['createdAt'] ?? '')));
+        $due = array_slice($due, 0, $limit);
+        $affected = [];
+        foreach ($due as $index => $item) {
+            $target = $lastSendAt + ($index + 1) * (60.0 / $limit);
+            $wait = $target - microtime(true);
+            if ($wait > 0) {
+                if ($wait > 65) {
+                    $result['skipped']++;
+                    continue;
+                }
+                usleep((int) ($wait * 1_000_000));
+            }
+            $batchId = (string) ($item['batchId'] ?? '');
+            $affected[$batchId] = true;
+            $dir = docgenQueuePath((string) $item['id']);
+            $pdfPath = $dir . '/document.pdf';
+            $toText = (string) ($item['to'] ?? '');
+            $ccText = (string) ($item['cc'] ?? '');
+            $to = docgenHasUnparsedEmailText($toText) || docgenHasUnparsedEmailText($ccText) ? [] : docgenEmailAddresses($toText);
+            $cc = docgenHasUnparsedEmailText($ccText) ? [] : docgenEmailAddresses($ccText);
+            if (!$to || !is_file($pdfPath) || filesize($pdfPath) === 0) {
+                $failed = docgenReadQueueItem((string) $item['id']);
+                $failed['status'] = 'failed';
+                $failed['lastError'] = 'Нет корректного получателя или PDF-вложения.';
+                $failed['failedAt'] = date(DATE_ATOM);
+                docgenSaveQueueItem($failed);
+                $result['failed']++;
+            } else {
+                try {
+                    docgenDeliverPreparedItem($item, $dir, $pdfPath, $to, $cc);
+                    $result['sent']++;
+                } catch (Throwable $e) {
+                    $result['failed']++;
+                }
+            }
+            $lastSendAt = microtime(true);
+            docgenWriteJson(DOCGEN_CRON_STATE_FILE, ['lastSendAt' => $lastSendAt, 'updatedAt' => date(DATE_ATOM)]);
+        }
+        foreach (array_keys($affected) as $batchId) {
+            $batch = docgenBatchMeta((string) $batchId);
+            if (!$batch || $batchId === 'legacy') {
+                continue;
+            }
+            $batchItems = docgenBatchItems((string) $batchId);
+            $sent = 0;
+            $failed = 0;
+            $pending = 0;
+            foreach ($batchItems as $batchItem) {
+                $status = (string) ($batchItem['status'] ?? '');
+                if ($status === 'sent') {
+                    $sent++;
+                } elseif ($status === 'failed') {
+                    $failed++;
+                } elseif (in_array($status, ['queued', 'scheduled', 'sending'], true)) {
+                    $pending++;
+                }
+            }
+            $batch['sentCount'] = $sent;
+            $batch['failedCount'] = $failed;
+            $batch['status'] = $pending > 0 ? 'scheduled' : 'done';
+            $batch['updatedAt'] = date(DATE_ATOM);
+            docgenSaveBatch($batch);
+            $result['batches'][] = ['id' => $batchId, 'status' => $batch['status'], 'sent' => $sent, 'failed' => $failed];
+        }
+        if ($result['sent'] === 0 && $result['failed'] === 0 && $result['skipped'] > 0) {
+            $result['reason'] = 'rate_limited';
+        }
+        return $result;
+    } finally {
         flock($lock, LOCK_UN);
         fclose($lock);
-        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
     }
 }
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
-    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'dadata_settings', 'queue', 'queue_file', 'download'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
+    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -1997,6 +2387,10 @@ function docgenDispatch(string $action): void
         case 'letter_template':
             $letter = docgenLetterTemplate();
             sendJson(['ok' => true, 'settings' => $letter, 'accountId' => $letter['smtpAccountId']]);
+        case 'mailing_settings':
+            sendJson(['ok' => true, 'settings' => docgenMailingSettings()]);
+        case 'save_mailing_settings':
+            docgenSaveMailingSettings();
         case 'save_smtp_settings':
             docgenSaveSmtpSettings();
         case 'save_letter_template':
@@ -2024,13 +2418,19 @@ function docgenDispatch(string $action): void
         case 'add_table_section':
             docgenAddTableSection();
         case 'queue':
-            sendJson(['ok' => true, 'items' => docgenQueueList()]);
+            sendJson(['ok' => true, 'items' => docgenQueueList(), 'batches' => docgenBatchList()]);
         case 'queue_file':
             docgenQueueFile();
         case 'update_queue_item':
             docgenUpdateQueueItem();
         case 'send_queue_item':
             docgenSendQueueItem();
+        case 'review_batch':
+            docgenReviewBatch();
+        case 'cancel_batch':
+            docgenCancelBatch();
+        case 'retry_batch':
+            docgenRetryBatch();
         case 'download':
             if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') {
                 sendJson(['ok' => false, 'error' => 'Для скачивания используйте GET.'], 405);

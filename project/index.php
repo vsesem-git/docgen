@@ -487,17 +487,6 @@ function cleanupTree(string $path): void
     @rmdir($path);
 }
 
-function safeFilename(string $value): string
-{
-    $value = preg_replace('/[\\\\\/\:\*\?"<>\|\x00-\x1F]+/u', ' ', $value) ?? '';
-    $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
-    $value = trim($value, ' .-_');
-    if ($value === '') {
-        $value = 'Документ';
-    }
-    return mb_substr($value, 0, 110, 'UTF-8');
-}
-
 function handleSaveRecord(): never
 {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -987,6 +976,8 @@ body.modal-open{overflow:hidden}
 .settings-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px}.settings-actions label{display:flex;align-items:center;gap:5px}.settings-actions input{accent-color:var(--brand)}
 .table-tools-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.table-tool-box{min-width:0;border:1px solid #e1e9f0;border-radius:9px;background:#fbfdff;padding:12px}.table-tool-box h3{font-size:13px;color:#204d76;margin:0 0 10px}.table-tool-box .field{margin:0 0 10px}.table-tool-box input[type=file],.table-tool-box input[type=text],.table-tool-box select{width:100%;min-height:38px;border:1px solid #cbd7e3;border-radius:8px;padding:7px 9px;background:#fff;color:var(--ink);font:inherit;font-size:12px}.table-tool-box input:focus,.table-tool-box select:focus{outline:2px solid rgba(14,79,138,.12);border-color:var(--brand)}.table-tool-box .small-muted{display:block;margin:7px 0 10px}.table-inline-form{display:flex;gap:7px}.table-inline-form input{min-width:0;flex:1}.table-inline-form button{white-space:nowrap}.excel-sheet-preview{border:1px solid #dbe5ed;border-radius:9px;margin:10px 0;padding:11px;background:#fbfdff}.excel-sheet-preview-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}.excel-sheet-preview h3{font-size:13px;margin:0;color:#173b60}.excel-sheet-preview select{max-width:360px;min-height:34px;border:1px solid #cbd7e3;border-radius:7px;padding:5px 8px;background:#fff}.excel-import-counts{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.excel-import-counts span{font-size:10.5px;border-radius:999px;padding:3px 8px;background:#eef2f7;color:#526b82}.excel-import-counts .update{background:#eaf4ff;color:#165786}.excel-import-counts .insert{background:#e7f6ef;color:#0f7b4f}.excel-import-counts .skip{background:#fff4e0;color:#8b5b00}.excel-sheet-preview .excel-headers{font-size:11px;color:#647b91;margin:5px 0;overflow-wrap:anywhere}.excel-sample-wrap{overflow:auto;max-height:180px}.excel-sample{border-collapse:collapse;font-size:10.5px;min-width:100%;background:#fff}.excel-sample th,.excel-sample td{border:1px solid #dfe7ee;padding:4px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}.excel-sample th{background:#eff5fa;color:#355a7a}.excel-clear-empty{display:flex;gap:7px;align-items:flex-start;margin-top:12px;line-height:1.45}.excel-clear-empty input{accent-color:var(--brand);margin-top:2px}
 .queue-section{padding:15px 16px 17px}.queue-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}.queue-head h2{font-size:16px;margin:0 0 3px;color:#173b60}.queue-head p{font-size:12px;color:var(--muted);margin:0;max-width:820px}.queue-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.queue-list{display:grid;gap:9px}.queue-empty{padding:28px 15px;text-align:center;color:var(--muted);border:1px dashed #cbd7e3;border-radius:9px;background:#fbfdff}
+.batch-review{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.batch-review>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650;color:#173b60}.batch-review-body{padding:11px 13px;border-top:1px solid var(--line)}
+.batch-review-item{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:7px 9px;border:1px solid #e3ebf4;border-radius:7px;margin-bottom:6px;font-size:12.5px}.batch-review-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .queue-item{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 14px;align-items:center}.queue-item:hover{border-color:#b4c8db}.queue-item-main{min-width:0}.queue-item-title{font-weight:750;color:#173b60;overflow-wrap:anywhere}.queue-item-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}.queue-item-address{font-size:11.5px;margin-top:5px;overflow-wrap:anywhere}.queue-item-error{color:var(--bad);font-size:11.5px;margin-top:4px}.queue-item-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}.status-label{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:10.5px;font-weight:750;background:#eef2f7;color:#586d82;white-space:nowrap}.status-label.queued{background:var(--warn-bg);color:#8b5b00}.status-label.sent{background:var(--ok-bg);color:var(--ok)}.status-label.failed,.status-label.sending{background:var(--bad-bg);color:var(--bad)}
 .queue-modal{width:min(1180px,100%)}.queue-review-main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);gap:12px 16px}.queue-preview-toolbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap}.pdf-preview-frame{grid-column:1;grid-row:2/4;width:100%;height:56vh;min-height:390px;border:1px solid var(--line);border-radius:8px;background:#eaf0f5}.queue-edit-grid{grid-column:2;grid-row:2;display:grid;grid-template-columns:1fr;gap:10px;align-content:start}.queue-edit-grid .span2{grid-column:1/-1}.queue-edit-grid textarea,.queue-edit-grid input{width:100%;border:1px solid #cbd7e3;border-radius:7px;padding:8px;font:inherit;font-size:12.5px}.review-confirm{grid-column:2;grid-row:3;border:1px solid #c9d9ea;border-radius:8px;background:#f8fbff;padding:10px;font-size:12px}.review-confirm label{display:flex;gap:7px;align-items:flex-start;font-weight:700;color:#284761}.review-confirm input{margin:2px 0 0;accent-color:var(--brand)}.review-confirm .small-muted{display:block;margin:5px 0 0 22px}
 .html-editor-modal{width:min(1280px,100%)}.html-editor-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px}.editor-label{display:block;font-size:12px;font-weight:750;color:#31516d;margin:0 0 6px}.editor-name{margin-bottom:12px}.html-code-editor{display:block;width:100%;height:50vh;min-height:340px;resize:vertical;border:1px solid #cbd7e3;border-radius:8px;padding:11px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#173b60;background:#fbfdff;tab-size:2}.html-code-editor:focus{outline:2px solid rgba(14,79,138,.13);border-color:var(--brand)}.preview-column{display:flex;flex-direction:column;min-height:390px}.preview-column iframe{flex:1;width:100%;min-height:340px;border:1px solid var(--line);border-radius:8px;background:#fff}
@@ -1019,7 +1010,7 @@ body.modal-open{overflow:hidden}
   </div>
 </header>
 <main>
-  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В очереди откройте предпросмотр PDF, проверьте получателя, копию, тему и текст. Нажмите отправку только для проверенного письма; автоматической массовой отправки нет.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
+  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <a href="queue.php">менеджере очереди</a>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
 
   <section class="top-grid">
     <div class="card">
@@ -1169,7 +1160,7 @@ body.modal-open{overflow:hidden}
     </div>
   </section>
   <section class="queue-section" id="emailQueue">
-    <div class="queue-head"><div><h2>Очередь писем</h2><p>Каждая запись — отдельное письмо с PDF-вложением. Дополнительные/старые адреса из базы добавлены в CC; проверьте адреса перед отправкой.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
+    <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Откройте аккордеон, проверьте письма и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <a href="queue.php">менеджере очереди</a>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><a class="btn-ghost btn-small" href="queue.php">Менеджер очереди</a><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
     <div id="queueList" class="queue-list"><div class="empty-state">Загружаем очередь…</div></div>
   </section>
 </main>
@@ -1248,7 +1239,7 @@ body.modal-open{overflow:hidden}
     <div class="modal-actions"><span class="small-muted" id="queueActionFeedback">Письмо ещё не отправлено.</span><div class="right"><button type="button" class="btn-ghost" id="queueModalCancel">Закрыть</button><button type="button" class="btn-ghost" id="saveQueueItemBtn">Сохранить правки</button><button type="button" class="btn-primary" id="sendQueueItemBtn" disabled>Отправить это письмо</button></div></div>
   </section>
 </div>
-<footer class="footer">Локальное тестовое приложение · XLSX, PHPWord, Morphos, PHPMailer и LibreOffice · письма формируются в очередь и отправляются вручную по одному.</footer>
+<footer class="footer">Локальное тестовое приложение · XLSX, PHPWord, Morphos, PHPMailer и LibreOffice · письма проверяются пачками; отправка по умолчанию ручная, авто — только после явного разрешения.</footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 'use strict';
@@ -1263,6 +1254,7 @@ let templateFile = null;
 let templateLibrary = [];
 let editingHtmlTemplateId = '';
 let queueItems = [];
+let reviewBatches = [];
 let activeQueueItemId = '';
 let smtpPasswordConfigured = false;
 let smtpAccounts = [];
@@ -1983,28 +1975,48 @@ async function generate() {
   }
 }
 function queueStatus(status) {
-  const map={queued:['В очереди','queued'],sent:['Отправлено','sent'],failed:['Ошибка / не отправлено','failed'],sending:['Отправка прервана или неясна','sending']};
+  const map={queued:['В ручной очереди','queued'],scheduled:['В расписании','scheduled'],sent:['Отправлено','sent'],failed:['Ошибка / не отправлено','failed'],sending:['Отправка прервана или неясна','sending'],cancelled:['Отменено','cancelled']};
   return map[status]||['Статус неизвестен',''];
 }
 function renderQueue() {
   const list=$('queueList');
-  if(!queueItems.length){list.innerHTML='<div class="queue-empty">Очередь пуста. Сформируйте документы для выбранных адресатов, чтобы добавить PDF к проверке.</div>';return;}
-  list.innerHTML=queueItems.map(item=>{
-    const [label,css]=queueStatus(item.status);
-    const error=item.lastError?`<div class="queue-item-error">${esc(item.lastError)}</div>`:'';
-    const cc=item.cc?`<div class="queue-item-address"><b>CC:</b> ${esc(item.cc)}</div>`:'';
-    return `<article class="queue-item"><div class="queue-item-main"><div class="queue-item-title">${esc(item.region||'Без региона')} · ${esc(item.recipientName||item.recordId||'Адресат')} <span class="status-label ${css}">${label}</span></div><div class="queue-item-sub">Шаблон: ${esc(item.templateName||'—')} · ящик: ${esc(item.smtpAccountLabel||'основной')} · создано: ${esc(item.createdAt||'')}</div><div class="queue-item-address"><b>Кому:</b> ${esc(item.to||'не указан')}</div>${cc}${error}</div><div class="queue-item-actions"><button type="button" class="btn-primary btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div></article>`;
+  if(!reviewBatches.length){list.innerHTML='<div class="queue-empty">Пачек на ручную проверку нет. Сформируйте документы для выбранных адресатов — новая пачка появится здесь.</div>';return;}
+  list.innerHTML=reviewBatches.map(batch=>{
+    const rows=queueItems.filter(item=>batch.id==='legacy'?!item.batchId:item.batchId===batch.id);
+    const items=rows.map(item=>{
+      const [statusLabel,css]=queueStatus(item.status);
+      return `<div class="batch-review-item"><span class="status-label ${css}">${statusLabel}</span><b>${esc(item.recipientName||item.recordId||'Адресат')}</b><span class="small-muted">${esc(item.to||'получатель не указан')}</span><span class="small-muted">${esc(item.subject||'')}</span><button type="button" class="btn-ghost btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div>`;
+    }).join('');
+    return `<details class="batch-review"><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')}</summary><div class="batch-review-body"><div class="small-muted">Создано: ${esc(batch.createdAt||'')} · ящик: ${esc(batch.smtpAccountLabel||'основной')} · писем в пачке: ${rows.length}</div><div style="margin-top:9px">${items||'<span class="small-muted">Писем нет.</span>'}</div><div class="batch-review-actions"><label><input type="checkbox" data-batch-confirm="${esc(batch.id)}"> Я проверил(а) все письма пачки</label><button type="button" class="btn-ghost btn-small" data-batch-mode="manual" data-batch-id="${esc(batch.id)}">Поставить в ручную очередь</button><button type="button" class="btn-primary btn-small" data-batch-mode="auto" data-batch-id="${esc(batch.id)}">В расписание (автоотправка)</button><span class="small-muted" data-batch-feedback="${esc(batch.id)}">Автоотправка — только после явного выбора; по умолчанию письма остаются на ручной отправке.</span></div></div></details>`;
   }).join('');
   list.querySelectorAll('[data-queue-open]').forEach(button=>button.addEventListener('click',()=>openQueueItem(button.dataset.queueOpen)));
+  list.querySelectorAll('[data-batch-mode]').forEach(button=>button.addEventListener('click',()=>reviewBatch(button.dataset.batchId,button.dataset.batchMode)));
+}
+async function reviewBatch(batchId, mode) {
+  const confirm=$('queueList').querySelector(`[data-batch-confirm="${CSS.escape(batchId)}"]`);
+  const feedback=$('queueList').querySelector(`[data-batch-feedback="${CSS.escape(batchId)}"]`);
+  if(!confirm?.checked){if(feedback)feedback.textContent='Сначала отметьте, что проверили все письма пачки.';showToast('Подтвердите проверку пачки.','error');return;}
+  if(mode==='auto'&&!window.confirm('Разрешить автоматическую отправку этой пачки по расписанию? Письма уйдут без дополнительного подтверждения.'))return;
+  if(feedback)feedback.textContent='Передаём пачку…';
+  const fd=new FormData();fd.append('batch_id',batchId);fd.append('mode',mode);fd.append('confirmed','1');
+  try {
+    const payload=await requestJson('?action=review_batch',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+    showToast(mode==='auto'?'Пачка поставлена в расписание.':'Пачка передана в ручную очередь.','success');
+    await refreshQueue();
+  } catch(e) {
+    if(feedback)feedback.textContent=e.message||'Не удалось передать пачку.';
+    showToast(e.message||'Не удалось передать пачку.','error');
+  }
 }
 async function refreshQueue() {
   const response=await fetch('?action=queue',{cache:'no-store'});
   const payload=await response.json();
   if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось загрузить очередь.');
   queueItems=payload.items||[];
-  const pending=queueItems.filter(item=>item.status!=='sent').length;
-  $('queueCount').textContent=`${queueItems.length} писем · ${pending} не отправлено`;
-  $('queueCount').className='pill '+(pending?'warn':'ok');
+  reviewBatches=(payload.batches||[]).filter(batch=>batch.status==='review');
+  const letters=reviewBatches.reduce((sum,batch)=>sum+Number(batch.itemCount||0),0);
+  $('queueCount').textContent=`${reviewBatches.length} пачек на проверку · ${letters} писем`;
+  $('queueCount').className='pill '+(reviewBatches.length?'warn':'ok');
   renderQueue();
 }
 function currentQueueItem() { return queueItems.find(item=>item.id===activeQueueItemId)||null; }
@@ -2344,6 +2356,8 @@ async function init() {
     try { await loadLetterTemplate(); } catch(e) { $('letterFeedback').textContent=e.message||'Не удалось загрузить шаблон письма.'; }
     try { await loadDadataSettings(); } catch(e) { $('dadataFeedback').textContent=e.message||'Не удалось загрузить настройки DaData.'; }
     try { await refreshQueue(); } catch(e) { $('queueCount').textContent='Ошибка загрузки'; }
+    const reviewId=new URLSearchParams(location.search).get('review');
+    if(reviewId&&queueItems.some(item=>item.id===reviewId))openQueueItem(reviewId);
     updateMapping(); renderTable();
   } catch(e) {
     $('dbBadge').className='pill bad'; $('dbBadge').textContent='Ошибка данных';
