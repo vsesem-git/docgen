@@ -1561,6 +1561,9 @@ function docgenTestSmtp(): never
         }
         $detail = trim((string) $mailer->ErrorInfo);
         $hint = ' Проверьте адрес и порт из контейнера: для порта 587 выбирайте STARTTLS, для 465 — SSL/TLS; провайдер также может блокировать исходящий SMTP-порт.';
+        if (stripos($detail, 'subjectAltName') !== false || stripos($detail, 'certificate') !== false) {
+            $hint .= ' Сертификат выдан на другое имя: укажите в поле SMTP-сервер каноническое имя из сертификата вместо алиаса.';
+        }
         sendJson(['ok' => false, 'error' => 'Не удалось подключиться к SMTP-серверу.' . ($detail !== '' ? ' ' . mb_substr($detail, 0, 400, 'UTF-8') : '') . $hint], 502);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => 'Проверка SMTP не прошла: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
