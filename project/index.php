@@ -1084,6 +1084,7 @@ body.modal-open{overflow:hidden}
 
   <section class="toolbar">
     <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
+    <label class="small-muted" for="smtpAccountForRun">Ящик для отправки</label><select id="smtpAccountForRun" aria-label="Ящик для отправки"></select>
     <button class="btn-ghost" id="checkManagersBtn" type="button" disabled>Сверить руководителей по ИНН</button>
     <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
     <button class="btn-ghost" id="clearSelectionBtn" type="button">Снять выбор</button>
@@ -1100,6 +1101,9 @@ body.modal-open{overflow:hidden}
       <div class="settings-body">
         <div class="notice" style="margin:0 0 14px"><span>🔒</span><div>Пароль сохраняется вне web-root в приватном каталоге приложения. После сохранения он не отображается; пустое поле пароля оставляет прежний секрет без изменений. Для порта 465 нужно шифрование SSL/TLS, для 587 — STARTTLS; при смене порта шифрование подставится автоматически.</div></div>
         <div class="settings-grid">
+          <div class="field"><label for="smtpAccountSelect">SMTP-ящик</label><select id="smtpAccountSelect"></select></div>
+          <div class="field"><label for="smtpAccountLabel">Название ящика</label><input id="smtpAccountLabel" type="text" placeholder="Например, Basic для писем" autocomplete="off"></div>
+          <div class="field span2"><div class="settings-actions" style="margin:0"><button class="btn-ghost btn-small" id="addSmtpAccountBtn" type="button">+ Добавить ящик</button><button class="btn-ghost btn-small" id="deleteSmtpAccountBtn" type="button">Удалить выбранный</button><span class="small-muted" id="smtpAccountsHint">При формировании очереди можно выбрать, из какого ящика отправлять письма.</span></div></div>
           <div class="field"><label for="smtpHost">SMTP-сервер</label><input id="smtpHost" type="text" placeholder="smtp.example.org" autocomplete="off"></div>
           <div class="field"><label for="smtpPort">Порт</label><input id="smtpPort" type="number" min="1" max="65535" value="587"></div>
           <div class="field"><label for="smtpEncryption">Шифрование</label><select id="smtpEncryption"><option value="tls">STARTTLS</option><option value="ssl">SSL/TLS</option><option value="none">Без шифрования</option></select></div>
@@ -1240,6 +1244,8 @@ let editingHtmlTemplateId = '';
 let queueItems = [];
 let activeQueueItemId = '';
 let smtpPasswordConfigured = false;
+let smtpAccounts = [];
+let smtpAccountId = '';
 let dadataConfigured = false;
 let managerChecks = {};
 let managerCheckRunning = false;
@@ -1431,7 +1437,7 @@ function renderManagerCheckDetail(record) {
   let checkedAt=String(check.checkedAt||'');
   if(checkedAt){const date=new Date(checkedAt);if(!Number.isNaN(date.getTime()))checkedAt=date.toLocaleString('ru-RU');}
   target.className=`manager-check-detail ${statusClass}`;
-  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div></div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
+  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div>${check.organizationFullName?`<div class="manager-check-value"><b>Полное наименование из ЕГРЮЛ · подсказка</b>${esc(check.organizationFullName)} <button type="button" class="auto-button btn-small" data-apply-full-name="${esc(check.organizationFullName)}">Подставить в карточку</button><span class="small-muted" style="display:block;margin-top:4px">Это юридическое название, а не обращение в дательном падеже; проверьте и отредактируйте вручную.</span></div>`:''}</div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
 }
 function modalFieldLabel(name) {
   const labels={
@@ -1919,6 +1925,7 @@ async function generate() {
   const fd=new FormData();
   fd.append('selected_ids',JSON.stringify(ids));
   fd.append('overrides',JSON.stringify(overrides));
+  fd.append('smtp_account_id',$('smtpAccountForRun').value||smtpAccountId||'default');
   if (templateMode==='upload' && templateFile) fd.append('template',templateFile);
   else fd.append('template_id',templateId);
   const btn=$('generateBtn'), oldText=btn.textContent;
@@ -1953,7 +1960,7 @@ function renderQueue() {
     const [label,css]=queueStatus(item.status);
     const error=item.lastError?`<div class="queue-item-error">${esc(item.lastError)}</div>`:'';
     const cc=item.cc?`<div class="queue-item-address"><b>CC:</b> ${esc(item.cc)}</div>`:'';
-    return `<article class="queue-item"><div class="queue-item-main"><div class="queue-item-title">${esc(item.region||'Без региона')} · ${esc(item.recipientName||item.recordId||'Адресат')} <span class="status-label ${css}">${label}</span></div><div class="queue-item-sub">Шаблон: ${esc(item.templateName||'—')} · создано: ${esc(item.createdAt||'')}</div><div class="queue-item-address"><b>Кому:</b> ${esc(item.to||'не указан')}</div>${cc}${error}</div><div class="queue-item-actions"><button type="button" class="btn-primary btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div></article>`;
+    return `<article class="queue-item"><div class="queue-item-main"><div class="queue-item-title">${esc(item.region||'Без региона')} · ${esc(item.recipientName||item.recordId||'Адресат')} <span class="status-label ${css}">${label}</span></div><div class="queue-item-sub">Шаблон: ${esc(item.templateName||'—')} · ящик: ${esc(item.smtpAccountLabel||'основной')} · создано: ${esc(item.createdAt||'')}</div><div class="queue-item-address"><b>Кому:</b> ${esc(item.to||'не указан')}</div>${cc}${error}</div><div class="queue-item-actions"><button type="button" class="btn-primary btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div></article>`;
   }).join('');
   list.querySelectorAll('[data-queue-open]').forEach(button=>button.addEventListener('click',()=>openQueueItem(button.dataset.queueOpen)));
 }
@@ -1981,7 +1988,7 @@ function openQueueItem(id) {
   activeQueueItemId=id;
   $('queueItemLabel').textContent=[item.region,item.recipientName,item.recordId].filter(Boolean).join(' · ');
   $('queueTo').value=item.to||'';$('queueCc').value=item.cc||'';$('queueSubject').value=item.subject||'';$('queueBody').value=item.body||'';
-  $('queueEmailSource').textContent=`Исходные поля книги — основной: ${item.sourcePrimaryEmail||'пусто'}; доп./старые: ${item.sourceAdditionalEmails||'пусто'}. Проверьте пометки об устаревших адресах.`;
+  $('queueEmailSource').textContent=`Исходные поля книги — основной: ${item.sourcePrimaryEmail||'пусто'}; доп./старые: ${item.sourceAdditionalEmails||'пусто'}. Проверьте пометки об устаревших адресах. Отправка из ящика: ${item.smtpAccountLabel||'основной'}.`;
   $('queuePdfFrame').src=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf&inline=1`;
   $('queuePdfDownload').href=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf`;
   $('queueDocxDownload').hidden=!item.hasDocx;
@@ -2029,19 +2036,53 @@ function updateSmtpState() {
   $('smtpState').textContent=ready?'Параметры заполнены':'Не настроено';
   $('smtpState').className='settings-state '+(ready?'ok':'bad');
 }
-async function loadSmtpSettings() {
-  const response=await fetch('?action=smtp_settings',{cache:'no-store'});
-  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать SMTP-настройки.');
-  const s=payload.settings||{};
-  $('smtpHost').value=s.host||'';$('smtpPort').value=s.port||587;$('smtpEncryption').value=s.encryption||'tls';$('smtpUsername').value=s.username||'';
-  $('smtpFromEmail').value=s.fromEmail||'';$('smtpFromName').value=s.fromName||'';$('smtpReplyTo').value=s.replyTo||'';
-  $('smtpSubject').value=s.subjectTemplate||'Документ';$('smtpBody').value=s.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
-  smtpPasswordConfigured=Boolean(payload.passwordConfigured);
+function renderSmtpAccountOptions(payload, selectedId) {
+  smtpAccounts=Array.isArray(payload.accounts)?payload.accounts:[];
+  const options=smtpAccounts.map(a=>`<option value="${esc(a.id)}">${esc(a.label||a.fromEmail||'Ящик')}</option>`).join('');
+  $('smtpAccountSelect').innerHTML=options;
+  $('smtpAccountForRun').innerHTML=options;
+  smtpAccountId=selectedId||payload.accountId||(smtpAccounts[0]?.id||'');
+  $('smtpAccountSelect').value=smtpAccountId;
+  $('smtpAccountForRun').value=smtpAccounts.some(a=>a.id===smtpAccountId)?smtpAccountId:(smtpAccounts[0]?.id||'');
+  $('deleteSmtpAccountBtn').disabled=smtpAccounts.length<=1;
+  $('smtpAccountsHint').textContent=smtpAccounts.length>1
+    ? `Ящиков: ${smtpAccounts.length}. При формировании очереди выберите нужный в панели инструментов.`
+    : 'При формировании очереди можно выбрать, из какого ящика отправлять письма.';
+}
+function applySmtpAccountToForm(id) {
+  const account=smtpAccounts.find(a=>a.id===id)||smtpAccounts[0];
+  if(!account)return;
+  smtpAccountId=account.id;
+  $('smtpAccountLabel').value=account.label||'';
+  $('smtpHost').value=account.host||'';$('smtpPort').value=account.port||587;$('smtpEncryption').value=account.encryption||'tls';$('smtpUsername').value=account.username||'';
+  $('smtpFromEmail').value=account.fromEmail||'';$('smtpFromName').value=account.fromName||'';$('smtpReplyTo').value=account.replyTo||'';
+  $('smtpSubject').value=account.subjectTemplate||'Документ';$('smtpBody').value=account.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
+  smtpPasswordConfigured=Boolean(account.passwordConfigured);
   $('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
   updateSmtpState();
 }
+function applySmtpPayload(payload, selectedId) {
+  renderSmtpAccountOptions(payload,selectedId);
+  applySmtpAccountToForm(smtpAccountId);
+  if(payload.settings&&!smtpAccounts.length){
+    const s=payload.settings;
+    $('smtpHost').value=s.host||'';$('smtpPort').value=s.port||587;$('smtpEncryption').value=s.encryption||'tls';$('smtpUsername').value=s.username||'';
+    $('smtpFromEmail').value=s.fromEmail||'';$('smtpFromName').value=s.fromName||'';$('smtpReplyTo').value=s.replyTo||'';
+    $('smtpSubject').value=s.subjectTemplate||'Документ';$('smtpBody').value=s.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
+    smtpPasswordConfigured=Boolean(payload.passwordConfigured);
+    $('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
+    updateSmtpState();
+  }
+}
+async function loadSmtpSettings() {
+  const response=await fetch('?action=smtp_settings',{cache:'no-store'});
+  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать SMTP-настройки.');
+  applySmtpPayload(payload,payload.accountId);
+}
 function smtpFormData(includeTemplates) {
   const fd=new FormData();
+  fd.append('account_id',smtpAccountId||'default');
+  if(includeTemplates)fd.append('label',$('smtpAccountLabel').value.trim());
   const fields={host:'smtpHost',port:'smtpPort',encryption:'smtpEncryption',username:'smtpUsername',fromEmail:'smtpFromEmail',fromName:'smtpFromName',replyTo:'smtpReplyTo'};
   if(includeTemplates){fields.subjectTemplate='smtpSubject';fields.bodyTemplate='smtpBody';}
   for(const [key,id] of Object.entries(fields))fd.append(key,$(id).value);
@@ -2056,10 +2097,30 @@ async function saveSmtpSettings() {
   $('smtpFeedback').textContent='Сохраняем настройки…';
   try {
     const payload=await requestJson('?action=save_smtp_settings',{method:'POST',headers:csrfHeaders(),body:smtpFormData(true)},15000);
-    smtpPasswordConfigured=Boolean(payload.passwordConfigured);$('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
-    $('smtpFeedback').textContent='Настройки сохранены в приватном хранилище.';updateSmtpState();showToast('SMTP-настройки сохранены. Пароль скрыт.','success');
+    applySmtpPayload(payload,payload.accountId||smtpAccountId);
+    $('smtpFeedback').textContent='Настройки ящика сохранены в приватном хранилище.';showToast('SMTP-настройки сохранены. Пароль скрыт.','success');
   } catch(e) {$('smtpFeedback').textContent=e.message||'Ошибка сохранения.';showToast(e.message||'Ошибка сохранения SMTP-настроек.','error');}
   finally {button.disabled=false;button.textContent='Сохранить настройки';}
+}
+async function addSmtpAccount() {
+  try {
+    const payload=await requestJson('?action=add_smtp_account',{method:'POST',headers:csrfHeaders(),body:new FormData()},15000);
+    applySmtpPayload(payload,payload.accountId);
+    $('smtpFeedback').textContent='Добавлен новый SMTP-ящик. Заполните параметры и сохраните.';
+    $('smtpDetails').open=true;$('smtpHost').focus();
+    showToast('Новый SMTP-ящик добавлен.','success');
+  } catch(e) {$('smtpFeedback').textContent=e.message||'Не удалось добавить ящик.';showToast(e.message||'Не удалось добавить SMTP-ящик.','error');}
+}
+async function deleteSmtpAccount() {
+  if(smtpAccounts.length<=1){showToast('Нельзя удалить единственный SMTP-ящик.','error');return;}
+  const current=smtpAccounts.find(a=>a.id===smtpAccountId);
+  if(!window.confirm(`Удалить SMTP-ящик «${current?.label||smtpAccountId}»? Сохранённый пароль будет удалён.`))return;
+  const fd=new FormData();fd.append('account_id',smtpAccountId);
+  try {
+    const payload=await requestJson('?action=delete_smtp_account',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+    applySmtpPayload(payload,payload.accountId);
+    $('smtpFeedback').textContent='SMTP-ящик удалён.';showToast('SMTP-ящик удалён.','success');
+  } catch(e) {$('smtpFeedback').textContent=e.message||'Не удалось удалить ящик.';showToast(e.message||'Не удалось удалить SMTP-ящик.','error');}
 }
 async function testSmtp() {
   const button=$('testSmtpBtn');
@@ -2224,6 +2285,15 @@ $('addTableColumnBtn').addEventListener('click',addTableColumn);
 $('addTableSectionBtn').addEventListener('click',addTableSection);
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
+$('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);
+$('deleteSmtpAccountBtn').addEventListener('click',deleteSmtpAccount);
+$('smtpAccountSelect').addEventListener('change',()=>applySmtpAccountToForm($('smtpAccountSelect').value));
+$('managerCheckDetail').addEventListener('click',event=>{
+  const button=event.target.closest('[data-apply-full-name]');
+  if(!button)return;
+  setModalField('Полное наименование',button.dataset.applyFullName);
+  showToast('Подсказка из ЕГРЮЛ подставлена. Проверьте значение и сохраните карточку.','success');
+});
 ['smtpHost','smtpFromEmail'].forEach(id=>$(id).addEventListener('input',updateSmtpState));
 $('smtpPort').addEventListener('change',()=>{
   const port=$('smtpPort').value.trim();

@@ -10,6 +10,9 @@ define('DOCGEN_SETTINGS_DIR', DOCGEN_STORAGE_DIR . '/config');
 define('DOCGEN_SECRETS_DIR', DOCGEN_STORAGE_DIR . '/secrets');
 define('DOCGEN_SMTP_SETTINGS_FILE', DOCGEN_SETTINGS_DIR . '/smtp.json');
 define('DOCGEN_SMTP_SECRET_FILE', DOCGEN_SECRETS_DIR . '/smtp-secret.json');
+define('DOCGEN_SMTP_ACCOUNTS_FILE', DOCGEN_SETTINGS_DIR . '/smtp-accounts.json');
+define('DOCGEN_SMTP_ACCOUNT_SECRETS_FILE', DOCGEN_SECRETS_DIR . '/smtp-account-secrets.json');
+define('DOCGEN_SMTP_MAX_ACCOUNTS', 20);
 define('DOCGEN_DADATA_SECRET_FILE', DOCGEN_SECRETS_DIR . '/dadata-api-key.json');
 define('DOCGEN_MANAGER_CHECKS_FILE', DOCGEN_STORAGE_DIR . '/manager_checks.json');
 define('DOCGEN_TABLE_DATA_FILE', DOCGEN_STORAGE_DIR . '/table_data.json');
@@ -393,9 +396,17 @@ function docgenSmtpSecret(): array
 
 function docgenSmtpPublicPayload(): array
 {
-    $settings = docgenSmtpSettings();
+    $store = docgenSmtpAccountStore();
+    $account = docgenSmtpAccount($store['defaultId']);
+    $settings = $account;
+    $publicAccounts = [];
+    foreach ($store['accounts'] as $item) {
+        $publicAccounts[] = docgenSmtpAccountPublic($item);
+    }
     return [
         'ok' => true,
+        'accounts' => $publicAccounts,
+        'accountId' => $account['id'],
         'settings' => [
             'host' => (string) $settings['host'],
             'port' => (int) $settings['port'],
@@ -407,9 +418,111 @@ function docgenSmtpPublicPayload(): array
             'subjectTemplate' => (string) $settings['subjectTemplate'],
             'bodyTemplate' => (string) $settings['bodyTemplate'],
         ],
-        'passwordConfigured' => (string) (docgenSmtpSecret()['password'] ?? '') !== '',
-        'passwordMask' => (string) (docgenSmtpSecret()['password'] ?? '') !== '' ? '••••••••' : '',
+        'passwordConfigured' => docgenSmtpAccountSecret($account['id']) !== '',
+        'passwordMask' => docgenSmtpAccountSecret($account['id']) !== '' ? '••••••••' : '',
     ];
+}
+
+/** All SMTP mailboxes. The legacy single settings file becomes the first account. */
+function docgenSmtpAccountStore(): array
+{
+    $stored = docgenReadJson(DOCGEN_SMTP_ACCOUNTS_FILE, []);
+    $raw = $stored['accounts'] ?? null;
+    if (!is_array($raw) || $raw === []) {
+        $raw = [array_merge(docgenSmtpSettings(), ['id' => 'default', 'label' => 'Основной'])];
+    }
+    $accounts = [];
+    foreach ($raw as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $id = trim((string) ($item['id'] ?? ''));
+        if ($id === '' || strlen($id) > 80 || preg_match('/^[A-Za-z0-9_-]+$/', $id) !== 1) {
+            continue;
+        }
+        $label = trim((string) ($item['label'] ?? ''));
+        $accounts[] = array_merge(docgenSmtpDefaults(), $item, [
+            'id' => $id,
+            'label' => $label !== '' ? mb_substr($label, 0, 100, 'UTF-8') : 'Ящик',
+        ]);
+    }
+    if ($accounts === []) {
+        $accounts = [array_merge(docgenSmtpDefaults(), ['id' => 'default', 'label' => 'Основной'])];
+    }
+    $defaultId = trim((string) ($stored['defaultId'] ?? ''));
+    $ids = array_column($accounts, 'id');
+    if (!in_array($defaultId, $ids, true)) {
+        $defaultId = $accounts[0]['id'];
+    }
+    return ['accounts' => $accounts, 'defaultId' => $defaultId];
+}
+
+function docgenSmtpAccount(string $id): array
+{
+    $store = docgenSmtpAccountStore();
+    foreach ($store['accounts'] as $account) {
+        if ($account['id'] === $id) {
+            return $account;
+        }
+    }
+    return $store['accounts'][0];
+}
+
+function docgenSmtpAccountSecret(string $id): string
+{
+    $stored = docgenReadJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, []);
+    $map = $stored['accounts'] ?? [];
+    if (is_array($map) && array_key_exists($id, $map)) {
+        return (string) $map[$id];
+    }
+    return $id === 'default' ? (string) (docgenSmtpSecret()['password'] ?? '') : '';
+}
+
+function docgenSmtpAccountPublic(array $account): array
+{
+    $public = [];
+    foreach (array_keys(docgenSmtpDefaults()) as $key) {
+        $public[$key] = $account[$key];
+    }
+    $public['id'] = $account['id'];
+    $public['label'] = $account['label'];
+    $public['passwordConfigured'] = docgenSmtpAccountSecret($account['id']) !== '';
+    return $public;
+}
+
+function docgenSmtpWriteAccount(array $account, string $password, bool $clearPassword): array
+{
+    $store = docgenSmtpAccountStore();
+    $found = false;
+    foreach ($store['accounts'] as $index => $existing) {
+        if ($existing['id'] === $account['id']) {
+            $store['accounts'][$index] = array_merge($existing, $account);
+            $found = true;
+            break;
+        }
+    }
+    if (!$found) {
+        if (count($store['accounts']) >= DOCGEN_SMTP_MAX_ACCOUNTS) {
+            throw new RuntimeException('Можно добавить не более ' . DOCGEN_SMTP_MAX_ACCOUNTS . ' SMTP-ящиков.');
+        }
+        $store['accounts'][] = $account;
+    }
+    docgenWriteJson(DOCGEN_SMTP_ACCOUNTS_FILE, $store);
+
+    $secrets = docgenReadJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, []);
+    $map = $secrets['accounts'] ?? [];
+    if (!is_array($map)) {
+        $map = [];
+    }
+    if ($clearPassword) {
+        $map[$account['id']] = '';
+    } elseif ($password !== '') {
+        $map[$account['id']] = $password;
+    } elseif (!array_key_exists($account['id'], $map)) {
+        $map[$account['id']] = docgenSmtpAccountSecret($account['id']);
+    }
+    docgenWriteJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, ['accounts' => $map]);
+    return $account;
 }
 
 function docgenDadataSecret(): array
@@ -504,6 +617,7 @@ function docgenManagerCheckBase(string $status, string $message, string $recordI
         'managerName' => '',
         'managerPost' => '',
         'organizationName' => '',
+        'organizationFullName' => '',
         'nameMatch' => null,
         'positionMatch' => null,
         'checkedAt' => date(DATE_ATOM),
@@ -616,6 +730,9 @@ function docgenCompareManager(array $record, string $inn, string $kpp, array $su
     $comparison['managerName'] = $remoteName;
     $comparison['managerPost'] = $remotePost;
     $comparison['organizationName'] = $orgName;
+    // Suggestion only. The operator decides whether to put it into the card;
+    // it is a legal entity name, not the dative addressee used by the template.
+    $comparison['organizationFullName'] = $orgName;
     if ($remoteName === '') {
         $comparison['status'] = 'no_manager';
         $comparison['message'] = 'DaData не вернула ФИО действующего руководителя для этой записи.';
@@ -1109,7 +1226,9 @@ function docgenGenerate(): never
         }
     }
 
-    $settings = docgenSmtpSettings();
+    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
+    $store = docgenSmtpAccountStore();
+    $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
     $queueCreated = 0;
     $downloadedDocuments = 0;
     $archivePath = $jobDir . '/Пакет_документов.zip';
@@ -1155,6 +1274,8 @@ function docgenGenerate(): never
                     'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
                     'position' => (string) ($fields['Должность'] ?? $fields['Должность руководителя'] ?? ''),
                     'templateName' => (string) $template['name'],
+                    'smtpAccountId' => (string) $settings['id'],
+                    'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
                     'filename' => $baseName,
                     'to' => implode('; ', $to),
                     'cc' => implode('; ', $cc),
@@ -1443,9 +1564,86 @@ function docgenSaveSmtpSettings(): never
     } elseif ($newPassword !== '') {
         $secret['password'] = $newPassword;
     }
+    $accountId = trim((string) ($_POST['account_id'] ?? ''));
+    if ($accountId === '') {
+        $accountId = 'default';
+    }
+    if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $accountId) !== 1) {
+        sendJson(['ok' => false, 'error' => 'Некорректный идентификатор SMTP-ящика.'], 422);
+    }
+    $label = trim((string) ($_POST['label'] ?? ''));
+    if (mb_strlen($label, 'UTF-8') > 100) {
+        sendJson(['ok' => false, 'error' => 'Название SMTP-ящика слишком длинное.'], 422);
+    }
+    $account = array_merge($settings, [
+        'id' => $accountId,
+        'label' => $label !== '' ? $label : (docgenSmtpAccount($accountId)['label'] ?? 'Основной'),
+    ]);
     try {
+        // Keep the legacy single-account files in sync for older installations.
         docgenWriteJson(DOCGEN_SMTP_SETTINGS_FILE, $settings);
         docgenWriteJson(DOCGEN_SMTP_SECRET_FILE, ['password' => (string) ($secret['password'] ?? '')]);
+        docgenSmtpWriteAccount($account, $newPassword, !empty($_POST['clear_password']));
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+    $payload = docgenSmtpPublicPayload();
+    $payload['accountId'] = $accountId;
+    sendJson($payload);
+}
+
+/** Create an empty mailbox draft; the operator fills and saves it explicitly. */
+function docgenAddSmtpAccount(): never
+{
+    $store = docgenSmtpAccountStore();
+    if (count($store['accounts']) >= DOCGEN_SMTP_MAX_ACCOUNTS) {
+        sendJson(['ok' => false, 'error' => 'Можно добавить не более ' . DOCGEN_SMTP_MAX_ACCOUNTS . ' SMTP-ящиков.'], 422);
+    }
+    $label = trim((string) ($_POST['label'] ?? ''));
+    if ($label === '') {
+        $label = 'Ящик ' . (count($store['accounts']) + 1);
+    }
+    try {
+        do {
+            $id = 'acc_' . bin2hex(random_bytes(5));
+        } while (in_array($id, array_column($store['accounts'], 'id'), true));
+        $account = array_merge(docgenSmtpDefaults(), ['id' => $id, 'label' => mb_substr($label, 0, 100, 'UTF-8')]);
+        docgenSmtpWriteAccount($account, '', false);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+    $payload = docgenSmtpPublicPayload();
+    $payload['accountId'] = $id;
+    sendJson($payload);
+}
+
+function docgenDeleteSmtpAccount(): never
+{
+    $store = docgenSmtpAccountStore();
+    $id = trim((string) ($_POST['account_id'] ?? ''));
+    if (count($store['accounts']) <= 1) {
+        sendJson(['ok' => false, 'error' => 'Нельзя удалить единственный SMTP-ящик.'], 422);
+    }
+    $remaining = [];
+    foreach ($store['accounts'] as $account) {
+        if ($account['id'] !== $id) {
+            $remaining[] = $account;
+        }
+    }
+    if (count($remaining) === count($store['accounts'])) {
+        sendJson(['ok' => false, 'error' => 'SMTP-ящик не найден.'], 404);
+    }
+    try {
+        docgenWriteJson(DOCGEN_SMTP_ACCOUNTS_FILE, [
+            'accounts' => $remaining,
+            'defaultId' => $store['defaultId'] === $id ? $remaining[0]['id'] : $store['defaultId'],
+        ]);
+        $secrets = docgenReadJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, []);
+        $map = $secrets['accounts'] ?? [];
+        if (is_array($map)) {
+            unset($map[$id]);
+            docgenWriteJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, ['accounts' => $map]);
+        }
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
     }
@@ -1548,8 +1746,13 @@ function docgenTestSmtp(): never
         }
         $override = null;
         $overridePassword = null;
+        $accountId = trim((string) ($_POST['account_id'] ?? ''));
         if (isset($_POST['host'])) {
-            [$override, $overridePassword] = docgenSmtpSettingsFromRequest();
+            [$override, $formPassword] = docgenSmtpSettingsFromRequest();
+            $overridePassword = $formPassword ?? ($accountId !== '' ? docgenSmtpAccountSecret($accountId) : null);
+        } elseif ($accountId !== '') {
+            $override = docgenSmtpAccount($accountId);
+            $overridePassword = docgenSmtpAccountSecret($accountId);
         }
         $mailer = docgenBuildMailer($override, $overridePassword);
         // Bound only this connectivity probe; sending from the queue is unchanged.
@@ -1648,7 +1851,16 @@ function docgenSendQueueItem(): never
         $meta['sendStartedAt'] = date(DATE_ATOM);
         $meta['lastError'] = '';
         docgenSaveQueueItem($meta);
-        $mailer = docgenBuildMailer();
+        $queueAccountId = trim((string) ($meta['smtpAccountId'] ?? ''));
+        if ($queueAccountId !== '') {
+            $queueAccount = docgenSmtpAccount($queueAccountId);
+            if (($queueAccount['id'] ?? '') !== $queueAccountId) {
+                throw new RuntimeException('SMTP-ящик, выбранный при формировании письма, был удалён. Восстановите его или сформируйте очередь заново.');
+            }
+            $mailer = docgenBuildMailer($queueAccount, docgenSmtpAccountSecret($queueAccountId));
+        } else {
+            $mailer = docgenBuildMailer();
+        }
         foreach ($to as $email) {
             $mailer->addAddress($email);
         }
@@ -1687,7 +1899,7 @@ function docgenSendQueueItem(): never
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -1713,6 +1925,10 @@ function docgenDispatch(string $action): void
             sendJson(docgenSmtpPublicPayload());
         case 'save_smtp_settings':
             docgenSaveSmtpSettings();
+        case 'add_smtp_account':
+            docgenAddSmtpAccount();
+        case 'delete_smtp_account':
+            docgenDeleteSmtpAccount();
         case 'test_smtp':
             docgenTestSmtp();
         case 'dadata_settings':
