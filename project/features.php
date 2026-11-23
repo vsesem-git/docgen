@@ -2349,6 +2349,24 @@ function docgenBuildMailer(?array $override = null, ?string $overridePassword = 
         throw new RuntimeException('Заполните SMTP-сервер и корректный email отправителя в настройках.');
     }
     $mailer = new \PHPMailer\PHPMailer\PHPMailer(true);
+    // The X-Mailer header is informational only; it needlessly announces the
+    // library version to every recipient. PHPMailer uses null to omit it.
+    $mailer->XMailer = null;
+    // Use the authenticated From domain for Message-ID instead of the short
+    // container hostname (which otherwise produces IDs like <... @docgen>).
+    $fromDomain = '';
+    $fromAt = strrpos($fromEmail, '@');
+    if ($fromAt !== false) {
+        $fromDomain = strtolower(substr($fromEmail, $fromAt + 1));
+    }
+    if ($fromDomain !== '' && preg_match('/^[a-z0-9][a-z0-9.-]*$/i', $fromDomain) === 1) {
+        try {
+            $nonce = bin2hex(random_bytes(16));
+        } catch (Throwable $e) {
+            $nonce = md5(uniqid('docgen', true));
+        }
+        $mailer->MessageID = '<' . $nonce . '@' . $fromDomain . '>';
+    }
     $mailer->isSMTP();
     $mailer->Host = $host;
     $mailer->Port = (int) ($settings['port'] ?? 587);
