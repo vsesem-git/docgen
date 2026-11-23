@@ -38,12 +38,16 @@ function loadJsonFile(string $path, array $fallback = []): array
 
 function loadDataset(): array
 {
-    return docgenMergeUserTableData(loadJsonFile(DATA_FILE, ['origin' => '', 'sheets' => [], 'records' => []]));
+    // A restored database lives in private storage and takes precedence over
+    // the read-only book shipped with the application.
+    $source = is_file(DOCGEN_DATA_OVERRIDE_FILE) ? DOCGEN_DATA_OVERRIDE_FILE : DATA_FILE;
+    return docgenMergeUserTableData(loadJsonFile($source, ['origin' => '', 'sheets' => [], 'records' => []]));
 }
 
 function loadDemoOverrides(): array
 {
-    return loadJsonFile(DEMO_OVERRIDES_FILE, []);
+    $source = is_file(DOCGEN_DEMO_OVERRIDES_FILE) ? DOCGEN_DEMO_OVERRIDES_FILE : DEMO_OVERRIDES_FILE;
+    return loadJsonFile($source, []);
 }
 
 function loadRecordEdits(): array
@@ -1051,7 +1055,7 @@ tbody tr.manager-position-mismatch td:nth-child(4){background:#fff7e8!important;
 .pager{display:flex;align-items:center;gap:7px}.empty-state{padding:60px 20px;text-align:center;color:var(--muted)}.empty-state .big{font-size:16px;color:var(--ink);font-weight:700;margin-bottom:5px}
 .footer{max-width:1480px;margin:0 auto;padding:0 24px 22px;color:#8091a6;font-size:11.5px}
 .progress-wrap{display:none;align-items:center;gap:10px;background:#edf6ff;border:1px solid #c5ddf4;border-radius:9px;padding:10px 13px;margin:-2px 0 13px;color:#315c82;font-size:12.5px}
-.progress-wrap.show{display:flex}.spinner{width:16px;height:16px;border-radius:50%;border:2px solid #b7d4ef;border-top-color:var(--brand);animation:spin .7s linear infinite}
+.progress-wrap.show{display:flex}.progress-main{display:flex;align-items:center;gap:10px;flex:1}.mini-log{margin-left:auto;max-width:min(620px,55vw);max-height:76px;overflow:auto;border-left:1px solid #b7d4ef;padding-left:11px;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#466783;white-space:pre-wrap}.mini-log:empty{display:none}.spinner{width:16px;height:16px;border-radius:50%;border:2px solid #b7d4ef;border-top-color:var(--brand);animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .toast{position:fixed;right:22px;bottom:22px;z-index:30;max-width:min(520px,calc(100vw - 36px));padding:12px 16px;border-radius:10px;background:#183a58;color:white;box-shadow:0 8px 24px rgba(0,0,0,.22);display:none;font-size:13px}
 .toast.show{display:block}.toast.error{background:#9f2e28}.toast.success{background:#0b7048}
@@ -1207,6 +1211,29 @@ body.modal-open{overflow:hidden}
     </details>
   </section>
 
+  <section class="settings-card" id="backupCard">
+    <details>
+      <summary><strong>Резервная копия: конфигурация и база</strong><span class="settings-state">ZIP · ручное восстановление</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>💾</span><div>Архив содержит книгу адресатов, структуру таблиц, правки карточек, результаты сверки, SMTP/шаблоны писем, лимит рассылки и сохранённые шаблоны. Пароли SMTP и API-ключ DaData включаются только по явной галочке. Пароль администратора и файл <code>app.env</code> не выгружаются. Перед восстановлением автоматически создаётся резервная копия текущего состояния, а замена начинается только после подтверждения в диалоге.</div></div>
+        <div class="table-tools-grid">
+          <section class="table-tool-box">
+            <h3>Выгрузить ZIP</h3>
+            <label class="small-muted"><input type="checkbox" id="backupIncludeSecrets"> Включить секреты (пароли SMTP и API-ключ DaData)</label>
+            <div style="margin-top:9px"><button type="button" class="btn-primary" id="backupExportBtn">Собрать архив</button></div>
+            <div class="small-muted" id="backupExportFeedback" aria-live="polite" style="margin-top:8px"></div>
+          </section>
+          <section class="table-tool-box">
+            <h3>Загрузить ZIP</h3>
+            <div class="field"><label for="backupImportFile">Файл резервной копии .zip</label><input id="backupImportFile" type="file" accept=".zip,application/zip"></div>
+            <button type="button" class="btn-ghost" id="backupPreviewBtn">Проверить архив</button>
+            <div class="small-muted" id="backupImportFeedback" aria-live="polite" style="margin-top:8px"></div>
+          </section>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <section class="mapping-card" id="mappingCard">
     <div class="mapping-head"><span class="step">3</span><strong>Переменные шаблона и сопоставление с данными</strong><span class="small-muted" id="syntaxLabel"></span></div>
     <div class="mapping-body" id="mappingBody"><span class="small-muted">Проверяем пример шаблона…</span></div>
@@ -1242,7 +1269,7 @@ body.modal-open{overflow:hidden}
     <div class="stats" id="statsBar"><span>В выборке <b id="filteredCount">0</b></span><span class="green">Отмечено <b id="selectedCount">0</b></span><span class="small-muted" id="pageSelectionHint"></span></div>
   </section>
 
-  <div class="progress-wrap" id="progressWrap"><span class="spinner"></span><span id="progressText">Формируем PDF и DOCX…</span></div>
+  <div class="progress-wrap" id="progressWrap"><div class="progress-main"><span class="spinner"></span><span id="progressText">Формируем PDF и DOCX…</span></div><div class="mini-log" id="progressLog" aria-live="polite"></div></div>
   <div class="progress-wrap" id="managerCheckProgress"><span class="spinner"></span><span id="managerCheckProgressText">Сверяем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelManagerCheckBtn">Остановить после текущего пакета</button></div>
   <div class="progress-wrap" id="dadataRefreshProgress"><span class="spinner"></span><span id="dadataRefreshProgressText">Загружаем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelDadataRefreshBtn">Остановить после текущего пакета</button></div>
   <div class="download-result" id="downloadResult" hidden></div>
@@ -1369,6 +1396,16 @@ body.modal-open{overflow:hidden}
     </div>
   </section>
 </div>
+<div class="modal-backdrop" id="backupImportModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="backupImportTitle">
+    <div class="modal-head"><div><h2 id="backupImportTitle">Восстановление из ZIP</h2><div class="modal-subtitle" id="backupImportSubtitle"></div></div><button type="button" class="modal-close" id="backupImportClose" aria-label="Закрыть окно восстановления">×</button></div>
+    <div class="modal-main">
+      <div class="notice" style="margin-bottom:14px"><span>⚠️</span><div>Будут заменены перечисленные файлы конфигурации и базы. Текущее состояние будет сохранено в отдельный ZIP перед заменой. Пароль администратора не меняется.</div></div>
+      <div id="backupImportList"></div>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="backupImportModalFeedback">Ничего не меняется до подтверждения.</span><div class="right"><button type="button" class="btn-ghost" id="backupImportCancelBtn">Отмена</button><button type="button" class="btn-primary" id="confirmBackupImportBtn">Восстановить выбранные файлы</button></div></div>
+  </section>
+</div>
 <div class="modal-backdrop" id="htmlTemplateModal" hidden>
   <section class="modal html-editor-modal" role="dialog" aria-modal="true" aria-labelledby="htmlEditorTitle">
     <div class="modal-head"><div><h2 id="htmlEditorTitle">HTML-редактор шаблона</h2><div class="modal-subtitle">Коды полей пишите в фигурных скобках, например {Регион} или {ФИО ДП}. Итог будет сформирован в PDF.</div></div><button type="button" class="modal-close" id="htmlEditorClose" aria-label="Закрыть редактор">×</button></div>
@@ -1445,6 +1482,7 @@ let dadataRefreshData = null;
 let dadataPreviewEdits = null;
 let dadataPreviewNewFields = [];
 let pendingExcelImportId = '';
+let pendingBackupImportId = '';
 let selectedIds = new Set();
 let overrides = {};
 let pageNumber = 1;
@@ -1563,6 +1601,63 @@ async function exportExcel() {
   }catch(error){showToast(error.message||'Ошибка экспорта Excel.','error');}
   finally{button.disabled=false;button.textContent='Скачать книгу XLSX';}
 }
+function formatBackupSize(bytes) {
+  const value=Number(bytes||0);
+  if(value<1024)return `${value} Б`;
+  if(value<1024*1024)return `${(value/1024).toFixed(1)} КБ`;
+  return `${(value/1024/1024).toFixed(1)} МБ`;
+}
+function closeBackupImportModal() {
+  $('backupImportModal').hidden=true;document.body.classList.remove('modal-open');pendingBackupImportId='';
+}
+async function exportConfigBackup() {
+  const button=$('backupExportBtn'),oldText=button.textContent;
+  button.disabled=true;button.textContent='Собираем архив…';
+  const fd=new FormData();if($('backupIncludeSecrets').checked)fd.append('include_secrets','1');
+  try{
+    const response=await fetch('?action=backup_export',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось собрать архив.');
+    $('backupExportFeedback').innerHTML=`Готово: ${payload.fileCount} файлов. <a href="${esc(payload.downloadUrl)}" download="${esc(payload.filename||'docgen-backup.zip')}">Скачать ZIP</a> (ссылка действует 24 часа).`;
+    showToast('Архив конфигурации и базы готов.','success');
+  }catch(e){$('backupExportFeedback').textContent=e.message||'Ошибка выгрузки.';showToast(e.message||'Ошибка выгрузки.','error');}
+  finally{button.disabled=false;button.textContent=oldText;}
+}
+async function previewConfigBackup() {
+  const input=$('backupImportFile'),file=input.files?.[0];
+  if(!file){showToast('Выберите ZIP-файл резервной копии.','error');return;}
+  const button=$('backupPreviewBtn'),oldText=button.textContent;
+  button.disabled=true;button.textContent='Проверяем архив…';
+  const fd=new FormData();fd.append('backup_file',file);
+  try{
+    const response=await fetch('?action=backup_preview',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось проверить архив.');
+    pendingBackupImportId=payload.importId;
+    $('backupImportSubtitle').textContent=`Архив от ${payload.createdAt||'неизвестной даты'} · файлов: ${(payload.entries||[]).length}${payload.includeSecrets?' · с секретами':''}`;
+    $('backupImportList').innerHTML=(payload.entries||[]).map(entry=>`<div class="dadata-preview-change"><b>${esc(entry.label||entry.name)}</b><div class="old">${esc(entry.name)} · ${formatBackupSize(entry.size)}${entry.replace?' · будет заменён':' · будет создан'}</div>${entry.secret?'<div class="new">Секрет: будет восстановлен с правами 0600</div>':''}</div>`).join('')||'<span class="small-muted">В архиве нет файлов для восстановления.</span>';
+    $('backupImportModalFeedback').textContent='Ничего не изменено до подтверждения.';
+    $('backupImportModal').hidden=false;document.body.classList.add('modal-open');
+  }catch(e){$('backupImportFeedback').textContent=e.message||'Ошибка проверки архива.';showToast(e.message||'Ошибка проверки архива.','error');}
+  finally{button.disabled=false;button.textContent=oldText;input.value='';}
+}
+async function confirmConfigBackupImport() {
+  if(!pendingBackupImportId)return;
+  if(!window.confirm('Заменить конфигурацию и базу данными из архива? Перед заменой будет создан ZIP текущего состояния.'))return;
+  const button=$('confirmBackupImportBtn'),oldText=button.textContent;
+  button.disabled=true;button.textContent='Восстанавливаем…';
+  const fd=new FormData();fd.append('import_id',pendingBackupImportId);fd.append('confirm','1');
+  try{
+    const response=await fetch('?action=backup_import',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось восстановить архив.');
+    closeBackupImportModal();
+    $('backupImportFeedback').innerHTML=`Восстановлено файлов: ${payload.restored}. <a href="${esc(payload.safetyDownloadUrl)}" download="${esc(payload.safetyFilename||'backup.zip')}">Резервная копия перед заменой</a>. Обновите страницу.`;
+    showToast('Конфигурация и база восстановлены. Обновите страницу.','success');
+  }catch(e){$('backupImportModalFeedback').textContent=e.message||'Ошибка восстановления.';showToast(e.message||'Ошибка восстановления.','error');}
+  finally{button.disabled=false;button.textContent=oldText;}
+}
+
 async function tableToolPost(action,values) {
   const form=new FormData();Object.entries(values).forEach(([key,value])=>form.append(key,String(value)));
   const response=await fetch(`?action=${action}`,{method:'POST',headers:csrfHeaders(),body:form});
@@ -2126,6 +2221,24 @@ function showDownloadResult(result) {
   const queueLink=document.createElement('a');queueLink.href='#emailQueue';queueLink.textContent='Перейти к очереди';box.append(queueLink);
   box.hidden=false;
 }
+function makeProgressToken() {
+  const bytes=new Uint8Array(16);
+  if(window.crypto?.getRandomValues)window.crypto.getRandomValues(bytes);
+  else for(let i=0;i<bytes.length;i++)bytes[i]=Math.floor(Math.random()*256);
+  return [...bytes].map(value=>value.toString(16).padStart(2,'0')).join('');
+}
+async function pollGenerateProgress(token) {
+  try {
+    const response=await fetch(`?action=generate_progress&token=${encodeURIComponent(token)}`,{cache:'no-store'});
+    const payload=await response.json();
+    const state=payload.progress||{};
+    if(state.message)$('progressText').textContent=state.message;
+    if(Array.isArray(state.lines)&&state.lines.length){
+      const log=$('progressLog');log.textContent=state.lines.slice(-8).join('\n');log.scrollTop=log.scrollHeight;
+    }
+  } catch(e) { /* The mini log is advisory; generation must continue. */ }
+}
+
 async function generate() {
   if (!selectedIds.size) { showToast('Отметьте хотя бы одну запись.','error'); return; }
   const ids=[...selectedIds];
@@ -2136,8 +2249,13 @@ async function generate() {
   if (templateMode==='upload' && templateFile) fd.append('template',templateFile);
   else fd.append('template_id',templateId);
   const btn=$('generateBtn'), oldText=btn.textContent;
+  const progressToken=makeProgressToken();
+  fd.append('progress_token',progressToken);
   btn.disabled=true; btn.textContent='Формируем PDF…'; $('progressWrap').classList.add('show'); $('downloadResult').hidden=true;
+  $('progressLog').textContent='';
   $('progressText').textContent=`Готовим PDF${templateInfo.type==='docx'?' и DOCX':''} для ${ids.length.toLocaleString('ru-RU')} выбранных записей…`;
+  await pollGenerateProgress(progressToken);
+  const progressTimer=setInterval(()=>pollGenerateProgress(progressToken),600);
   try {
     const response=await fetch('?action=generate',{method:'POST',headers:csrfHeaders(),body:fd});
     let payload={};try{payload=await response.json();}catch{}
@@ -2153,6 +2271,7 @@ async function generate() {
   } catch(e) {
     showToast(e.message||'Ошибка формирования.','error');
   } finally {
+    clearInterval(progressTimer);
     $('progressWrap').classList.remove('show'); btn.textContent=oldText; renderTable();
   }
 }
@@ -2779,6 +2898,12 @@ $('excelImportCancel').addEventListener('click',closeExcelImportModal);
 $('excelImportModal').addEventListener('click',event=>{if(event.target===$('excelImportModal'))closeExcelImportModal();});
 $('exportExcelBtn').addEventListener('click',exportExcel);
 $('addTableColumnBtn').addEventListener('click',addTableColumn);
+$('backupExportBtn').addEventListener('click',exportConfigBackup);
+$('backupPreviewBtn').addEventListener('click',previewConfigBackup);
+$('backupImportClose').addEventListener('click',closeBackupImportModal);
+$('backupImportCancelBtn').addEventListener('click',closeBackupImportModal);
+$('confirmBackupImportBtn').addEventListener('click',confirmConfigBackupImport);
+$('backupImportModal').addEventListener('click',event=>{if(event.target===$('backupImportModal'))closeBackupImportModal();});
 $('addTableSectionBtn').addEventListener('click',addTableSection);
 $('saveLetterTemplateBtn').addEventListener('click',saveLetterTemplate);
 $('letterVariableList').addEventListener('click',event=>{
@@ -2814,7 +2939,7 @@ $('smtpEncryption').addEventListener('change',()=>{
   if(encryption==='ssl'&&port==='587')$('smtpPort').value='465';
   if(encryption==='tls'&&port==='465')$('smtpPort').value='587';
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
 $('dropTemplate').addEventListener('click',()=>templateInput.click());
 $('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
 templateInput.addEventListener('change',()=>analyzeUpload(templateInput.files?.[0]));

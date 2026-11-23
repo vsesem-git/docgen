@@ -22,6 +22,11 @@ define('DOCGEN_DADATA_SECRET_FILE', DOCGEN_SECRETS_DIR . '/dadata-api-key.json')
 define('DOCGEN_MANAGER_CHECKS_FILE', DOCGEN_STORAGE_DIR . '/manager_checks.json');
 define('DOCGEN_TABLE_DATA_FILE', DOCGEN_STORAGE_DIR . '/table_data.json');
 define('DOCGEN_EXCEL_IMPORT_DIR', DOCGEN_STORAGE_DIR . '/excel-imports');
+define('DOCGEN_BACKUP_DIR', DOCGEN_STORAGE_DIR . '/backups');
+define('DOCGEN_BACKUP_IMPORT_DIR', DOCGEN_STORAGE_DIR . '/backup-imports');
+define('DOCGEN_PROGRESS_DIR', DOCGEN_STORAGE_DIR . '/progress');
+define('DOCGEN_DATA_OVERRIDE_FILE', DOCGEN_STORAGE_DIR . '/records.json');
+define('DOCGEN_DEMO_OVERRIDES_FILE', DOCGEN_STORAGE_DIR . '/demo_overrides.json');
 define('DOCGEN_DADATA_API_URL', 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party');
 define('DOCGEN_DADATA_BATCH_SIZE', 20);
 define('DOCGEN_TEMPLATE_INDEX', DOCGEN_TEMPLATES_DIR . '/index.json');
@@ -712,6 +717,333 @@ function docgenManagerCheckBase(string $status, string $message, string $recordI
         'positionMatch' => null,
         'checkedAt' => date(DATE_ATOM),
     ];
+}
+
+/** Live progress for a long document-generation run. */
+function docgenProgressPath(string $token): string
+{
+    if (preg_match('/^[a-f0-9]{32}$/', $token) !== 1) {
+        throw new RuntimeException('Некорректный идентификатор прогресса.');
+    }
+    return DOCGEN_PROGRESS_DIR . '/' . $token . '.json';
+}
+
+function docgenProgressClear(string $token): void
+{
+    try {
+        @unlink(docgenProgressPath($token));
+    } catch (Throwable $ignored) {
+    }
+}
+
+function docgenProgressWrite(string $token, string $stage, int $done, int $total, string $message, string $card = ''): void
+{
+    try {
+        docgenEnsureDir(DOCGEN_PROGRESS_DIR);
+        $path = docgenProgressPath($token);
+        $previous = docgenReadJson($path, []);
+        $lines = is_array($previous['lines'] ?? null) ? $previous['lines'] : [];
+        $time = date('H:i:s');
+        $label = $card !== '' ? $message . ' · ' . $card : $message;
+        $lines[] = $time . ' · ' . mb_substr($label, 0, 240, 'UTF-8');
+        $lines = array_slice($lines, -40);
+        docgenWriteJson($path, [
+            'stage' => mb_substr($stage, 0, 120, 'UTF-8'),
+            'done' => $done,
+            'total' => $total,
+            'message' => mb_substr($message, 0, 300, 'UTF-8'),
+            'card' => mb_substr($card, 0, 240, 'UTF-8'),
+            'lines' => $lines,
+            'updatedAt' => date(DATE_ATOM),
+        ]);
+    } catch (Throwable $ignored) {
+        // Progress must never break document generation.
+    }
+}
+
+function docgenCleanupOldProgress(int $ttlSeconds = 86400): void
+{
+    if (!is_dir(DOCGEN_PROGRESS_DIR)) {
+        return;
+    }
+    foreach (glob(DOCGEN_PROGRESS_DIR . '/*.json') ?: [] as $path) {
+        if (filemtime($path) !== false && filemtime($path) + $ttlSeconds < time()) {
+            @unlink($path);
+        }
+    }
+}
+
+function docgenGenerateProgress(): never
+{
+    $token = trim((string) ($_GET['token'] ?? ''));
+    try {
+        $state = docgenReadJson(docgenProgressPath($token), []);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 400);
+    }
+    sendJson(['ok' => true, 'progress' => (object) $state]);
+}
+
+/** Absolute path of the active book: a restored copy wins over the shipped one. */
+function docgenActiveRecordsPath(): string
+{
+    if (is_file(DOCGEN_DATA_OVERRIDE_FILE)) {
+        return DOCGEN_DATA_OVERRIDE_FILE;
+    }
+    if (defined('DATA_FILE')) {
+        return DATA_FILE;
+    }
+    return __DIR__ . '/data/records.json';
+}
+
+/**
+ * Allowlisted files included in a configuration/database backup. Paths inside
+ * the ZIP are stable and never contain absolute or user-supplied locations.
+ */
+function docgenBackupFileMap(bool $includeSecrets): array
+{
+    $files = [
+        'data/records.json' => ['path' => docgenActiveRecordsPath(), 'restore' => DOCGEN_DATA_OVERRIDE_FILE, 'label' => 'Книга адресатов', 'secret' => false],
+        'storage/table_data.json' => ['path' => DOCGEN_TABLE_DATA_FILE, 'label' => 'Структура таблиц и добавленные записи', 'secret' => false],
+        'storage/record_edits.json' => ['path' => RECORD_EDITS_FILE, 'label' => 'Правки карточек', 'secret' => false],
+        'storage/demo_overrides.json' => ['path' => DOCGEN_DEMO_OVERRIDES_FILE, 'label' => 'Демо-переопределения', 'secret' => false],
+        'storage/manager_checks.json' => ['path' => DOCGEN_MANAGER_CHECKS_FILE, 'label' => 'Результаты сверки DaData', 'secret' => false],
+        'config/smtp.json' => ['path' => DOCGEN_SMTP_SETTINGS_FILE, 'label' => 'Настройки SMTP', 'secret' => false],
+        'config/smtp-accounts.json' => ['path' => DOCGEN_SMTP_ACCOUNTS_FILE, 'label' => 'Дополнительные SMTP-ящики', 'secret' => false],
+        'config/letter-template.json' => ['path' => DOCGEN_LETTER_TEMPLATE_FILE, 'label' => 'Шаблон письма', 'secret' => false],
+        'config/mailing.json' => ['path' => DOCGEN_MAILING_SETTINGS_FILE, 'label' => 'Настройки рассылки', 'secret' => false],
+    ];
+    if ($includeSecrets) {
+        $files['secrets/smtp-secret.json'] = ['path' => DOCGEN_SMTP_SECRET_FILE, 'label' => 'Пароль основного SMTP (секрет)', 'secret' => true];
+        $files['secrets/smtp-account-secrets.json'] = ['path' => DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, 'label' => 'Пароли SMTP-ящиков (секреты)', 'secret' => true];
+        $files['secrets/dadata-api-key.json'] = ['path' => DOCGEN_DADATA_SECRET_FILE, 'label' => 'API-ключ DaData (секрет)', 'secret' => true];
+    }
+    $index = is_file(DOCGEN_TEMPLATE_INDEX) ? docgenReadJson(DOCGEN_TEMPLATE_INDEX, []) : [];
+    $files['templates/index.json'] = ['path' => DOCGEN_TEMPLATE_INDEX, 'label' => 'Список шаблонов', 'secret' => false];
+    foreach (is_array($index) ? $index : [] as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $id = (string) ($item['id'] ?? '');
+        $ext = (string) ($item['type'] ?? '') === 'docx' ? 'docx' : ((string) ($item['type'] ?? '') === 'html' ? 'html' : '');
+        if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1 || $ext === '') {
+            continue;
+        }
+        $path = DOCGEN_TEMPLATES_DIR . '/' . $id . '.' . $ext;
+        if (is_file($path)) {
+            $files['templates/' . $id . '.' . $ext] = ['path' => $path, 'label' => 'Шаблон: ' . (string) ($item['name'] ?? $id), 'secret' => false];
+        }
+    }
+    return $files;
+}
+
+function docgenBackupCollect(bool $includeSecrets): array
+{
+    $entries = [];
+    foreach (docgenBackupFileMap($includeSecrets) as $name => $spec) {
+        if (!is_file($spec['path'])) {
+            continue;
+        }
+        $entries[$name] = [
+            'path' => $spec['path'],
+            'label' => $spec['label'],
+            'secret' => (bool) $spec['secret'],
+            'size' => (int) filesize($spec['path']),
+        ];
+    }
+    return $entries;
+}
+
+function docgenWriteBytesAtomic(string $path, string $contents, int $mode = 0600): void
+{
+    $directory = dirname($path);
+    docgenEnsureDir($directory, 0700);
+    $temp = $path . '.' . bin2hex(random_bytes(5)) . '.tmp';
+    if (file_put_contents($temp, $contents, LOCK_EX) === false) {
+        @unlink($temp);
+        throw new RuntimeException('Не удалось записать файл резервной копии.');
+    }
+    if (!rename($temp, $path)) {
+        @unlink($temp);
+        throw new RuntimeException('Не удалось завершить запись файла резервной копии.');
+    }
+    @chmod($path, $mode);
+}
+
+function docgenBuildBackupZip(bool $includeSecrets): array
+{
+    docgenEnsureDir(DOCGEN_BACKUP_DIR);
+    $zipPath = DOCGEN_BACKUP_DIR . '/docgen-backup-' . date('Ymd_His') . '-' . bin2hex(random_bytes(3)) . '.zip';
+    $zip = new ZipArchive();
+    if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        throw new RuntimeException('Не удалось создать ZIP архив резервной копии.');
+    }
+    $entries = docgenBackupCollect($includeSecrets);
+    $manifest = [
+        'format' => 'docgen-config-db',
+        'version' => 1,
+        'createdAt' => date(DATE_ATOM),
+        'includeSecrets' => $includeSecrets,
+        'files' => [],
+    ];
+    foreach ($entries as $name => $entry) {
+        $zip->addFile($entry['path'], $name);
+        $manifest['files'][$name] = ['size' => $entry['size'], 'label' => $entry['label'], 'secret' => $entry['secret']];
+    }
+    $zip->addFromString('manifest.json', (string) json_encode($manifest, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
+    $zip->close();
+    return ['path' => $zipPath, 'entries' => $entries, 'manifest' => $manifest];
+}
+
+function docgenBackupExport(): never
+{
+    try {
+        $includeSecrets = (string) ($_POST['include_secrets'] ?? '') === '1';
+        $archive = docgenBuildBackupZip($includeSecrets);
+        $downloadUrl = docgenRegisterDownload($archive['path'], basename($archive['path']), 'zip', count($archive['entries']), 0);
+        sendJson([
+            'ok' => true,
+            'downloadUrl' => $downloadUrl,
+            'filename' => basename($archive['path']),
+            'fileCount' => count($archive['entries']),
+            'includeSecrets' => $includeSecrets,
+        ]);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+}
+
+function docgenBackupStagedPath(string $id): string
+{
+    if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+        throw new RuntimeException('Некорректный идентификатор загруженного архива.');
+    }
+    return DOCGEN_BACKUP_IMPORT_DIR . '/' . $id . '.zip';
+}
+
+function docgenBackupReadManifest(ZipArchive $zip): array
+{
+    $raw = $zip->getFromName('manifest.json');
+    if (!is_string($raw)) {
+        throw new RuntimeException('В архиве нет manifest.json — это не резервная копия docgen.');
+    }
+    $manifest = json_decode($raw, true);
+    if (!is_array($manifest) || ($manifest['format'] ?? '') !== 'docgen-config-db' || (int) ($manifest['version'] ?? 0) !== 1) {
+        throw new RuntimeException('Неизвестный формат архива или неподдерживаемая версия.');
+    }
+    if (!is_array($manifest['files'] ?? null)) {
+        throw new RuntimeException('В манифесте нет списка файлов.');
+    }
+    return $manifest;
+}
+
+function docgenBackupImportPreview(): never
+{
+    $file = $_FILES['backup_file'] ?? null;
+    if (!is_array($file) || (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK || !is_uploaded_file((string) ($file['tmp_name'] ?? ''))) {
+        sendJson(['ok' => false, 'error' => 'Выберите ZIP-архив резервной копии.'], 422);
+    }
+    if ((int) ($file['size'] ?? 0) > 100_000_000) {
+        sendJson(['ok' => false, 'error' => 'Архив больше 100 МБ.'], 422);
+    }
+    try {
+        docgenEnsureDir(DOCGEN_BACKUP_IMPORT_DIR);
+        $id = bin2hex(random_bytes(16));
+        $staged = docgenBackupStagedPath($id);
+        if (!copy((string) $file['tmp_name'], $staged)) {
+            throw new RuntimeException('Не удалось временно сохранить архив.');
+        }
+        $zip = new ZipArchive();
+        if ($zip->open($staged) !== true) {
+            @unlink($staged);
+            throw new RuntimeException('Не удалось открыть ZIP-архив.');
+        }
+        $manifest = docgenBackupReadManifest($zip);
+        $allowed = docgenBackupFileMap(true);
+        $entries = [];
+        foreach ($manifest['files'] as $name => $info) {
+            $name = (string) $name;
+            if (!isset($allowed[$name]) || $zip->getFromName($name) === false) {
+                $zip->close();
+                @unlink($staged);
+                throw new RuntimeException('Архив содержит неизвестный или отсутствующий файл: ' . $name);
+            }
+            $entries[] = [
+                'name' => $name,
+                'label' => is_array($info) && isset($info['label']) ? (string) $info['label'] : $allowed[$name]['label'],
+                'size' => $zip->statName($name)['size'] ?? 0,
+                'secret' => (bool) $allowed[$name]['secret'],
+                'replace' => is_file($allowed[$name]['restore'] ?? $allowed[$name]['path']),
+            ];
+        }
+        $zip->close();
+        sendJson([
+            'ok' => true,
+            'importId' => $id,
+            'entries' => $entries,
+            'createdAt' => (string) ($manifest['createdAt'] ?? ''),
+            'includeSecrets' => !empty($manifest['includeSecrets']),
+        ]);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+}
+
+function docgenBackupImportCommit(): never
+{
+    $id = trim((string) ($_POST['import_id'] ?? ''));
+    if ((string) ($_POST['confirm'] ?? '') !== '1') {
+        sendJson(['ok' => false, 'error' => 'Подтвердите замену конфигурации и базы.'], 422);
+    }
+    try {
+        $staged = docgenBackupStagedPath($id);
+        if (!is_file($staged)) {
+            throw new RuntimeException('Загруженный архив не найден. Повторите загрузку.');
+        }
+        $zip = new ZipArchive();
+        if ($zip->open($staged) !== true) {
+            throw new RuntimeException('Не удалось открыть загруженный архив.');
+        }
+        $manifest = docgenBackupReadManifest($zip);
+        $allowed = docgenBackupFileMap(true);
+        $incoming = [];
+        foreach ($manifest['files'] as $name => $info) {
+            $name = (string) $name;
+            if (!isset($allowed[$name])) {
+                throw new RuntimeException('Архив содержит неизвестный файл: ' . $name);
+            }
+            $contents = $zip->getFromName($name);
+            if (!is_string($contents) || strlen($contents) > 100_000_000) {
+                throw new RuntimeException('Не удалось прочитать файл из архива: ' . $name);
+            }
+            if (substr($name, -5) === '.json') {
+                $decoded = json_decode($contents, true);
+                if (!is_array($decoded) || json_last_error() !== JSON_ERROR_NONE) {
+                    throw new RuntimeException('Файл ' . $name . ' в архиве повреждён или имеет неверный формат JSON.');
+                }
+            }
+            $incoming[$name] = $contents;
+        }
+        $zip->close();
+
+        // Always keep a restorable snapshot of the current state, including secrets.
+        $safety = docgenBuildBackupZip(true);
+        $safetyFilename = 'Перед_восстановлением_' . basename($safety['path']);
+        $safetyDownloadUrl = docgenRegisterDownload($safety['path'], $safetyFilename, 'zip', count($safety['entries']), 0);
+
+        foreach ($incoming as $name => $contents) {
+            docgenWriteBytesAtomic($allowed[$name]['restore'] ?? $allowed[$name]['path'], $contents, $allowed[$name]['secret'] ? 0600 : 0640);
+        }
+        @unlink($staged);
+        sendJson([
+            'ok' => true,
+            'restored' => count($incoming),
+            'safetyDownloadUrl' => $safetyDownloadUrl,
+            'safetyFilename' => $safetyFilename,
+        ]);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
 }
 
 function docgenDadataRequest(string $token, string $query): array
@@ -1752,6 +2084,7 @@ function docgenGenerate(): never
 {
     set_time_limit(300);
     cleanupExpiredDownloads();
+    docgenCleanupOldProgress();
     $dataset = loadDataset();
     $byId = [];
     foreach (($dataset['records'] ?? []) as $record) {
@@ -1770,6 +2103,17 @@ function docgenGenerate(): never
     if (count($ids) > MAX_ROWS_PER_RUN) {
         sendJson(['ok' => false, 'error' => 'За один запуск можно обработать не более ' . MAX_ROWS_PER_RUN . ' записей. Разделите пакет.'], 422);
     }
+    $progressToken = trim((string) ($_POST['progress_token'] ?? ''));
+    if (preg_match('/^[a-f0-9]{32}$/', $progressToken) !== 1) {
+        $progressToken = '';
+    }
+    $totalSteps = count($ids);
+    $progress = static function (string $stage, int $done, string $message, string $card = '') use ($progressToken, $totalSteps): void {
+        if ($progressToken !== '') {
+            docgenProgressWrite($progressToken, $stage, $done, $totalSteps, $message, $card);
+        }
+    };
+    $progress('template', 0, 'Проверяем шаблон и переменные…');
     try {
         $template = docgenResolveTemplate();
         $templateInfo = docgenScanTemplate($template);
@@ -1799,7 +2143,10 @@ function docgenGenerate(): never
     $errors = [];
     $prepared = [];
     $sourceNumber = 0;
+    $processed = 0;
+    $progress('documents', 0, 'Готовим документы по карточкам…');
     foreach ($ids as $id) {
+        $processed++;
         if (!isset($byId[$id])) {
             $errors[] = ['id' => $id, 'region' => '', 'reason' => 'Запись не найдена в наборе.'];
             continue;
@@ -1808,6 +2155,11 @@ function docgenGenerate(): never
         $fields = baseFields($record);
         $rowOverrides = isset($overrides[$id]) && is_array($overrides[$id]) ? $overrides[$id] : [];
         $fields = array_merge($fields, $rowOverrides);
+        $cardLabel = trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? $id));
+        if ((string) ($fields['Регион'] ?? '') !== '') {
+            $cardLabel = (string) $fields['Регион'] . ' · ' . $cardLabel;
+        }
+        $progress('documents', $processed, 'Карточка ' . $processed . '/' . $totalSteps . ' — подготовка документа', $cardLabel);
         $values = [];
         $missing = [];
         foreach ($templateInfo['fields'] as $fieldName) {
@@ -1839,6 +2191,7 @@ function docgenGenerate(): never
         sendJson(['ok' => false, 'error' => 'Не удалось подготовить документы.', 'details' => $summary], 422);
     }
     $sourcePaths = array_column($prepared, 'sourcePath');
+    $progress('pdf', 0, 'Конвертируем ' . count($sourcePaths) . ' документов в PDF…');
     $conversion = docgenConvertToPdf($sourcePaths, $pdfDir, $jobDir . '/lo-profile');
     if (!empty($conversion['missing'])) {
         $missingSet = array_fill_keys($conversion['missing'], true);
@@ -1878,7 +2231,10 @@ function docgenGenerate(): never
         sendJson(['ok' => false, 'error' => 'Не удалось собрать ZIP с документами.'], 500);
     }
     $usedArchiveNames = [];
+    $queuedStep = 0;
+    $progress('queue', 0, 'Собираем письма в очередь и ZIP…');
     foreach ($prepared as $item) {
+        $queuedStep++;
         $sourcePath = $item['sourcePath'];
         $pdfPath = $pdfDir . '/' . pathinfo($sourcePath, PATHINFO_FILENAME) . '.pdf';
         $fields = $item['fields'];
@@ -1886,6 +2242,7 @@ function docgenGenerate(): never
         unset($fields['__resolvedValues']);
         $region = (string) ($fields['Регион'] ?? 'Без региона');
         $person = (string) ($fields['Фамилия И.О.'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? 'Адресат');
+        $progress('queue', $queuedStep, 'Очередь ' . $queuedStep . '/' . $totalSteps . ' — ' . $region, $region . ' · ' . $person);
         $inn = (string) ($fields['ИНН'] ?? '');
         $emailValues = array_merge($fields, $values);
         $emailValues['Наименование файла'] = (string) $template['name'];
@@ -1998,6 +2355,10 @@ function docgenGenerate(): never
         }
     }
     cleanupTree($jobDir);
+    $progress('done', $totalSteps, 'Готово: ' . $queueCreated . ' писем в очереди, ошибок/пропусков ' . count($errors) . '.');
+    if ($progressToken !== '') {
+        docgenProgressClear($progressToken);
+    }
     docgenSaveBatch([
         'id' => $batchId,
         'name' => mb_substr($batchName, 0, 160, 'UTF-8'),
@@ -2741,8 +3102,8 @@ function docgenCronSend(): array
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
-    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -2788,6 +3149,14 @@ function docgenDispatch(string $action): void
             docgenSaveDadataSettings();
         case 'check_managers':
             docgenCheckManagers();
+        case 'generate_progress':
+            docgenGenerateProgress();
+        case 'backup_export':
+            docgenBackupExport();
+        case 'backup_preview':
+            docgenBackupImportPreview();
+        case 'backup_import':
+            docgenBackupImportCommit();
         case 'dadata_fetch':
             docgenDadataFetchForUpdate();
         case 'save_records_bulk':
