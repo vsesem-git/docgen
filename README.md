@@ -75,7 +75,7 @@ PORT=8766 sh ./start_preview.sh
 ```
 
 Для preview нужно окружение PHP 8.1+ с расширениями `zip`, `dom`, `xml`, `xmlwriter`,
-`mbstring`, `gd`, `ctype` и 설치рованный `vendor/` (он лежит в репозитории).
+`mbstring`, `gd`, `ctype`, `openssl` и установленный `vendor/` (он лежит в репозитории). Без `openssl` PHP не сможет подключиться к SMTP по `ssl://`.
 
 ## Диагностика «Could not connect to SMTP host»
 
@@ -87,6 +87,7 @@ PORT=587                # 587 = STARTTLS, 465 = SSL/TLS
 
 getent hosts "$HOST" || echo "DNS не резолвится"
 timeout 5 bash -c "</dev/tcp/$HOST/$PORT" && echo "TCP OK" || echo "TCP недоступен"
+php -m | grep -i openssl || echo "В PHP нет openssl — SMTP 465/587 не заработает"
 ```
 
 Если TCP доступен, проверьте TLS:

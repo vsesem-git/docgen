@@ -47,6 +47,11 @@ if command -v php >/dev/null 2>&1; then
   for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php"; do
     php -l "$file" >/dev/null || die "Ошибка синтаксиса PHP в $file — обновление отменено."
   done
+  # Without OpenSSL, PHP has no ssl:// transport and PHPMailer reports
+  # "Could not connect to SMTP host" even when the server is reachable.
+  if ! php -r "exit(extension_loaded('openssl') ? 0 : 1);"; then
+    die "В PHP не загружено расширение openssl. Установите: sudo apt-get install -y php-openssl && sudo systemctl restart $SERVICE"
+  fi
 fi
 
 # First run: the standard installer creates the config, storage and service.

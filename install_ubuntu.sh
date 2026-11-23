@@ -60,7 +60,7 @@ export DEBIAN_FRONTEND=noninteractive
 echo "Устанавливаю PHP, расширения и LibreOffice для PDF…"
 apt-get update
 apt-get install -y --no-install-recommends \
-  php-cli php-zip php-xml php-mbstring php-gd php-curl \
+  php-cli php-zip php-xml php-mbstring php-gd php-curl php-openssl \
   libreoffice-writer fonts-liberation ca-certificates unzip openssl
 
 PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION,".",PHP_MINOR_VERSION;')
@@ -70,7 +70,7 @@ if [ "$PHP_MAJOR" -lt 8 ] || { [ "$PHP_MAJOR" -eq 8 ] && [ "$PHP_MINOR" -lt 1 ];
   echo "Нужен PHP 8.1 или новее, найден PHP $PHP_VERSION." >&2
   exit 1
 fi
-for extension in zip dom xml xmlwriter mbstring gd ctype; do
+for extension in zip dom xml xmlwriter mbstring gd ctype openssl; do
   if ! php -r "exit(extension_loaded('$extension') ? 0 : 1);"; then
     echo "PHP extension '$extension' не загружен. Проверьте установку пакетов PHP." >&2
     exit 1
