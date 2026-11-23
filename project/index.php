@@ -896,6 +896,9 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .mapping-head strong{font-size:13px}.mapping-body{padding:0 14px 12px;display:flex;gap:7px;flex-wrap:wrap}
 .map-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;background:#fafcff;font-size:11.5px;color:var(--muted)}
 .map-chip b{color:var(--ink);font-weight:650}.map-chip .state{font-size:10.5px;font-weight:750;color:var(--ok)}.map-chip.manual{background:#fff9ec;border-color:#f0d9a8}.map-chip.manual .state{color:var(--warn)}
+.var-chip{cursor:pointer;background:#fff;border:1px solid #bfd2e6;border-radius:7px;padding:5px 9px;font-size:11.5px;color:#174a7e;font-family:inherit}
+.var-chip:hover,.var-chip:focus-visible{background:#eaf3fc;border-color:var(--brand);outline:none}
+.letter-vars{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .legend{display:flex;align-items:center;gap:8px;margin:0 0 9px;color:var(--muted);font-size:12px;flex-wrap:wrap}
 .table-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
 .table-wrap{overflow:auto;max-height:63vh;min-height:280px}
@@ -1016,7 +1019,7 @@ body.modal-open{overflow:hidden}
   </div>
 </header>
 <main>
-  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. Коды полей берутся из колонок книги.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>Нажмите «Сформировать PDF и подготовить очередь»: для DOCX-шаблона сохраняются также DOCX-файлы. На каждую запись создаётся отдельная очередь с PDF.</li><li>В очереди откройте предпросмотр PDF, проверьте получателя, копию, тему и текст. Нажмите отправку только для проверенного письма; автоматической массовой отправки нет.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
+  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В очереди откройте предпросмотр PDF, проверьте получателя, копию, тему и текст. Нажмите отправку только для проверенного письма; автоматической массовой отправки нет.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
 
   <section class="top-grid">
     <div class="card">
@@ -1082,6 +1085,25 @@ body.modal-open{overflow:hidden}
     <div class="mapping-body" id="mappingBody"><span class="small-muted">Проверяем пример шаблона…</span></div>
   </section>
 
+  <section class="settings-card" id="letterTemplateCard">
+    <details open>
+      <summary><strong>Шаблон письма: имя файла, получатели, текст</strong><span class="settings-state" id="letterState">Общие настройки</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>✉️</span><div>Эти настройки общие для всех DOCX/HTML-шаблонов. В полях можно писать текст и коды вида <b>{Фамилия И.О.}</b> — они заменятся данными выбранной записи. Нажмите переменную ниже, чтобы вставить её в последнее редактируемое поле. Получатели, тема и текст всегда можно исправить вручную в карточке письма перед отправкой; автоматической рассылки нет.</div></div>
+        <div class="settings-grid">
+          <div class="field span2"><label for="letterFilenamePattern">Имя вложенного файла без расширения</label><input id="letterFilenamePattern" type="text" maxlength="300" placeholder="{Регион} — {Фамилия И.О.} — {ИНН}" autocomplete="off"></div>
+          <div class="field"><label for="letterToPattern">Кому (основной получатель)</label><input id="letterToPattern" type="text" maxlength="1000" placeholder="{Основной email}" autocomplete="off"></div>
+          <div class="field"><label for="letterCcPattern">Копия (CC)</label><input id="letterCcPattern" type="text" maxlength="1000" placeholder="{Доп./старые email}" autocomplete="off"></div>
+          <div class="field"><label for="letterSubjectPattern">Тема письма</label><input id="letterSubjectPattern" type="text" maxlength="500" placeholder="Документ — {Регион}" autocomplete="off"></div>
+          <div class="field"><label for="letterAccountSelect">От кого — ящик по умолчанию</label><select id="letterAccountSelect"></select><span class="small-muted" style="display:block;margin-top:4px">Итоговый ящик выбирается в панели инструментов перед формированием очереди.</span></div>
+          <div class="field span2"><label for="letterBodyPattern">Текст письма</label><textarea id="letterBodyPattern" rows="4" placeholder="Добрый день.{nl}{nl}Направляем документ во вложении."></textarea></div>
+        </div>
+        <div style="margin-top:12px"><b class="small-muted">Доступные переменные (нажмите, чтобы вставить)</b><div id="letterVariableList" class="letter-vars"></div><span class="small-muted" style="display:block;margin-top:5px">Список собран из колонок текущей книги и переменных загруженного шаблона. Неизвестные коды остаются как текст; приложение не угадывает значения.</span></div>
+        <div class="settings-actions"><button class="btn-primary" id="saveLetterTemplateBtn" type="button">Сохранить шаблон письма</button><span class="small-muted" id="letterFeedback" aria-live="polite"></span></div>
+      </div>
+    </details>
+  </section>
+
   <section class="toolbar">
     <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
     <label class="small-muted" for="smtpAccountForRun">Ящик для отправки</label><select id="smtpAccountForRun" aria-label="Ящик для отправки"></select>
@@ -1112,9 +1134,8 @@ body.modal-open{overflow:hidden}
           <div class="field"><label for="smtpFromEmail">Email отправителя</label><input id="smtpFromEmail" type="email" autocomplete="email"></div>
           <div class="field"><label for="smtpFromName">Имя отправителя</label><input id="smtpFromName" type="text" autocomplete="organization"></div>
           <div class="field"><label for="smtpReplyTo">Reply-To (необязательно)</label><input id="smtpReplyTo" type="email"></div>
-          <div class="field"><label for="smtpSubject">Тема письма · поддерживаются {коды полей}</label><input id="smtpSubject" type="text" value="Документ"></div>
-          <div class="field span2"><label for="smtpBody">Текст письма · поддерживаются {коды полей}</label><textarea id="smtpBody" rows="4">Добрый день.&#10;&#10;Направляем документ во вложении.</textarea></div>
         </div>
+        <div class="help" style="margin:9px 0 0">Тема, текст письма, получатели и имя вложения настраиваются выше в блоке «Шаблон письма».</div>
         <div class="settings-actions"><button class="btn-primary" id="saveSmtpBtn" type="button">Сохранить настройки</button><button class="btn-ghost" id="testSmtpBtn" type="button">Проверить SMTP</button><label class="small-muted"><input id="clearSmtpPassword" type="checkbox"> Удалить сохранённый пароль</label><span class="small-muted" id="smtpFeedback"></span></div>
       </div>
     </details>
@@ -1246,6 +1267,14 @@ let activeQueueItemId = '';
 let smtpPasswordConfigured = false;
 let smtpAccounts = [];
 let smtpAccountId = '';
+let queueAccountId = '';
+let queueAccountTouched = false;
+let letterSettings = null;
+let letterActiveField = '';
+const LETTER_FIELDS = {
+  letterFilenamePattern: 'filenamePattern', letterToPattern: 'toPattern', letterCcPattern: 'ccPattern',
+  letterSubjectPattern: 'subjectPattern', letterBodyPattern: 'bodyPattern'
+};
 let dadataConfigured = false;
 let managerChecks = {};
 let managerCheckRunning = false;
@@ -1650,6 +1679,7 @@ function getUnmappedFields() {
 }
 function updateMapping() {
   const fields=templateInfo.fields||[];
+  renderLetterVariables();
   $('syntaxLabel').textContent=templateInfo.syntaxLabel ? '· '+templateInfo.syntaxLabel : '';
   if (!fields.length) {
     $('mappingBody').innerHTML='<span class="pill bad">Переменные в шаблоне не найдены</span>';
@@ -2046,7 +2076,12 @@ function renderSmtpAccountOptions(payload, selectedId) {
   $('smtpAccountForRun').innerHTML=options;
   smtpAccountId=selectedId||payload.accountId||(smtpAccounts[0]?.id||'');
   $('smtpAccountSelect').value=smtpAccountId;
-  $('smtpAccountForRun').value=smtpAccounts.some(a=>a.id===smtpAccountId)?smtpAccountId:(smtpAccounts[0]?.id||'');
+  const preferred=queueAccountId||letterSettings?.smtpAccountId||'';
+  const queueChoice=smtpAccounts.some(a=>a.id===preferred)
+    ? preferred
+    : (smtpAccounts.some(a=>a.id===smtpAccountId)?smtpAccountId:(smtpAccounts[0]?.id||''));
+  queueAccountId=queueChoice;
+  $('smtpAccountForRun').value=queueChoice;
   $('deleteSmtpAccountBtn').disabled=smtpAccounts.length<=1;
   $('smtpAccountsHint').textContent=smtpAccounts.length>1
     ? `Ящиков: ${smtpAccounts.length}. При формировании очереди выберите нужный в панели инструментов.`
@@ -2059,19 +2094,18 @@ function applySmtpAccountToForm(id) {
   $('smtpAccountLabel').value=account.label||'';
   $('smtpHost').value=account.host||'';$('smtpPort').value=account.port||587;$('smtpEncryption').value=account.encryption||'tls';$('smtpUsername').value=account.username||'';
   $('smtpFromEmail').value=account.fromEmail||'';$('smtpFromName').value=account.fromName||'';$('smtpReplyTo').value=account.replyTo||'';
-  $('smtpSubject').value=account.subjectTemplate||'Документ';$('smtpBody').value=account.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
   smtpPasswordConfigured=Boolean(account.passwordConfigured);
   $('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
   updateSmtpState();
 }
 function applySmtpPayload(payload, selectedId) {
   renderSmtpAccountOptions(payload,selectedId);
+  renderLetterAccountOptions();
   applySmtpAccountToForm(smtpAccountId);
   if(payload.settings&&!smtpAccounts.length){
     const s=payload.settings;
     $('smtpHost').value=s.host||'';$('smtpPort').value=s.port||587;$('smtpEncryption').value=s.encryption||'tls';$('smtpUsername').value=s.username||'';
     $('smtpFromEmail').value=s.fromEmail||'';$('smtpFromName').value=s.fromName||'';$('smtpReplyTo').value=s.replyTo||'';
-    $('smtpSubject').value=s.subjectTemplate||'Документ';$('smtpBody').value=s.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
     smtpPasswordConfigured=Boolean(payload.passwordConfigured);
     $('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
     updateSmtpState();
@@ -2082,12 +2116,84 @@ async function loadSmtpSettings() {
   const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать SMTP-настройки.');
   applySmtpPayload(payload,payload.accountId);
 }
+function availableLetterVariables() {
+  const names=new Set((templateInfo.fields||[]).map(String));
+  (dataset?.records||[]).forEach(record=>Object.keys(record.fields||{}).forEach(name=>names.add(name)));
+  names.add('Наименование файла');
+  names.add('наименование файла');
+  return [...names].filter(name=>name&&!name.includes('{')).sort((a,b)=>a.localeCompare(b,'ru'));
+}
+function renderLetterVariables() {
+  const target=$('letterVariableList');if(!target)return;
+  const active=letterActiveField||'letterBodyPattern';
+  target.innerHTML=availableLetterVariables().map(name=>`<button type="button" class="var-chip" data-var="${esc(name)}" title="Вставить в ${esc(active)}">{${esc(name)}}</button>`).join('');
+}
+function insertLetterVariable(name) {
+  const id=letterActiveField||'letterBodyPattern';
+  const input=$(id);if(!input)return;
+  const token='{'+name+'}';
+  const start=typeof input.selectionStart==='number'?input.selectionStart:input.value.length;
+  const end=typeof input.selectionEnd==='number'?input.selectionEnd:start;
+  input.value=input.value.slice(0,start)+token+input.value.slice(end);
+  letterActiveField=id;
+  input.focus();
+  if(typeof input.setSelectionRange==='function')input.setSelectionRange(start+token.length,start+token.length);
+}
+function renderLetterAccountOptions() {
+  const select=$('letterAccountSelect');if(!select)return;
+  select.innerHTML=smtpAccounts.map(account=>`<option value="${esc(account.id)}">${esc(account.label||account.fromEmail||account.id)}</option>`).join('');
+  const wanted=letterSettings?.smtpAccountId||'default';
+  select.value=smtpAccounts.some(account=>account.id===wanted)?wanted:(smtpAccounts[0]?.id||'');
+}
+function applyLetterAccountDefault() {
+  if(queueAccountTouched||!letterSettings?.smtpAccountId)return;
+  if(smtpAccounts.some(account=>account.id===letterSettings.smtpAccountId)){
+    queueAccountId=letterSettings.smtpAccountId;
+    $('smtpAccountForRun').value=queueAccountId;
+  }
+}
+function applyLetterSettings() {
+  const settings=letterSettings||{};
+  Object.entries(LETTER_FIELDS).forEach(([id,key])=>{
+    const input=$(id);
+    if(input)input.value=settings[key]??'';
+  });
+  renderLetterAccountOptions();
+  applyLetterAccountDefault();
+  renderLetterVariables();
+}
+async function loadLetterTemplate() {
+  const response=await fetch('?action=letter_template',{cache:'no-store'});
+  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать шаблон письма.');
+  letterSettings=payload.settings||{};
+  applyLetterSettings();
+}
+async function saveLetterTemplate() {
+  const button=$('saveLetterTemplateBtn');
+  if(button.disabled)return;
+  button.disabled=true;button.textContent='Сохраняем…';
+  $('letterFeedback').textContent='Сохраняем шаблон письма…';
+  try {
+    const fd=new FormData();
+    Object.entries(LETTER_FIELDS).forEach(([id,key])=>fd.append(key,$(id).value));
+    fd.append('smtpAccountId',$('letterAccountSelect').value||'default');
+    const payload=await requestJson('?action=save_letter_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+    const previousAccountId=letterSettings?.smtpAccountId||'';
+    letterSettings=payload.settings||letterSettings;
+    if(letterSettings.smtpAccountId!==previousAccountId)queueAccountTouched=false;
+    applyLetterSettings();
+    $('letterFeedback').textContent='Шаблон письма сохранён.';
+    showToast('Шаблон письма сохранён.','success');
+  } catch(e) {
+    $('letterFeedback').textContent=e.message||'Ошибка сохранения шаблона письма.';
+    showToast(e.message||'Ошибка сохранения шаблона письма.','error');
+  } finally {button.disabled=false;button.textContent='Сохранить шаблон письма';}
+}
 function smtpFormData(includeTemplates) {
   const fd=new FormData();
   fd.append('account_id',smtpAccountId||'default');
   if(includeTemplates)fd.append('label',$('smtpAccountLabel').value.trim());
   const fields={host:'smtpHost',port:'smtpPort',encryption:'smtpEncryption',username:'smtpUsername',fromEmail:'smtpFromEmail',fromName:'smtpFromName',replyTo:'smtpReplyTo'};
-  if(includeTemplates){fields.subjectTemplate='smtpSubject';fields.bodyTemplate='smtpBody';}
   for(const [key,id] of Object.entries(fields))fd.append(key,$(id).value);
   if($('smtpPassword').value)fd.append('password',$('smtpPassword').value);
   if($('clearSmtpPassword').checked)fd.append('clear_password','1');
@@ -2235,6 +2341,7 @@ async function init() {
     $('emptyState').innerHTML='<div class="big">Выберите адресатов для формирования</div><div>По умолчанию показаны все наборы и регионы; начальный выбор пуст, чтобы случайно не сформировать или не отправить всю базу.</div>';
     try { await loadTemplates(); } catch(e) { showToast(e.message||'Не удалось загрузить шаблоны.','error'); }
     try { await loadSmtpSettings(); } catch(e) { $('smtpFeedback').textContent=e.message||'Не удалось загрузить SMTP-настройки.'; }
+    try { await loadLetterTemplate(); } catch(e) { $('letterFeedback').textContent=e.message||'Не удалось загрузить шаблон письма.'; }
     try { await loadDadataSettings(); } catch(e) { $('dadataFeedback').textContent=e.message||'Не удалось загрузить настройки DaData.'; }
     try { await refreshQueue(); } catch(e) { $('queueCount').textContent='Ошибка загрузки'; }
     updateMapping(); renderTable();
@@ -2286,6 +2393,13 @@ $('excelImportModal').addEventListener('click',event=>{if(event.target===$('exce
 $('exportExcelBtn').addEventListener('click',exportExcel);
 $('addTableColumnBtn').addEventListener('click',addTableColumn);
 $('addTableSectionBtn').addEventListener('click',addTableSection);
+$('saveLetterTemplateBtn').addEventListener('click',saveLetterTemplate);
+$('letterVariableList').addEventListener('click',event=>{
+  const button=event.target.closest('[data-var]');
+  if(button)insertLetterVariable(button.dataset.var);
+});
+Object.keys(LETTER_FIELDS).forEach(id=>$(id)?.addEventListener('focus',()=>{letterActiveField=id;renderLetterVariables();}));
+$('smtpAccountForRun').addEventListener('change',()=>{queueAccountTouched=true;queueAccountId=$('smtpAccountForRun').value;});
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
 $('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);

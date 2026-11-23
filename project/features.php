@@ -13,6 +13,7 @@ define('DOCGEN_SMTP_SECRET_FILE', DOCGEN_SECRETS_DIR . '/smtp-secret.json');
 define('DOCGEN_SMTP_ACCOUNTS_FILE', DOCGEN_SETTINGS_DIR . '/smtp-accounts.json');
 define('DOCGEN_SMTP_ACCOUNT_SECRETS_FILE', DOCGEN_SECRETS_DIR . '/smtp-account-secrets.json');
 define('DOCGEN_SMTP_MAX_ACCOUNTS', 20);
+define('DOCGEN_LETTER_TEMPLATE_FILE', DOCGEN_SETTINGS_DIR . '/letter-template.json');
 define('DOCGEN_DADATA_SECRET_FILE', DOCGEN_SECRETS_DIR . '/dadata-api-key.json');
 define('DOCGEN_MANAGER_CHECKS_FILE', DOCGEN_STORAGE_DIR . '/manager_checks.json');
 define('DOCGEN_TABLE_DATA_FILE', DOCGEN_STORAGE_DIR . '/table_data.json');
@@ -523,6 +524,62 @@ function docgenSmtpWriteAccount(array $account, string $password, bool $clearPas
     }
     docgenWriteJson(DOCGEN_SMTP_ACCOUNT_SECRETS_FILE, ['accounts' => $map]);
     return $account;
+}
+
+/**
+ * Global letter layout shared by all DOCX/HTML templates. Patterns use the same
+ * {column} codes as the documents; the resulting letter is always editable in
+ * the queue before a manual send.
+ */
+function docgenLetterTemplateDefaults(): array
+{
+    $legacy = docgenSmtpAccount(docgenSmtpAccountStore()['defaultId']);
+    return [
+        'filenamePattern' => '{Регион} — {Фамилия И.О.} — {ИНН}',
+        'toPattern' => '{Основной email}',
+        'ccPattern' => '{Доп./старые email}',
+        'subjectPattern' => (string) ($legacy['subjectTemplate'] ?? 'Документ'),
+        'bodyPattern' => (string) ($legacy['bodyTemplate'] ?? "Добрый день.\n\nНаправляем документ во вложении."),
+        'smtpAccountId' => 'default',
+    ];
+}
+
+function docgenLetterTemplate(): array
+{
+    return array_merge(docgenLetterTemplateDefaults(), docgenReadJson(DOCGEN_LETTER_TEMPLATE_FILE, []));
+}
+
+function docgenSaveLetterTemplate(): never
+{
+    $fields = [
+        'filenamePattern' => trim((string) ($_POST['filenamePattern'] ?? '')),
+        'toPattern' => trim((string) ($_POST['toPattern'] ?? '')),
+        'ccPattern' => trim((string) ($_POST['ccPattern'] ?? '')),
+        'subjectPattern' => trim((string) ($_POST['subjectPattern'] ?? '')),
+        'bodyPattern' => (string) ($_POST['bodyPattern'] ?? ''),
+    ];
+    $limits = ['filenamePattern' => 300, 'toPattern' => 1000, 'ccPattern' => 1000, 'subjectPattern' => 500, 'bodyPattern' => 20_000];
+    $labels = ['filenamePattern' => 'имя вложенного файла', 'toPattern' => 'Кому', 'ccPattern' => 'копия', 'subjectPattern' => 'тема письма', 'bodyPattern' => 'текст письма'];
+    foreach ($limits as $key => $limit) {
+        if (mb_strlen($fields[$key], 'UTF-8') > $limit) {
+            sendJson(['ok' => false, 'error' => 'Слишком длинное поле: ' . $labels[$key] . '.'], 422);
+        }
+    }
+    $accountId = trim((string) ($_POST['smtpAccountId'] ?? ''));
+    $store = docgenSmtpAccountStore();
+    if ($accountId === '') {
+        $accountId = $store['defaultId'];
+    }
+    if (!in_array($accountId, array_column($store['accounts'], 'id'), true)) {
+        sendJson(['ok' => false, 'error' => 'Выберите существующий SMTP-ящик отправителя.'], 422);
+    }
+    $settings = array_merge(docgenLetterTemplateDefaults(), $fields, ['smtpAccountId' => $accountId]);
+    try {
+        docgenWriteJson(DOCGEN_LETTER_TEMPLATE_FILE, $settings);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+    sendJson(['ok' => true, 'settings' => $settings, 'accountId' => $accountId]);
 }
 
 function docgenDadataSecret(): array
@@ -1225,6 +1282,7 @@ function docgenGenerate(): never
     $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
     $store = docgenSmtpAccountStore();
     $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
+    $letter = docgenLetterTemplate();
     $queueCreated = 0;
     $downloadedDocuments = 0;
     $archivePath = $jobDir . '/Пакет_документов.zip';
@@ -1243,7 +1301,14 @@ function docgenGenerate(): never
         $region = (string) ($fields['Регион'] ?? 'Без региона');
         $person = (string) ($fields['Фамилия И.О.'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? 'Адресат');
         $inn = (string) ($fields['ИНН'] ?? '');
-        $baseName = safeFilename($region . ' — ' . $person . ($inn !== '' ? ' — ' . $inn : ' — ' . $item['id']));
+        $emailValues = array_merge($fields, $values);
+        $emailValues['Наименование файла'] = (string) $template['name'];
+        $emailValues['наименование файла'] = (string) $template['name'];
+        $filenamePattern = docgenReplaceCodes((string) $letter['filenamePattern'], $emailValues);
+        $filenamePattern = trim((string) (preg_replace('/\s+[—–-]\s*$/u', '', trim($filenamePattern)) ?? $filenamePattern));
+        $baseName = $filenamePattern !== ''
+            ? safeFilename($filenamePattern)
+            : safeFilename($region . ' — ' . $person . ($inn !== '' ? ' — ' . $inn : ' — ' . $item['id']));
         if (is_file($pdfPath) && filesize($pdfPath) > 0) {
             $queueId = bin2hex(random_bytes(16));
             $queuePath = DOCGEN_QUEUE_DIR . '/' . $queueId;
@@ -1256,13 +1321,16 @@ function docgenGenerate(): never
                 if ($hasDocx && !copy($sourcePath, $queuePath . '/document.docx')) {
                     throw new RuntimeException('Не удалось сохранить DOCX в очереди.');
                 }
-                $to = docgenEmailAddresses((string) ($fields['Основной email'] ?? ''));
-                $cc = docgenEmailAddresses((string) ($fields['Доп./старые email'] ?? ''));
+                $toPattern = trim((string) $letter['toPattern']);
+                $ccPattern = trim((string) $letter['ccPattern']);
+                $toSource = $toPattern !== '' ? docgenReplaceCodes($toPattern, $emailValues) : (string) ($fields['Основной email'] ?? '');
+                $ccSource = $ccPattern !== '' ? docgenReplaceCodes($ccPattern, $emailValues) : (string) ($fields['Доп./старые email'] ?? '');
+                $to = docgenEmailAddresses($toSource);
+                $cc = docgenEmailAddresses($ccSource);
                 $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
                 $cc = array_values(array_filter($cc, static fn(string $email): bool => !isset($toKeys[mb_strtolower($email, 'UTF-8')])));
-                $emailValues = array_merge($fields, $values);
-                $subject = docgenReplaceCodes((string) ($settings['subjectTemplate'] ?? 'Документ'), $emailValues);
-                $body = docgenReplaceCodes((string) ($settings['bodyTemplate'] ?? ''), $emailValues);
+                $subject = docgenReplaceCodes((string) $letter['subjectPattern'], $emailValues);
+                $body = docgenReplaceCodes((string) $letter['bodyPattern'], $emailValues);
                 $meta = [
                     'id' => $queueId,
                     'recordId' => $item['id'],
@@ -1519,8 +1587,22 @@ function docgenSaveSmtpSettings(): never
     $fromEmail = trim((string) ($_POST['fromEmail'] ?? ''));
     $fromName = trim((string) ($_POST['fromName'] ?? ''));
     $replyTo = trim((string) ($_POST['replyTo'] ?? ''));
-    $subjectTemplate = trim((string) ($_POST['subjectTemplate'] ?? ''));
-    $bodyTemplate = (string) ($_POST['bodyTemplate'] ?? '');
+    $accountId = trim((string) ($_POST['account_id'] ?? ''));
+    if ($accountId === '') {
+        $accountId = 'default';
+    }
+    if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $accountId) !== 1) {
+        sendJson(['ok' => false, 'error' => 'Некорректный идентификатор SMTP-ящика.'], 422);
+    }
+    $existingAccount = docgenSmtpAccount($accountId);
+    // Letter text is configured globally in the letter editor now. Keep old
+    // per-account values intact when the simplified SMTP form omits them.
+    $subjectTemplate = array_key_exists('subjectTemplate', $_POST)
+        ? trim((string) $_POST['subjectTemplate'])
+        : (string) ($existingAccount['subjectTemplate'] ?? 'Документ');
+    $bodyTemplate = array_key_exists('bodyTemplate', $_POST)
+        ? (string) $_POST['bodyTemplate']
+        : (string) ($existingAccount['bodyTemplate'] ?? '');
     if ($port < 1 || $port > 65535) {
         sendJson(['ok' => false, 'error' => 'Порт SMTP должен быть числом от 1 до 65535.'], 422);
     }
@@ -1559,13 +1641,6 @@ function docgenSaveSmtpSettings(): never
         $secret['password'] = '';
     } elseif ($newPassword !== '') {
         $secret['password'] = $newPassword;
-    }
-    $accountId = trim((string) ($_POST['account_id'] ?? ''));
-    if ($accountId === '') {
-        $accountId = 'default';
-    }
-    if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $accountId) !== 1) {
-        sendJson(['ok' => false, 'error' => 'Некорректный идентификатор SMTP-ящика.'], 422);
     }
     $label = trim((string) ($_POST['label'] ?? ''));
     if (mb_strlen($label, 'UTF-8') > 100) {
@@ -1895,8 +1970,8 @@ function docgenSendQueueItem(): never
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
-    $getActions = ['templates', 'template_content', 'smtp_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
+    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'dadata_settings', 'queue', 'queue_file', 'download'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -1919,8 +1994,13 @@ function docgenDispatch(string $action): void
             docgenGenerate();
         case 'smtp_settings':
             sendJson(docgenSmtpPublicPayload());
+        case 'letter_template':
+            $letter = docgenLetterTemplate();
+            sendJson(['ok' => true, 'settings' => $letter, 'accountId' => $letter['smtpAccountId']]);
         case 'save_smtp_settings':
             docgenSaveSmtpSettings();
+        case 'save_letter_template':
+            docgenSaveLetterTemplate();
         case 'add_smtp_account':
             docgenAddSmtpAccount();
         case 'delete_smtp_account':
