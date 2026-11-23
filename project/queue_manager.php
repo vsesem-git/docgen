@@ -33,7 +33,7 @@ h2{font-size:16px;margin:0 0 10px;color:#173b60}.hint{color:var(--muted);font-si
 button,input,select{font:inherit}button{cursor:pointer}.btn{border:1px solid #bdd0e3;background:#fff;border-radius:8px;padding:8px 12px;color:#174a7e}.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}.btn.danger{border-color:#e6b4ae;color:var(--bad)}button:disabled{opacity:.45;cursor:not-allowed}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}.field input{width:100%;border:1px solid #cbd7e3;border-radius:8px;padding:8px}
 .batch{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}.batch>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650}.batch .body{padding:12px 13px;border-top:1px solid var(--line)}
-.item{border:1px solid #e3ebf4;border-radius:8px;padding:9px 11px;margin-bottom:7px;background:#fff}.item .meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill{border-radius:999px;padding:2px 8px;font-size:11px;background:#eef3f9;color:var(--muted)}.pill.sent{background:#e8f6ee;color:var(--ok)}.pill.failed{background:#fdecea;color:var(--bad)}.pill.scheduled{background:#fff5e5;color:var(--warn)}
+.item{border:1px solid #e3ebf4;border-radius:8px;padding:9px 11px;margin-bottom:7px;background:#fff}.item .meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill{border-radius:999px;padding:2px 8px;font-size:11px;background:#eef3f9;color:var(--muted)}.pill.sent{background:#e8f6ee;color:var(--ok)}.pill.failed{background:#fdecea;color:var(--bad)}.pill.scheduled{background:#fff5e5;color:var(--warn)}.pill.paused{background:#ece7f8;color:#5b3fa3}
 a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:9px}.muted{color:var(--muted);font-size:12px}.error{color:var(--bad);font-size:12px}.feedback{margin-left:8px;font-size:12px}
 @media(max-width:700px){main{padding:12px}.grid{grid-template-columns:1fr}}
 </style>
@@ -51,7 +51,7 @@ a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:ce
   </section>
   <section class="card">
     <h2>Пачки писем</h2>
-    <p class="hint">На главной странице остаются только пакеты, ожидающие ручной проверки. Здесь — уже переданные в ручную очередь или в расписание, а также завершённые.</p>
+    <p class="hint">На главной странице остаются только пакеты, ожидающие ручной проверки. Здесь — уже переданные в ручную очередь или в расписание, а также завершённые. Пачки можно ставить на паузу и снимать с неё, перемещать вверх/вниз по очереди и удалять с явным подтверждением. Порядок пачек учитывается планировщиком при автоотправке.</p>
     <div id="batches">Загружаем…</div>
   </section>
 </main>
@@ -61,15 +61,18 @@ const CSRF_TOKEN = <?= json_encode($csrf, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HE
 let batches = [], items = [];
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const labels = {queued:'в ручной очереди',scheduled:'в расписании',sending:'отправляется',sent:'отправлено',failed:'ошибка',cancelled:'отменено',review:'на проверке',manual:'ручная очередь',done:'завершено'};
-function pill(status){const css=['sent','failed','scheduled','sending','cancelled','done'].includes(status)?status:'';return `<span class="pill ${css}">${esc(labels[status]||status||'—')}</span>`;}
+const labels = {queued:'в ручной очереди',scheduled:'в расписании',sending:'отправляется',sent:'отправлено',failed:'ошибка',cancelled:'отменено',review:'на проверке',manual:'ручная очередь',done:'завершено',paused:'на паузе'};
+function pill(status){const css=['sent','failed','scheduled','sending','cancelled','done','paused'].includes(status)?status:'';return `<span class="pill ${css}">${esc(labels[status]||status||'—')}</span>`;}
 function batchItems(id){return items.filter(item=>id==='legacy'?!item.batchId:item.batchId===id);}
 function render(){
   $('batches').innerHTML = batches.length ? batches.map(batch=>{
     const rows=batchItems(batch.id);
     const list=rows.map(item=>`<div class="item"><div class="meta"><b>${esc(item.recipientName||item.recordId||'Адресат')}</b>${pill(item.status)}<span class="muted">${esc(item.to||'получатель не указан')}</span><span class="muted">${esc(item.subject||'')}</span><a href="?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&inline=1" target="_blank" rel="noopener">PDF</a><a href="index.php?review=${encodeURIComponent(item.id)}">Открыть для проверки</a></div>${item.lastError?`<div class="error">${esc(item.lastError)}</div>`:''}</div>`).join('');
-    const canCancel=['manual','scheduled','sending'].includes(batch.status);
-    return `<details class="batch" ${batch.status==='scheduled'?'open':''}><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')} ${pill(batch.status)}</summary><div class="body"><div class="muted">Создано: ${esc(batch.createdAt||'')} · отправлено: ${Number(batch.sentCount||0)} · ошибок: ${Number(batch.failedCount||0)} · режим: ${esc(batch.mode==='auto'?'авто по расписанию':'ручной')}</div><div class="actions"><button class="btn danger" data-action="cancel" data-id="${esc(batch.id)}" ${canCancel?'':'disabled'}>Остановить пачку</button><button class="btn" data-action="retry" data-id="${esc(batch.id)}">Повторить ошибочные</button><span class="feedback" data-feedback="${esc(batch.id)}"></span></div><div style="margin-top:10px">${list||'<span class="muted">Писем нет.</span>'}</div></div></details>`;
+    const canCancel=['manual','scheduled','sending','paused'].includes(batch.status);
+    const canPause=['manual','scheduled'].includes(batch.status);
+    const index=batches.indexOf(batch);
+    const canUp=index>0, canDown=index>=0&&index<batches.length-1;
+    return `<details class="batch" ${batch.status==='scheduled'?'open':''}><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')} ${pill(batch.status)}</summary><div class="body"><div class="muted">Позиция в очереди: ${Number(batch.priority||index+1)} · создано: ${esc(batch.createdAt||'')} · отправлено: ${Number(batch.sentCount||0)} · ошибок: ${Number(batch.failedCount||0)} · режим: ${esc(batch.mode==='auto'?'авто по расписанию':'ручной')}${batch.pausedAt?` · на паузе с ${esc(batch.pausedAt)}`:''}</div><div class="actions"><button class="btn" data-action="up" data-id="${esc(batch.id)}" ${canUp?'':'disabled'} title="Переместить выше">↑ Выше</button><button class="btn" data-action="down" data-id="${esc(batch.id)}" ${canDown?'':'disabled'} title="Переместить ниже">↓ Ниже</button><button class="btn" data-action="${batch.status==='paused'?'resume':'pause'}" data-id="${esc(batch.id)}" ${(batch.status==='paused'||canPause)?'':'disabled'}>${batch.status==='paused'?'Продолжить':'Пауза'}</button><button class="btn danger" data-action="cancel" data-id="${esc(batch.id)}" ${canCancel?'':'disabled'}>Остановить пачку</button><button class="btn" data-action="retry" data-id="${esc(batch.id)}">Повторить ошибочные</button><button class="btn danger" data-action="delete" data-id="${esc(batch.id)}">Удалить пачку</button><span class="feedback" data-feedback="${esc(batch.id)}"></span></div><div style="margin-top:10px">${list||'<span class="muted">Писем нет.</span>'}</div></div></details>`;
   }).join('') : '<p class="muted">Пачек в менеджере пока нет. Сформируйте документы и проверьте новую пачку на главной странице.</p>';
   document.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>runBatchAction(button.dataset.action,button.dataset.id)));
 }
@@ -86,10 +89,17 @@ async function post(action,fd,label){
   showToast(label,'success');await load();return payload;
 }
 async function runBatchAction(action,id){
+  if(action==='delete'){
+    if(!window.confirm('Удалить пачку вместе со всеми письмами и файлами? Это действие нельзя отменить.'))return;
+  }
+  const endpoint=action==='up'||action==='down'?'move_batch':`${action}_batch`;
   const fd=new FormData();fd.append('batch_id',id);
+  if(action==='delete')fd.append('confirm','1');
+  if(action==='up'||action==='down')fd.append('direction',action);
   const target=document.querySelector(`[data-feedback="${CSS.escape(id)}"]`);
   if(target)target.textContent='Выполняем…';
-  try{await post(action,fd,action==='cancel'?'Пачка остановлена.':'Повтор поставлен в очередь.');}
+  const messages={cancel:'Пачка остановлена.',retry:'Повтор поставлен в очередь.',pause:'Пачка поставлена на паузу.',resume:'Пачка продолжена.',delete:'Пачка удалена.',up:'Пачка перемещена выше.',down:'Пачка перемещена ниже.'};
+  try{await post(endpoint,fd,messages[action]||'Готово.');}
   catch(e){if(target)target.textContent=e.message;showToast(e.message,'error');}
 }
 function showToast(text,kind){const el=document.createElement('div');el.className='pill '+(kind==='success'?'sent':'failed');el.textContent=text;document.querySelector('main').prepend(el);setTimeout(()=>el.remove(),5000);}

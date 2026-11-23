@@ -1197,6 +1197,8 @@ function docgenBatchMeta(string $id): array
             'mode' => (string) ($state['mode'] ?? ''),
             'createdAt' => $items[0]['createdAt'] ?? ($state['createdAt'] ?? date(DATE_ATOM)),
             'reviewedAt' => $state['reviewedAt'] ?? null,
+            'priority' => (int) ($state['priority'] ?? 0),
+            'resumeStatus' => (string) ($state['resumeStatus'] ?? ''),
             'sentCount' => 0, 'failedCount' => 0, 'lastError' => '',
         ];
     }
@@ -1225,7 +1227,69 @@ function docgenSaveLegacyBatchState(array $batch): void
         'mode' => (string) ($batch['mode'] ?? ''),
         'createdAt' => (string) ($batch['createdAt'] ?? date(DATE_ATOM)),
         'reviewedAt' => $batch['reviewedAt'] ?? null,
+        'priority' => (int) ($batch['priority'] ?? 0),
+        'resumeStatus' => (string) ($batch['resumeStatus'] ?? ''),
     ]);
+}
+
+function docgenPersistBatch(array $batch): void
+{
+    if ((string) ($batch['id'] ?? '') === 'legacy') {
+        docgenSaveLegacyBatchState($batch);
+        return;
+    }
+    docgenSaveBatch($batch);
+}
+
+function docgenRemoveTree(string $path): void
+{
+    if (is_link($path) || is_file($path)) {
+        @unlink($path);
+        return;
+    }
+    if (!is_dir($path)) {
+        return;
+    }
+    foreach (scandir($path) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        docgenRemoveTree($path . '/' . $entry);
+    }
+    @rmdir($path);
+}
+
+/** Old batches have no priority; keep their existing newest-first order. */
+function docgenBatchOrder(array $a, array $b): int
+{
+    $priorityA = (int) ($a['priority'] ?? 0);
+    $priorityB = (int) ($b['priority'] ?? 0);
+    if ($priorityA !== $priorityB) {
+        return $priorityA <=> $priorityB;
+    }
+    return strcmp((string) ($b['createdAt'] ?? ''), (string) ($a['createdAt'] ?? ''));
+}
+
+/**
+ * Assign a definitive 1..N order so up/down moves are stable even for batches
+ * created before priorities existed.
+ */
+function docgenNormalizeBatchPriorities(): array
+{
+    $batches = docgenBatchList();
+    foreach ($batches as $index => $batch) {
+        $batch['priority'] = $index + 1;
+        docgenPersistBatch($batch);
+        $batches[$index] = $batch;
+    }
+    usort($batches, 'docgenBatchOrder');
+    return $batches;
+}
+
+function docgenNextBatchPriority(): int
+{
+    // Batches created before this field exist have priority 0; append after them.
+    return count(docgenBatchList()) + 1;
 }
 
 function docgenBatchList(?string $status = null): array
@@ -1246,7 +1310,7 @@ function docgenBatchList(?string $status = null): array
     if (($legacy['itemCount'] ?? 0) > 0 && ($status === null || $status === 'review')) {
         $batches[] = $legacy;
     }
-    usort($batches, static fn(array $a, array $b): int => strcmp((string) ($b['createdAt'] ?? ''), (string) ($a['createdAt'] ?? '')));
+    usort($batches, 'docgenBatchOrder');
     return $batches;
 }
 
@@ -1337,7 +1401,7 @@ function docgenReviewBatch(): never
 function docgenCancelBatch(): never
 {
     $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
-    if (!$batch || !in_array(($batch['status'] ?? ''), ['manual', 'scheduled', 'sending'], true)) {
+    if (!$batch || !in_array(($batch['status'] ?? ''), ['manual', 'scheduled', 'sending', 'paused'], true)) {
         sendJson(['ok' => false, 'error' => 'Пачку нельзя остановить.'], 404);
     }
     foreach (docgenBatchItems((string) $batch['id']) as $item) {
@@ -1361,7 +1425,7 @@ function docgenCancelBatch(): never
 function docgenRetryBatch(): never
 {
     $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
-    if (!$batch || !in_array(($batch['status'] ?? ''), ['done', 'cancelled', 'scheduled', 'manual', 'sending'], true)) {
+    if (!$batch || !in_array(($batch['status'] ?? ''), ['done', 'cancelled', 'scheduled', 'manual', 'sending', 'paused'], true)) {
         sendJson(['ok' => false, 'error' => 'Для этой пачки повтор недоступен.'], 404);
     }
     $mode = ($batch['mode'] ?? 'manual') === 'auto' ? 'auto' : 'manual';
@@ -1384,6 +1448,113 @@ function docgenRetryBatch(): never
         docgenSaveLegacyBatchState($batch);
     }
     sendJson(['ok' => true, 'batch' => $batch, 'retried' => $retried]);
+}
+
+function docgenPauseBatch(): never
+{
+    $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
+    if (!$batch || !in_array(($batch['status'] ?? ''), ['manual', 'scheduled'], true)) {
+        sendJson(['ok' => false, 'error' => 'Пачку можно поставить на паузу только из ручной очереди или расписания.'], 404);
+    }
+    $previous = (string) $batch['status'];
+    $batch['resumeStatus'] = $previous;
+    $batch['status'] = 'paused';
+    $batch['pausedAt'] = date(DATE_ATOM);
+    $batch['updatedAt'] = date(DATE_ATOM);
+    foreach (docgenBatchItems((string) $batch['id']) as $item) {
+        if (!in_array(($item['status'] ?? ''), ['queued', 'scheduled'], true)) {
+            continue;
+        }
+        $item['resumeItemStatus'] = (string) $item['status'];
+        $item['status'] = 'paused';
+        $item['lastError'] = '';
+        docgenSaveQueueItem($item);
+    }
+    docgenPersistBatch($batch);
+    sendJson(['ok' => true, 'batch' => $batch]);
+}
+
+function docgenResumeBatch(): never
+{
+    $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
+    if (!$batch || ($batch['status'] ?? '') !== 'paused') {
+        sendJson(['ok' => false, 'error' => 'Пачка не на паузе.'], 404);
+    }
+    $mode = ($batch['mode'] ?? 'manual') === 'auto' ? 'auto' : 'manual';
+    $resumeStatus = ($batch['resumeStatus'] ?? '') === 'manual' ? 'manual' : ($mode === 'auto' ? 'scheduled' : 'manual');
+    $batch['status'] = $resumeStatus;
+    $batch['resumeStatus'] = '';
+    $batch['updatedAt'] = date(DATE_ATOM);
+    unset($batch['pausedAt']);
+    foreach (docgenBatchItems((string) $batch['id']) as $item) {
+        if (($item['status'] ?? '') !== 'paused') {
+            continue;
+        }
+        $itemStatus = ($item['resumeItemStatus'] ?? '') === 'queued' ? 'queued' : ($mode === 'auto' ? 'scheduled' : 'queued');
+        if ($mode === 'auto' && ($item['resumeItemStatus'] ?? '') === 'queued') {
+            $itemStatus = 'scheduled';
+        }
+        $item['status'] = $itemStatus;
+        unset($item['resumeItemStatus']);
+        docgenSaveQueueItem($item);
+    }
+    docgenPersistBatch($batch);
+    sendJson(['ok' => true, 'batch' => $batch]);
+}
+
+function docgenDeleteBatch(): never
+{
+    $batch = docgenBatchMeta(trim((string) ($_POST['batch_id'] ?? '')));
+    if (!$batch) {
+        sendJson(['ok' => false, 'error' => 'Пачка не найдена.'], 404);
+    }
+    if (($batch['status'] ?? '') === 'sending') {
+        sendJson(['ok' => false, 'error' => 'Пачка сейчас отправляется. Дождитесь завершения текущего письма.'], 409);
+    }
+    if ((string) ($_POST['confirm'] ?? '') !== '1') {
+        sendJson(['ok' => false, 'error' => 'Подтвердите удаление пачки и всех её писем.'], 422);
+    }
+    foreach (docgenBatchItems((string) $batch['id']) as $item) {
+        docgenRemoveTree(docgenQueuePath((string) $item['id']));
+    }
+    if ((string) $batch['id'] === 'legacy') {
+        @unlink(DOCGEN_BATCH_DIR . '/legacy-status.json');
+    } else {
+        docgenRemoveTree(docgenBatchPath((string) $batch['id']));
+    }
+    sendJson(['ok' => true, 'deleted' => (string) $batch['id']]);
+}
+
+function docgenMoveBatch(): never
+{
+    $id = trim((string) ($_POST['batch_id'] ?? ''));
+    $direction = (string) ($_POST['direction'] ?? '');
+    if (!in_array($direction, ['up', 'down'], true)) {
+        sendJson(['ok' => false, 'error' => 'Укажите направление перемещения.'], 422);
+    }
+    $batches = docgenNormalizeBatchPriorities();
+    $index = -1;
+    foreach ($batches as $position => $batch) {
+        if ((string) ($batch['id'] ?? '') === $id) {
+            $index = $position;
+            break;
+        }
+    }
+    if ($index < 0) {
+        sendJson(['ok' => false, 'error' => 'Пачка не найдена.'], 404);
+    }
+    $other = $direction === 'up' ? $index - 1 : $index + 1;
+    if (!isset($batches[$other])) {
+        sendJson(['ok' => false, 'error' => 'Пачка уже крайняя в этом направлении.'], 422);
+    }
+    $current = $batches[$index];
+    $neighbor = $batches[$other];
+    $currentPriority = (int) $current['priority'];
+    $current['priority'] = (int) $neighbor['priority'];
+    $neighbor['priority'] = $currentPriority;
+    docgenPersistBatch($current);
+    docgenPersistBatch($neighbor);
+    sendJson(['ok' => true, 'moved' => $id, 'direction' => $direction]);
 }
 
 function docgenRegisterDownload(string $sourcePath, string $filename, string $format, int $created, int $skipped): string
@@ -1834,6 +2005,7 @@ function docgenGenerate(): never
         'subject' => $batchSubject,
         'status' => 'review',
         'mode' => '',
+        'priority' => docgenNextBatchPriority(),
         'createdAt' => date(DATE_ATOM),
         'reviewedAt' => null,
         'smtpAccountId' => (string) ($settings['id'] ?? ''),
@@ -2467,7 +2639,14 @@ function docgenCronSend(): array
             $result['reason'] = 'no_due';
             return $result;
         }
-        usort($due, static fn(array $a, array $b): int => strcmp((string) ($a['createdAt'] ?? ''), (string) ($b['createdAt'] ?? '')));
+        usort($due, static function (array $a, array $b) use ($batchById): int {
+            $priorityA = (int) ($batchById[(string) ($a['batchId'] ?? '')]['priority'] ?? 0);
+            $priorityB = (int) ($batchById[(string) ($b['batchId'] ?? '')]['priority'] ?? 0);
+            if ($priorityA !== $priorityB) {
+                return $priorityA <=> $priorityB;
+            }
+            return strcmp((string) ($a['createdAt'] ?? ''), (string) ($b['createdAt'] ?? ''));
+        });
         $due = array_slice($due, 0, $limit);
         $affected = [];
         foreach ($due as $index => $item) {
@@ -2521,7 +2700,7 @@ function docgenCronSend(): array
                     $sent++;
                 } elseif ($status === 'failed') {
                     $failed++;
-                } elseif (in_array($status, ['queued', 'scheduled', 'sending'], true)) {
+                } elseif (in_array($status, ['queued', 'scheduled', 'sending', 'paused'], true)) {
                     $pending++;
                 }
             }
@@ -2544,7 +2723,7 @@ function docgenCronSend(): array
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -2619,6 +2798,14 @@ function docgenDispatch(string $action): void
             docgenCancelBatch();
         case 'retry_batch':
             docgenRetryBatch();
+        case 'pause_batch':
+            docgenPauseBatch();
+        case 'resume_batch':
+            docgenResumeBatch();
+        case 'delete_batch':
+            docgenDeleteBatch();
+        case 'move_batch':
+            docgenMoveBatch();
         case 'download':
             if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') {
                 sendJson(['ok' => false, 'error' => 'Для скачивания используйте GET.'], 405);

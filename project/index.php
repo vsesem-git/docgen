@@ -2157,7 +2157,7 @@ async function generate() {
   }
 }
 function queueStatus(status) {
-  const map={queued:['В ручной очереди','queued'],scheduled:['В расписании','scheduled'],sent:['Отправлено','sent'],failed:['Ошибка / не отправлено','failed'],sending:['Отправка прервана или неясна','sending'],cancelled:['Отменено','cancelled']};
+  const map={queued:['В ручной очереди','queued'],scheduled:['В расписании','scheduled'],paused:['На паузе','scheduled'],sent:['Отправлено','sent'],failed:['Ошибка / не отправлено','failed'],sending:['Отправка прервана или неясна','sending'],cancelled:['Отменено','cancelled']};
   return map[status]||['Статус неизвестен',''];
 }
 function renderQueue() {
