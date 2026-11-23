@@ -969,7 +969,8 @@ main{max-width:1480px;margin:0 auto;padding:22px 24px 48px}
 .notice{border:1px solid #c9d9ea;border-radius:10px;background:#f8fbff;color:#39536f;padding:11px 14px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start}
 .notice strong{color:#173b60}
 .notice ol{margin:5px 0 0;padding-left:20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 24px}
-.notice li{padding-left:2px}
+".notice li{padding-left:2px}
+.help-accordion{display:block;padding:0}.help-accordion>summary{cursor:pointer;list-style:none;padding:11px 14px;display:flex;align-items:center;gap:9px;color:#173b60;font-weight:750}.help-accordion>summary::-webkit-details-marker{display:none}.help-accordion>summary:after{content:'＋';margin-left:auto;color:var(--brand);font-weight:800}.help-accordion[open]>summary:after{content:'−'}.help-accordion>div{padding:3px 14px 13px;border-top:1px solid #e7edf3}.help-accordion ol{counter-reset:help-step;list-style:none;margin:9px 0 0;padding:0;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:7px 22px}.help-accordion li{counter-increment:help-step;position:relative;padding:5px 0 5px 30px;border-bottom:1px dashed #e3ecf4}.help-accordion li:before{content:counter(help-step);position:absolute;left:0;top:5px;width:21px;height:21px;border-radius:50%;display:grid;place-items:center;background:#e8f2fc;color:#175387;font-size:10.5px;font-weight:800}
 .top-grid{display:grid;grid-template-columns:minmax(280px,.88fr) minmax(400px,1.12fr);gap:16px;margin-bottom:16px}
 @media(max-width:850px){.top-grid{grid-template-columns:1fr}.header-inner{display:block}.header-badge{display:inline-flex;margin-top:12px}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
@@ -1086,7 +1087,8 @@ body.modal-open{overflow:hidden}
 .auto-button{padding:5px 9px;font-size:11px;border-radius:7px;border:1px solid #b8cee1;color:var(--brand);background:#fff}
 .modal-details{border:1px solid var(--line);border-radius:9px;background:#fbfcfe;padding:10px 12px}
 .modal-details summary{cursor:pointer;font-size:12.5px;font-weight:700;color:#315c82}
-.modal-details .modal-fields{margin-top:11px}
+".modal-details .modal-fields{margin-top:11px}
+.record-modal{width:min(1180px,100%)}.record-modal .modal-main{padding:16px 20px 20px;background:#f6f9fc}.record-modal .modal-section{background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 14px 15px;margin:0 0 12px;box-shadow:0 1px 4px rgba(18,59,99,.06)}.record-modal .modal-section h3{margin:0 0 11px;padding:0 0 8px;border-bottom:1px solid #e8eef4;display:flex;align-items:center;gap:8px;font-size:12.5px;letter-spacing:.01em}.record-modal .modal-section h3:before{content:'';width:4px;height:14px;border-radius:3px;background:var(--brand);flex:none}.record-modal .modal-fields{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 14px;align-items:start}.record-modal .modal-field{display:flex;flex-direction:column;gap:4px;min-width:0}.record-modal .modal-field.wide{grid-column:span 2}.record-modal .modal-field label{height:34px;min-height:34px;display:flex;align-items:flex-end;margin:0;line-height:1.25;overflow:hidden}.record-modal .modal-field input,.record-modal .modal-field textarea{min-height:38px;height:38px}.record-modal .modal-field textarea{min-height:76px;height:auto}.record-modal .case-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.record-modal .manager-check-detail .manager-check-values{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .modal-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 20px;border-top:1px solid var(--line);background:#fbfdff}
 .modal-actions .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .dadata-map-row{display:grid;grid-template-columns:minmax(210px,1fr) minmax(200px,1fr) minmax(180px,1fr);gap:10px;align-items:center;border:1px solid var(--line);border-radius:9px;background:#fff;padding:9px 11px;margin-bottom:8px}
@@ -1119,13 +1121,14 @@ body.modal-open{overflow:hidden}
 .batch-review{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.batch-review>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650;color:#173b60}.batch-review-body{padding:11px 13px;border-top:1px solid var(--line)}
 .batch-review-item{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:7px 9px;border:1px solid #e3ebf4;border-radius:7px;margin-bottom:6px;font-size:12.5px}.batch-review-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .queue-item{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 14px;align-items:center}.queue-item:hover{border-color:#b4c8db}.queue-item-main{min-width:0}.queue-item-title{font-weight:750;color:#173b60;overflow-wrap:anywhere}.queue-item-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}.queue-item-address{font-size:11.5px;margin-top:5px;overflow-wrap:anywhere}.queue-item-error{color:var(--bad);font-size:11.5px;margin-top:4px}.queue-item-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}.status-label{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:10.5px;font-weight:750;background:#eef2f7;color:#586d82;white-space:nowrap}.status-label.queued{background:var(--warn-bg);color:#8b5b00}.status-label.sent{background:var(--ok-bg);color:var(--ok)}.status-label.failed,.status-label.sending{background:var(--bad-bg);color:var(--bad)}
+.manager-modal{width:min(1440px,100%);height:calc(100vh - 36px)}.manager-modal .modal-head{padding:12px 16px}.manager-modal .modal-main{padding:0;flex:1;min-height:0;background:#f2f6fb}.manager-modal iframe{display:block;width:100%;height:100%;border:0;background:#f2f6fb}
 .queue-modal{width:min(1180px,100%)}.queue-review-main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);gap:12px 16px}.queue-preview-toolbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap}.pdf-preview-frame{grid-column:1;grid-row:2/4;width:100%;height:56vh;min-height:390px;border:1px solid var(--line);border-radius:8px;background:#eaf0f5}.queue-edit-grid{grid-column:2;grid-row:2;display:grid;grid-template-columns:1fr;gap:10px;align-content:start}.queue-edit-grid .span2{grid-column:1/-1}.queue-edit-grid textarea,.queue-edit-grid input{width:100%;border:1px solid #cbd7e3;border-radius:7px;padding:8px;font:inherit;font-size:12.5px}.review-confirm{grid-column:2;grid-row:3;border:1px solid #c9d9ea;border-radius:8px;background:#f8fbff;padding:10px;font-size:12px}.review-confirm label{display:flex;gap:7px;align-items:flex-start;font-weight:700;color:#284761}.review-confirm input{margin:2px 0 0;accent-color:var(--brand)}.review-confirm .small-muted{display:block;margin:5px 0 0 22px}
 .html-editor-modal{width:min(1280px,100%)}.html-editor-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px}.editor-label{display:block;font-size:12px;font-weight:750;color:#31516d;margin:0 0 6px}.editor-name{margin-bottom:12px}.html-code-editor{display:block;width:100%;height:50vh;min-height:340px;resize:vertical;border:1px solid #cbd7e3;border-radius:8px;padding:11px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#173b60;background:#fbfdff;tab-size:2}.html-code-editor:focus{outline:2px solid rgba(14,79,138,.13);border-color:var(--brand)}.preview-column{display:flex;flex-direction:column;min-height:390px}.preview-column iframe{flex:1;width:100%;min-height:340px;border:1px solid var(--line);border-radius:8px;background:#fff}
 [hidden]{display:none!important}
 @media(max-width:650px){
   .modal-backdrop{padding:0}.modal{height:100vh;max-height:100vh;border-radius:0}
   .modal-head,.modal-main,.modal-actions{padding-left:14px;padding-right:14px}
-  .modal-fields{grid-template-columns:1fr}.case-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.manager-check-detail .manager-check-values{grid-template-columns:1fr}
+  .modal-fields,.record-modal .modal-fields{grid-template-columns:1fr}.record-modal .modal-field.wide{grid-column:1}.case-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.manager-check-detail .manager-check-values,.record-modal .manager-check-detail .manager-check-values{grid-template-columns:1fr}
   .inflection-head{display:block}.inflection-head .small-muted{text-align:left;max-width:none;margin-top:4px}
   .modal-actions{align-items:stretch;flex-direction:column}.modal-actions .right{justify-content:flex-end}
   .settings-grid,.html-editor-grid,.queue-review-main,.table-tools-grid{grid-template-columns:1fr}
@@ -1150,7 +1153,7 @@ body.modal-open{overflow:hidden}
   </div>
 </header>
 <main>
-  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Чтобы обновить данные организаций, нажмите «Обновить через DaData» для отмеченных записей: в диалоге сопоставьте поля DaData с колонками книги или создайте новые, проверьте список «было → стало» и только затем нажмите «Сохранить карточки».</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <a href="queue.php">менеджере очереди</a>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
+  <details class="notice help-accordion"><summary><span aria-hidden="true">🧭</span> Как пользоваться тестовым приложением</summary><div><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Чтобы обновить данные организаций, нажмите «Обновить через DaData» для отмеченных записей: в диалоге сопоставьте поля DaData с колонками книги или создайте новые, проверьте список «было → стало» и только затем нажмите «Сохранить карточки».</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></details>
 
   <section class="top-grid">
     <div class="card">
@@ -1240,7 +1243,7 @@ body.modal-open{overflow:hidden}
   </section>
 
   <section class="settings-card" id="letterTemplateCard">
-    <details open>
+    <details>
       <summary><strong>Шаблон письма: имя файла, получатели, текст</strong><span class="settings-state" id="letterState">Общие настройки</span></summary>
       <div class="settings-body">
         <div class="notice" style="margin:0 0 14px"><span>✉️</span><div>Эти настройки общие для всех DOCX/HTML-шаблонов. В полях можно писать текст и коды вида <b>{Фамилия И.О.}</b> — они заменятся данными выбранной записи. Нажмите переменную ниже, чтобы вставить её в последнее редактируемое поле. Получатели, тема и текст всегда можно исправить вручную в карточке письма перед отправкой; автоматической рассылки нет.</div></div>
@@ -1325,18 +1328,18 @@ body.modal-open{overflow:hidden}
     </div>
   </section>
   <section class="queue-section" id="emailQueue">
-    <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Откройте аккордеон, проверьте письма и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <a href="queue.php">менеджере очереди</a>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><a class="btn-ghost btn-small" href="queue.php">Менеджер очереди</a><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
+    <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Откройте аккордеон, проверьте письма и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" data-open-manager>Менеджер очереди</button><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
     <div id="queueList" class="queue-list"><div class="empty-state">Загружаем очередь…</div></div>
   </section>
 </main>
 <div class="modal-backdrop" id="recordModal" hidden>
-  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <section class="modal record-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-head">
       <div><h2 id="modalTitle">Карточка адресата</h2><div class="modal-subtitle" id="modalRecordLabel"></div></div>
       <button type="button" class="modal-close" id="modalCloseBtn" aria-label="Закрыть карточку">×</button>
     </div>
     <div class="modal-main">
-      <div class="modal-hint">Проверьте исходные сведения. Формы ФИО и должности ниже рассчитаны автоматически; они являются предложением, а не юридической проверкой. Дательный падеж для шаблона можно отредактировать вручную или применить кнопку «Подставить».</div>
+      <div class="modal-hint">Проверьте исходные сведения. Формы ФИО и должности ниже рассчитаны автоматически; они являются предложением, а не юридической проверкой. Дательный падеж для шаблона можно отредактировать вручную или применить кнопку «Подставить». Если «Полное наименование для письма» не заполнено, при формировании используется «Наименование по книге / ЕГРЮЛ»; данные DaData для этого поля не подставляются.</div>
       <div id="modalCoreFields"></div>
       <section class="modal-section">
         <h3>Результат ручной сверки DaData</h3>
@@ -1373,7 +1376,7 @@ body.modal-open{overflow:hidden}
       <button type="button" class="modal-close" id="dadataRefreshClose" aria-label="Закрыть окно обновления">×</button>
     </div>
     <div class="modal-main">
-      <div class="notice" style="margin-bottom:14px"><span>🔎</span><div>Данные загружены, но <b>ничего не сохранено</b>. Выберите, какие сведения DaData сопоставить с существующими колонками книги, либо создайте новую колонку. Например: «Наименование организации (полное с ОПФ)» → «Полное наименование», «Юридический адрес» → «Юридический адрес». После сопоставления проверьте список изменений и только потом нажмите «Сохранить карточки».</div></div>
+      <div class="notice" style="margin-bottom:14px"><span>🔎</span><div>Данные загружены, но <b>ничего не сохранено</b>. Выберите, какие сведения DaData сопоставить с существующими колонками книги, либо создайте новую колонку. Например: «Юридический адрес» → «Юридический адрес», «ИНН» → «ИНН». Поле «Полное наименование» заполняется вручную; если оно пустое, при формировании берётся «Наименование по книге / ЕГРЮЛ». После сопоставления проверьте список изменений и только потом нажмите «Сохранить карточки».</div></div>
       <div id="dadataRefreshSummary" class="small-muted" style="margin-bottom:15px"></div>
       <section class="modal-section">
         <h3>1. Сопоставление полей DaData с колонками книги</h3>
@@ -1425,6 +1428,12 @@ body.modal-open{overflow:hidden}
       <label class="small-muted excel-clear-empty"><input id="excelClearEmpty" type="checkbox"> Разрешить очистку существующих значений пустыми ячейками (по умолчанию выключено)</label>
     </div>
     <div class="modal-actions"><span class="small-muted" id="excelImportModalFeedback">До подтверждения таблицы не изменяются; перед записью создаётся приватная резервная копия.</span><div class="right"><button type="button" class="btn-ghost" id="excelImportCancel">Отмена</button><button type="button" class="btn-primary" id="confirmExcelImportBtn">Подтвердить импорт</button></div></div>
+  </section>
+</div>
+<div class="modal-backdrop" id="queueManagerModal" hidden>
+  <section class="modal manager-modal" role="dialog" aria-modal="true" aria-labelledby="queueManagerModalTitle">
+    <div class="modal-head"><div><h2 id="queueManagerModalTitle">Менеджер очереди писем</h2><div class="modal-subtitle">Пачки в расписании и ручной очереди, лимиты SMTP-ящиков и ошибки отправки</div></div><button type="button" class="modal-close" id="queueManagerModalClose" aria-label="Закрыть менеджер очереди">×</button></div>
+    <div class="modal-main"><iframe id="queueManagerFrame" title="Менеджер очереди писем"></iframe></div>
   </section>
 </div>
 <div class="modal-backdrop" id="queueModal" hidden>
@@ -1753,11 +1762,11 @@ function modalFieldLabel(name) {
   return labels[name]||name;
 }
 function modalFieldMarkup(name, value) {
-  const longField=['Должность руководителя','Юридический адрес','Источник и примечания','Доп./старые email'].includes(name) || String(value??'').length>110;
+  const longField=['Полное наименование','Наименование (ЕГРЮЛ/лист)','Должность руководителя','Юридический адрес','Источник и примечания','Доп./старые email'].includes(name) || String(value??'').length>110;
   const field=longField
     ? `<textarea data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}">${esc(value)}</textarea>`
     : `<input type="text" data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}" value="${esc(value)}" placeholder="Введите значение">`;
-  return `<div class="modal-field"><label>${esc(modalFieldLabel(name))}</label>${field}</div>`;
+  return `<div class="modal-field${longField?' wide':''}"><label title="${esc(modalFieldLabel(name))}">${esc(modalFieldLabel(name))}</label>${field}</div>`;
 }
 function renderRecordFields(values) {
   const coreNames=new Set(MODAL_CORE_GROUPS.flatMap(group=>group.fields));
@@ -2008,8 +2017,11 @@ function renderTable() {
     const manual=unknownFields.map(name=>{
       const preset=(dataset.demoOverrides?.[id]||{})[name]??'';
       const current=(overrides[id]||{})[name]??(fieldValue(r,name)||preset);
+      const bookName=fieldValue(r,'Наименование (ЕГРЮЛ/лист)');
+      const fallback=name==='Полное наименование'&&bookName?` · пустое значение → ${bookName}`:'';
       const sourceNote=id==='guber-0037' && name==='Полное наименование' ? ' · из PDF-примера' : '';
-      return `<td><input class="manual-input" type="text" data-record-id="${esc(id)}" data-manual-field="${esc(name)}" value="${esc(current)}" placeholder="Введите значение" title="Нет одноимённой колонки; задайте значение явно${esc(sourceNote)}"></td>`;
+      const placeholder=name==='Полное наименование'&&bookName?bookName:'Введите значение';
+      return `<td><input class="manual-input" type="text" data-record-id="${esc(id)}" data-manual-field="${esc(name)}" value="${esc(current)}" placeholder="${esc(placeholder)}" title="Нет одноимённой колонки; задайте значение явно${esc(fallback)}${esc(sourceNote)}"></td>`;
     }).join('');
     return `<tr class="${rowClasses}" data-id="${esc(id)}"><td><input class="check row-check" type="checkbox" data-id="${esc(id)}" ${check} aria-label="Выбрать ${esc(person)}"></td><td><div class="cell-main">${esc(region)}</div><div class="cell-sub">${esc(r.source)}</div></td><td><div class="cell-main"${nameTitle?` title="${esc(nameTitle)}"`:''}>${esc(person)}</div>${nameNote}<div class="cell-sub">${esc(fieldValue(r,'Фамилия И.О.'))}</div></td><td>${esc(position)}${positionNote}</td><td>${esc(inn)}</td><td>${managerCheckBadgeMarkup(managerCheck)}</td><td>${statusBadge(r)}</td><td><button type="button" class="btn-ghost btn-small edit-record" data-edit-id="${esc(id)}">Карточка</button></td>${extraColumns}${manual}</tr>`;
   }).join('');
@@ -2347,6 +2359,15 @@ function openQueueItem(id) {
 }
 function closeQueueModal() {
   $('queueModal').hidden=true;$('queuePdfFrame').src='about:blank';document.body.classList.remove('modal-open');activeQueueItemId='';
+}
+function openQueueManager() {
+  const frame=$('queueManagerFrame');
+  if(!frame.src || frame.src==='about:blank') frame.src='queue.php';
+  $('queueManagerModal').hidden=false;document.body.classList.add('modal-open');$('queueManagerModalClose').focus();
+}
+function closeQueueManager() {
+  $('queueManagerModal').hidden=true;$('queueManagerFrame').src='about:blank';document.body.classList.remove('modal-open');
+  refreshQueue().catch(()=>{});
 }
 async function saveQueueItem(showMessage=true) {
   if(!activeQueueItemId)return false;
@@ -2886,6 +2907,10 @@ $('recordModal').addEventListener('click',event=>{if(event.target===$('recordMod
 $('queueModalClose').addEventListener('click',closeQueueModal);
 $('queueModalCancel').addEventListener('click',closeQueueModal);
 $('queueModal').addEventListener('click',event=>{if(event.target===$('queueModal'))closeQueueModal();});
+$('queueManagerModalClose').addEventListener('click',closeQueueManager);
+$('queueManagerModal').addEventListener('click',event=>{if(event.target===$('queueManagerModal'))closeQueueManager();});
+document.querySelectorAll('[data-open-manager]').forEach(element=>element.addEventListener('click',openQueueManager));
+window.addEventListener('message',event=>{if(event.data==='docgen-close-queue-manager')closeQueueManager();});
 $('queueReviewedCheck').addEventListener('change',syncQueueReviewControls);
 ['queueTo','queueCc','queueSubject','queueBody'].forEach(id=>$(id).addEventListener('input',()=>{if($('queueReviewedCheck').checked)$('queueReviewedCheck').checked=false;syncQueueReviewControls();}));
 $('saveQueueItemBtn').addEventListener('click',async()=>{try{await saveQueueItem(true);showToast('Правки письма сохранены.','success');}catch(e){showToast(e.message||'Не удалось сохранить правки.','error');}});
@@ -2939,7 +2964,7 @@ $('smtpEncryption').addEventListener('change',()=>{
   if(encryption==='ssl'&&port==='587')$('smtpPort').value='465';
   if(encryption==='tls'&&port==='465')$('smtpPort').value='587';
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueManagerModal').hidden)closeQueueManager();else if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
 $('dropTemplate').addEventListener('click',()=>templateInput.click());
 $('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
 templateInput.addEventListener('change',()=>analyzeUpload(templateInput.files?.[0]));

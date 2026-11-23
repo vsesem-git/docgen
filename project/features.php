@@ -2138,6 +2138,21 @@ function docgenBuildDocumentSource(array $template, array $templateInfo, array $
     }
 }
 
+function docgenManualFullName(array $fields): string
+{
+    $manual = trim((string) ($fields['Полное наименование'] ?? ''));
+    if ($manual !== '') {
+        return $manual;
+    }
+    return trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? ''));
+}
+
+function docgenTemplateBaseName(string $name): string
+{
+    $base = pathinfo($name, PATHINFO_FILENAME);
+    return $base !== '' ? $base : $name;
+}
+
 function docgenGenerate(): never
 {
     set_time_limit(300);
@@ -2213,6 +2228,9 @@ function docgenGenerate(): never
         $fields = baseFields($record);
         $rowOverrides = isset($overrides[$id]) && is_array($overrides[$id]) ? $overrides[$id] : [];
         $fields = array_merge($fields, $rowOverrides);
+        // The manual letter name is optional: an empty value falls back to the
+        // organization name from the book. Never infer it from DaData.
+        $fields['Полное наименование'] = docgenManualFullName($fields);
         $cardLabel = trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? $id));
         if ((string) ($fields['Регион'] ?? '') !== '') {
             $cardLabel = (string) $fields['Регион'] . ' · ' . $cardLabel;
@@ -2303,8 +2321,9 @@ function docgenGenerate(): never
         $progress('queue', $queuedStep, 'Очередь ' . $queuedStep . '/' . $totalSteps . ' — ' . $region, $region . ' · ' . $person);
         $inn = (string) ($fields['ИНН'] ?? '');
         $emailValues = array_merge($fields, $values);
-        $emailValues['Наименование файла'] = (string) $template['name'];
-        $emailValues['наименование файла'] = (string) $template['name'];
+        $templateBaseName = docgenTemplateBaseName((string) $template['name']);
+        $emailValues['Наименование файла'] = $templateBaseName;
+        $emailValues['наименование файла'] = $templateBaseName;
         $filenamePattern = docgenReplaceCodes((string) $letter['filenamePattern'], $emailValues);
         $filenamePattern = trim((string) (preg_replace('/\s+[—–-]\s*$/u', '', trim($filenamePattern)) ?? $filenamePattern));
         $baseName = $filenamePattern !== ''

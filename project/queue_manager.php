@@ -35,11 +35,12 @@ button,input,select{font:inherit}button{cursor:pointer}.btn{border:1px solid #bd
 .batch{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}.batch>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650}.batch .body{padding:12px 13px;border-top:1px solid var(--line)}
 .item{border:1px solid #e3ebf4;border-radius:8px;padding:9px 11px;margin-bottom:7px;background:#fff}.item .meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill{border-radius:999px;padding:2px 8px;font-size:11px;background:#eef3f9;color:var(--muted)}.pill.sent{background:#e8f6ee;color:var(--ok)}.pill.failed{background:#fdecea;color:var(--bad)}.pill.scheduled{background:#fff5e5;color:var(--warn)}.pill.paused{background:#ece7f8;color:#5b3fa3}
 a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:9px}.muted{color:var(--muted);font-size:12px}.error{color:var(--bad);font-size:12px}.feedback{margin-left:8px;font-size:12px}
+[hidden]{display:none!important}
 @media(max-width:700px){main{padding:12px}.grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<header><div><h1>Менеджер очереди писем</h1><a class="sub" href="index.php">← Вернуться к формированию и ручной проверке</a></div><div class="sub">Локальное приложение<?= $authEnabled ? ' · вход по паролю' : '' ?></div></header>
+<header><div><h1>Менеджер очереди писем</h1><a class="sub" href="index.php" id="backToApp">← Вернуться к формированию и ручной проверке</a><button class="btn" id="closeManagerInPopup" type="button" hidden>Закрыть окно</button></div><div class="sub">Локальное приложение<?= $authEnabled ? ' · вход по паролю' : '' ?></div></header>
 <main>
   <section class="card">
     <h2>Настройки рассылки</h2>
@@ -105,6 +106,11 @@ async function runBatchAction(action,id){
   catch(e){if(target)target.textContent=e.message;showToast(e.message,'error');}
 }
 function showToast(text,kind){const el=document.createElement('div');el.className='pill '+(kind==='success'?'sent':'failed');el.textContent=text;document.querySelector('main').prepend(el);setTimeout(()=>el.remove(),5000);}
+if(window.self!==window.top){
+  $('backToApp').hidden=true;
+  $('closeManagerInPopup').hidden=false;
+  $('closeManagerInPopup').addEventListener('click',()=>window.parent.postMessage('docgen-close-queue-manager','*'));
+}
 function renderMailingAccounts(accounts){
   $('mailingAccounts').innerHTML=accounts.length?accounts.map(account=>{
     const id=String(account.id||'');
