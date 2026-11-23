@@ -1098,7 +1098,7 @@ body.modal-open{overflow:hidden}
     <details id="smtpDetails">
       <summary><strong>Настройки SMTP</strong><span class="settings-state" id="smtpState">Не настроено</span></summary>
       <div class="settings-body">
-        <div class="notice" style="margin:0 0 14px"><span>🔒</span><div>Пароль сохраняется вне web-root в приватном каталоге приложения. После сохранения он не отображается; пустое поле пароля оставляет прежний секрет без изменений.</div></div>
+        <div class="notice" style="margin:0 0 14px"><span>🔒</span><div>Пароль сохраняется вне web-root в приватном каталоге приложения. После сохранения он не отображается; пустое поле пароля оставляет прежний секрет без изменений. Для порта 465 нужно шифрование SSL/TLS, для 587 — STARTTLS; при смене порта шифрование подставится автоматически.</div></div>
         <div class="settings-grid">
           <div class="field"><label for="smtpHost">SMTP-сервер</label><input id="smtpHost" type="text" placeholder="smtp.example.org" autocomplete="off"></div>
           <div class="field"><label for="smtpPort">Порт</label><input id="smtpPort" type="number" min="1" max="65535" value="587"></div>
@@ -2225,6 +2225,17 @@ $('addTableSectionBtn').addEventListener('click',addTableSection);
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
 ['smtpHost','smtpFromEmail'].forEach(id=>$(id).addEventListener('input',updateSmtpState));
+$('smtpPort').addEventListener('change',()=>{
+  const port=$('smtpPort').value.trim();
+  if(port==='465')$('smtpEncryption').value='ssl';
+  else if(port==='587')$('smtpEncryption').value='tls';
+  else if(port==='25')$('smtpEncryption').value='none';
+});
+$('smtpEncryption').addEventListener('change',()=>{
+  const encryption=$('smtpEncryption').value, port=$('smtpPort').value.trim();
+  if(encryption==='ssl'&&port==='587')$('smtpPort').value='465';
+  if(encryption==='tls'&&port==='465')$('smtpPort').value='587';
+});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
 $('dropTemplate').addEventListener('click',()=>templateInput.click());
 $('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
