@@ -19,8 +19,8 @@ define('DOCGEN_DADATA_BATCH_SIZE', 20);
 define('DOCGEN_TEMPLATE_INDEX', DOCGEN_TEMPLATES_DIR . '/index.json');
 define('DOCGEN_DOWNLOAD_TTL_SECONDS', 86400);
 define('DOCGEN_MAX_HTML_TEMPLATE_BYTES', 1_000_000);
-// A slow SMTP server must never freeze the UI for minutes. PHPMailer uses this
-// value for the socket connection and for every read from the SMTP server.
+// Only the interactive "Check SMTP" probe is time-boxed. Actual mail delivery
+// keeps PHPMailer's normal timeout, so a slow server can still accept a letter.
 define('DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS', 8);
 
 function docgenEnsureDir(string $directory, int $mode = 0700): void
@@ -1478,7 +1478,9 @@ function docgenBuildMailer(?array $override = null, ?string $overridePassword = 
     $mailer->SMTPAuth = trim((string) ($settings['username'] ?? '')) !== '';
     $mailer->Username = (string) ($settings['username'] ?? '');
     $mailer->Password = (string) ($secret['password'] ?? '');
-    $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+    // Normal delivery timeout, as before the UI fix. Only the connectivity
+    // probe in docgenTestSmtp() gets the shorter 8-second limit.
+    $mailer->Timeout = 30;
     $mailer->SMTPKeepAlive = false;
     $mailer->CharSet = 'UTF-8';
     $mailer->Encoding = 'base64';
@@ -1546,6 +1548,9 @@ function docgenTestSmtp(): never
             [$override, $overridePassword] = docgenSmtpSettingsFromRequest();
         }
         $mailer = docgenBuildMailer($override, $overridePassword);
+        // Bound only this connectivity probe; sending from the queue is unchanged.
+        $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+        $mailer->getSMTPInstance()->Timelimit = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
         if ($mailer->smtpConnect()) {
             $mailer->smtpClose();
             sendJson(['ok' => true, 'message' => 'Соединение с SMTP установлено, сервер принял параметры авторизации.']);
