@@ -1089,7 +1089,7 @@ body.modal-open{overflow:hidden}
     <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
     <button class="btn-ghost" id="clearSelectionBtn" type="button">Снять выбор</button>
     <div class="search-box"><input type="search" id="searchInput" placeholder="Поиск по региону, ФИО, ИНН…" aria-label="Поиск по записям"></div>
-    <div class="stats" id="statsBar"><span>В выборке <b id="filteredCount">0</b></span><span class="green">Отмечено <b id="selectedCount">0</b></span></div>
+    <div class="stats" id="statsBar"><span>В выборке <b id="filteredCount">0</b></span><span class="green">Отмечено <b id="selectedCount">0</b></span><span class="small-muted" id="pageSelectionHint"></span></div>
   </section>
 
   <div class="progress-wrap" id="progressWrap"><span class="spinner"></span><span id="progressText">Формируем PDF и DOCX…</span></div>
@@ -1437,7 +1437,7 @@ function renderManagerCheckDetail(record) {
   let checkedAt=String(check.checkedAt||'');
   if(checkedAt){const date=new Date(checkedAt);if(!Number.isNaN(date.getTime()))checkedAt=date.toLocaleString('ru-RU');}
   target.className=`manager-check-detail ${statusClass}`;
-  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div>${check.organizationFullName?`<div class="manager-check-value"><b>Полное наименование из ЕГРЮЛ · подсказка</b>${esc(check.organizationFullName)} <button type="button" class="auto-button btn-small" data-apply-full-name="${esc(check.organizationFullName)}">Подставить в карточку</button><span class="small-muted" style="display:block;margin-top:4px">Это юридическое название, а не обращение в дательном падеже; проверьте и отредактируйте вручную.</span></div>`:''}</div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
+  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div></div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
 }
 function modalFieldLabel(name) {
   const labels={
@@ -1689,7 +1689,7 @@ function renderTable() {
   const pageRows=filtered.slice(start,start+PAGE_SIZE);
   const unknownFields=getUnmappedFields();
   const customColumns=(dataset.customColumns||[]).filter(name=>!unknownFields.includes(name));
-  const headers=`<tr><th><input class="check" type="checkbox" id="checkPage" title="Выбрать записи на этой странице"></th><th>Регион</th><th>Адресат / ФИО руководителя</th><th>Должность</th><th>ИНН</th><th>Сверка DaData</th><th>Статус</th><th>Карточка</th>${customColumns.map(name=>`<th>${esc(name)}</th>`).join('')}${unknownFields.map(f=>`<th>Ручное поле: ${esc(f)}</th>`).join('')}</tr>`;
+  const headers=`<tr><th><input class="check" type="checkbox" id="checkPage" title="Выбрать ${pageRows.length} записей только на этой странице; всего в выборке ${filtered.length}"></th><th>Регион</th><th>Адресат / ФИО руководителя</th><th>Должность</th><th>ИНН</th><th>Сверка DaData</th><th>Статус</th><th>Карточка</th>${customColumns.map(name=>`<th>${esc(name)}</th>`).join('')}${unknownFields.map(f=>`<th>Ручное поле: ${esc(f)}</th>`).join('')}</tr>`;
   $('tableHead').innerHTML=headers;
   tableBody.innerHTML=pageRows.map(r=>{
     const f=r.fields||{}; const id=r.id;
@@ -1727,8 +1727,10 @@ function renderTable() {
   $('filteredCount').textContent=String(filtered.length);
   $('selectedCount').textContent=String(selectedIds.size);
   $('sourceCount').textContent=`${activeSourceRecords().length.toLocaleString('ru-RU')} записей в текущем наборе`;
+  $('pageSelectionHint').textContent=`Галочка в шапке — только эта страница (${pageRows.length}).`;
+  $('selectFilteredBtn').textContent=`Выбрать все по фильтру (${filtered.length})`;
   $('generateBtn').disabled=selectedIds.size===0 || (templateInfo.fields||[]).length===0;
-  $('generateBtn').textContent=selectedIds.size===1?'Сформировать PDF и поставить письмо в очередь':`Сформировать PDF для ${selectedIds.size} и поставить в очередь`;
+  $('generateBtn').textContent=selectedIds.size===1?'Сформировать PDF и поставить письмо в очередь':`Сформировать PDF для ${selectedIds.size} отмеченных записей и поставить в очередь`;
   updateManagerCheckButton();
   const pageAll=pageRows.length>0 && pageRows.every(r=>selectedIds.has(r.id));
   const checkPage=$('checkPage'); if(checkPage) checkPage.checked=pageAll;
@@ -1747,6 +1749,7 @@ function renderTable() {
   if(checkPage) checkPage.addEventListener('change',()=>{
     pageRows.forEach(r=>checkPage.checked?selectedIds.add(r.id):selectedIds.delete(r.id));
     renderTable();
+    showToast(`${checkPage.checked?'Выбраны':'Сняты'} ${pageRows.length} записей на текущей странице. Всего в выборке ${filtered.length}; для всех нажмите «Выбрать все по фильтру».`);
   });
 }
 function populateSources() {
@@ -2288,12 +2291,6 @@ $('testSmtpBtn').addEventListener('click',testSmtp);
 $('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);
 $('deleteSmtpAccountBtn').addEventListener('click',deleteSmtpAccount);
 $('smtpAccountSelect').addEventListener('change',()=>applySmtpAccountToForm($('smtpAccountSelect').value));
-$('managerCheckDetail').addEventListener('click',event=>{
-  const button=event.target.closest('[data-apply-full-name]');
-  if(!button)return;
-  setModalField('Полное наименование',button.dataset.applyFullName);
-  showToast('Подсказка из ЕГРЮЛ подставлена. Проверьте значение и сохраните карточку.','success');
-});
 ['smtpHost','smtpFromEmail'].forEach(id=>$(id).addEventListener('input',updateSmtpState));
 $('smtpPort').addEventListener('change',()=>{
   const port=$('smtpPort').value.trim();

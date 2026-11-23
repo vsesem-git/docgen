@@ -617,7 +617,6 @@ function docgenManagerCheckBase(string $status, string $message, string $recordI
         'managerName' => '',
         'managerPost' => '',
         'organizationName' => '',
-        'organizationFullName' => '',
         'nameMatch' => null,
         'positionMatch' => null,
         'checkedAt' => date(DATE_ATOM),
@@ -730,9 +729,6 @@ function docgenCompareManager(array $record, string $inn, string $kpp, array $su
     $comparison['managerName'] = $remoteName;
     $comparison['managerPost'] = $remotePost;
     $comparison['organizationName'] = $orgName;
-    // Suggestion only. The operator decides whether to put it into the card;
-    // it is a legal entity name, not the dative addressee used by the template.
-    $comparison['organizationFullName'] = $orgName;
     if ($remoteName === '') {
         $comparison['status'] = 'no_manager';
         $comparison['message'] = 'DaData не вернула ФИО действующего руководителя для этой записи.';
