@@ -1519,9 +1519,13 @@ function docgenSmtpSettingsFromRequest(): array
     if ($fromEmail === '' || !filter_var($fromEmail, FILTER_VALIDATE_EMAIL)) {
         throw new RuntimeException('Укажите корректный email отправителя.');
     }
-    $password = (string) ($_POST['password'] ?? '');
+    // An empty password field means "keep the saved secret", exactly as in
+    // docgenSaveSmtpSettings(). Only an explicit checkbox clears it.
+    $password = null;
     if (!empty($_POST['clear_password'])) {
         $password = '';
+    } elseif ((string) ($_POST['password'] ?? '') !== '') {
+        $password = (string) $_POST['password'];
     }
     return [[
         'host' => $host,
@@ -1556,7 +1560,8 @@ function docgenTestSmtp(): never
             sendJson(['ok' => true, 'message' => 'Соединение с SMTP установлено, сервер принял параметры авторизации.']);
         }
         $detail = trim((string) $mailer->ErrorInfo);
-        sendJson(['ok' => false, 'error' => 'Не удалось подключиться к SMTP-серверу.' . ($detail !== '' ? ' ' . mb_substr($detail, 0, 400, 'UTF-8') : '')], 502);
+        $hint = ' Проверьте адрес и порт из контейнера: для порта 587 выбирайте STARTTLS, для 465 — SSL/TLS; провайдер также может блокировать исходящий SMTP-порт.';
+        sendJson(['ok' => false, 'error' => 'Не удалось подключиться к SMTP-серверу.' . ($detail !== '' ? ' ' . mb_substr($detail, 0, 400, 'UTF-8') : '') . $hint], 502);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => 'Проверка SMTP не прошла: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
     }

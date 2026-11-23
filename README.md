@@ -77,6 +77,39 @@ PORT=8766 sh ./start_preview.sh
 Для preview нужно окружение PHP 8.1+ с расширениями `zip`, `dom`, `xml`, `xmlwriter`,
 `mbstring`, `gd`, `ctype` и 설치рованный `vendor/` (он лежит в репозитории).
 
+## Диагностика «Could not connect to SMTP host»
+
+Выполните внутри LXC, подставив свой адрес сервера и порт (это не секреты):
+
+```sh
+HOST=smtp.example.org   # только имя хоста, без https:// и без пути
+PORT=587                # 587 = STARTTLS, 465 = SSL/TLS
+
+getent hosts "$HOST" || echo "DNS не резолвится"
+timeout 5 bash -c "</dev/tcp/$HOST/$PORT" && echo "TCP OK" || echo "TCP недоступен"
+```
+
+Если TCP доступен, проверьте TLS:
+
+```sh
+# для порта 587 (STARTTLS)
+timeout 8 openssl s_client -starttls smtp -connect "$HOST:$PORT" -servername "$HOST" </dev/null 2>&1 | head -20
+
+# для порта 465 (SSL/TLS)
+timeout 8 openssl s_client -connect "$HOST:$PORT" -servername "$HOST" </dev/null 2>&1 | head -20
+```
+
+Частые причины: неверная пара «порт — шифрование» (587 + STARTTLS, 465 + SSL/TLS),
+закрытый исходящий порт у провайдера/файрвола Proxmox, нерезолвящийся адрес внутри
+контейнера, блокировка по IP у почтового сервиса. Журнал приложения:
+
+```sh
+journalctl -u docgen.service --since '-10 min' --no-pager
+```
+
+Пароль SMTP, логин, DaData API-ключ, cookie/CSRF-токены и персональные данные
+никуда отправлять не нужно — достаточно сказать, на каком шаге проверка оборвалась.
+
 ## Важно
 
 Сервис работает по HTTP без TLS. Оставляйте порт доступным только в доверенной локальной
