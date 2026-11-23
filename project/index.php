@@ -198,6 +198,30 @@ function jobTitleCaseForms(string $title): array
     return ['cases' => $forms, 'recognized' => $recognizedAny];
 }
 
+/** Conservative gender hint: patronymic first, then a clearly gendered first name. */
+function recipientGender(string $fullName): string
+{
+    $parts = preg_split('/\s+/u', mb_strtolower(trim($fullName)), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    if (count($parts) < 2) {
+        return '';
+    }
+    $patronymic = (string) end($parts);
+    if (preg_match('/(ич|ович|евич)$/u', $patronymic) === 1) {
+        return 'male';
+    }
+    if (preg_match('/(на|вна|ична)$/u', $patronymic) === 1) {
+        return 'female';
+    }
+    $firstName = (string) $parts[1];
+    if (preg_match('/(ай|ей|ий|ой|ый|й|ь)$/u', $firstName) === 1) {
+        return 'male';
+    }
+    if (preg_match('/(а|я)$/u', $firstName) === 1) {
+        return 'female';
+    }
+    return '';
+}
+
 function recipientInflections(string $fullName, string $jobTitle): array
 {
     $nameCases = [];
@@ -215,12 +239,15 @@ function recipientInflections(string $fullName, string $jobTitle): array
         }
     }
     $job = jobTitleCaseForms($jobTitle);
+    $gender = recipientGender($fullName);
     return [
         'ok' => true,
         'nameCases' => $nameCases,
         'nameError' => $nameError,
         'jobCases' => $job['cases'],
         'jobRecognized' => $job['recognized'],
+        'gender' => $gender,
+        'salutation' => $gender === 'female' ? 'Уважаемая,' : ($gender === 'male' ? 'Уважаемый,' : ''),
     ];
 }
 
@@ -1180,12 +1207,12 @@ body.modal-open{overflow:hidden}
       <section class="modal-section">
         <h3>Автоматическое склонение для проверки</h3>
         <div class="inflection-card">
-          <div class="inflection-head"><strong>ФИО</strong><span class="small-muted">Дательный падеж подставляется в поле «ФИО ДП».</span></div>
+          <div class="inflection-head"><strong>ФИО</strong><span class="small-muted">Здесь показаны все падежи, кроме дательного. Дательный подставляется в «ФИО ДП» и используется для обращения ниже.</span></div>
           <div class="case-grid" id="nameForms"><span class="small-muted">Введите ФИО для расчёта форм.</span></div>
           <div class="inflection-actions"><button type="button" class="auto-button" id="applyNameDative">Подставить дательный в «ФИО ДП»</button><span class="small-muted" id="nameInflectNote"></span></div>
         </div>
         <div class="inflection-card">
-          <div class="inflection-head"><strong>Должность для обращения</strong><span class="small-muted">Составные наименования и сокращения перепроверьте вручную.</span></div>
+          <div class="inflection-head"><strong>Должность для обращения</strong><span class="small-muted">Показан только дательный падеж: он подставляется в поле должности. Составные наименования проверьте вручную.</span></div>
           <div class="case-grid" id="jobForms"><span class="small-muted">Введите должность для расчёта форм.</span></div>
           <div class="inflection-actions"><button type="button" class="auto-button" id="applyJobDative">Подставить дательный в поле должности</button><span class="small-muted" id="jobInflectNote"></span></div>
         </div>
@@ -1280,17 +1307,18 @@ let activeModalRecordId = '';
 let latestInflections = null;
 let inflectTimer = null;
 let inflectRequestId = 0;
-let derivedManual = {nameDative:false, jobDative:false, initials:false, nameParts:false};
+let derivedManual = {nameDative:false, jobDative:false, initials:false, nameParts:false, salutation:false};
 let modalSourceEdited = {name:false,job:false};
 const MODAL_CORE_GROUPS = [
   {title:'Адресат и обращение', fields:['Регион','Наименование (ЕГРЮЛ/лист)','Полное наименование','ФИО','ФИО ДП','Фамилия И.О.','Имя Отчество','Обращение']},
   {title:'Должность', fields:['Должность','Должность руководителя','Должность руководителя дательный']},
   {title:'Реквизиты и связь', fields:['ИНН','КПП','ОГРН','Юридический адрес','Основной email','Доп./старые email','Официальный сайт']},
 ];
-const CASE_LABELS = [
-  ['nominative','Именительный'],['genitive','Родительный'],['dative','Дательный'],
+const CASE_LABELS_CHECK = [
+  ['nominative','Именительный'],['genitive','Родительный'],
   ['accusative','Винительный'],['ablative','Творительный'],['prepositional','Предложный']
 ];
+const CASE_LABELS_DATIVE = [['dative','Дательный']];
 const $ = (id) => document.getElementById(id);
 const sourceSelect = $('sourceSelect');
 const regionSelect = $('regionSelect');
@@ -1429,7 +1457,7 @@ function getManagerCheck(record) {
   const current=localManagerValues(record);
   const savedKpp=String(saved.kpp||'');
   if(current.inn!==String(saved.inn||'') || current.kpp!==savedKpp || normalizeManagerValue(current.name)!==normalizeManagerValue(saved.localName||'') || normalizeManagerValue(current.position)!==normalizeManagerValue(saved.localPosition||'')) {
-    return {...saved,status:'stale',message:'Карточка изменилась после последней сверки. Запустите её повторно.'};
+    return {...saved,status:'stale',message:'Вы изменили карточку после сверки — это нормально. Старый результат показан для сравнения; чтобы получить актуальный, отметьте запись и снова нажмите «Сверить руководителей по ИНН».'};
   }
   return saved;
 }
@@ -1458,7 +1486,10 @@ function renderManagerCheckDetail(record) {
   let checkedAt=String(check.checkedAt||'');
   if(checkedAt){const date=new Date(checkedAt);if(!Number.isNaN(date.getTime()))checkedAt=date.toLocaleString('ru-RU');}
   target.className=`manager-check-detail ${statusClass}`;
-  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div></div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
+  const startDate=check.managerStartDate?`<div class="manager-check-value"><b>Дата назначения на должность · DaData</b>${esc(check.managerStartDate)}</div>`:'';
+  const canApplyName=['name_mismatch','both_mismatch','local_missing'].includes(check.status)&&check.managerName;
+  const applyName=canApplyName?`<div class="manager-check-value"><b>Сменился руководитель</b><button type="button" class="auto-button btn-small" data-apply-manager-name="${esc(check.managerName)}">Подставить ФИО из DaData</button><span class="small-muted" style="display:block;margin-top:4px">Подставит именительный падеж в карточку; после проверки сохраните её вручную.</span></div>`:'';
+  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div>${startDate}<div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div>${applyName}</div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
 }
 function modalFieldLabel(name) {
   const labels={
@@ -1507,13 +1538,13 @@ function setModalField(name, value) {
   const input=modalInput(name);
   if (input) input.value=String(value??'');
 }
-function renderCaseGrid(targetId, forms, emptyText) {
+function renderCaseGrid(targetId, forms, emptyText, labels=CASE_LABELS_CHECK) {
   const target=$(targetId);
   if (!forms || !Object.keys(forms).length) {
     target.innerHTML=`<span class="small-muted">${esc(emptyText)}</span>`;
     return;
   }
-  target.innerHTML=CASE_LABELS.map(([key,label])=>`<div class="case-item"><b>${esc(label)}</b><span>${esc(forms[key]||'—')}</span></div>`).join('');
+  target.innerHTML=labels.map(([key,label])=>`<div class="case-item"><b>${esc(label)}</b><span>${esc(forms[key]||'—')}</span></div>`).join('');
 }
 function initialsFromDative(fullName, dativeName) {
   const source=String(fullName||'').trim().split(/\s+/u).filter(Boolean);
@@ -1524,9 +1555,10 @@ function initialsFromDative(fullName, dativeName) {
 }
 function renderRecipientInflections(result, applyChangedFields=false) {
   latestInflections=result;
-  renderCaseGrid('nameForms',result.nameCases,'Введите ФИО (именительный падеж), чтобы увидеть формы.');
-  renderCaseGrid('jobForms',result.jobCases,'Введите должность, чтобы увидеть формы.');
-  $('nameInflectNote').textContent=result.nameError|| (result.nameCases?.dative?'Формы предложены автоматически.':'');
+  renderCaseGrid('nameForms',result.nameCases,'Введите ФИО (именительный падеж), чтобы увидеть формы.',CASE_LABELS_CHECK);
+  renderCaseGrid('jobForms',result.jobCases,'Введите должность, чтобы увидеть формы.',CASE_LABELS_DATIVE);
+  const genderNote=result.gender==='female'?'Пол определён как женский · Уважаемая,':(result.gender==='male'?'Пол определён как мужской · Уважаемый,':'Пол по ФИО не определён — задайте «Обращение» вручную.');
+  $('nameInflectNote').textContent=result.nameError|| genderNote;
   $('jobInflectNote').textContent=result.jobRecognized?'Форма должности предложена автоматически; проверьте сложное наименование.':'Автоматически распознать должность не удалось — заполните дательный падеж вручную.';
   $('applyNameDative').disabled=!result.nameCases?.dative;
   $('applyJobDative').disabled=!result.jobRecognized||!result.jobCases?.dative;
@@ -1541,6 +1573,7 @@ function renderRecipientInflections(result, applyChangedFields=false) {
     const parts=fullName.split(/\s+/u).filter(Boolean);
     if(parts.length>=2) setModalField('Имя Отчество',parts.slice(1).join(' '));
   }
+  if (!derivedManual.salutation && result.salutation) setModalField('Обращение',result.salutation);
   if (applyChangedFields) {
     const fullName=modalInput('ФИО')?.value.trim()||modalInput('Руководитель')?.value.trim()||'';
     if (modalSourceEdited.name && !derivedManual.nameDative && result.nameCases?.dative) setModalField('ФИО ДП',result.nameCases.dative);
@@ -1549,6 +1582,7 @@ function renderRecipientInflections(result, applyChangedFields=false) {
       const parts=fullName.split(/\s+/u).filter(Boolean);
       if (parts.length>=2) setModalField('Имя Отчество',parts.slice(1).join(' '));
     }
+    if (modalSourceEdited.name && !derivedManual.salutation && result.salutation) setModalField('Обращение',result.salutation);
     if (modalSourceEdited.job && !derivedManual.jobDative && result.jobRecognized) setModalField('Должность руководителя дательный',result.jobCases.dative);
   }
 }
@@ -1561,8 +1595,8 @@ function updateInflections(sourceKind='') {
   const jobTitle=modalInput('Должность')?.value.trim()||modalInput('Должность руководителя')?.value.trim()||'';
   if (!fullName && !jobTitle) {
     latestInflections=null;
-    renderCaseGrid('nameForms',null,'Введите ФИО (именительный падеж), чтобы увидеть формы.');
-    renderCaseGrid('jobForms',null,'Введите должность, чтобы увидеть формы.');
+    renderCaseGrid('nameForms',null,'Введите ФИО (именительный падеж), чтобы увидеть формы.',CASE_LABELS_CHECK);
+    renderCaseGrid('jobForms',null,'Введите должность, чтобы увидеть формы.',CASE_LABELS_DATIVE);
     $('nameInflectNote').textContent=''; $('jobInflectNote').textContent='';
     $('applyNameDative').disabled=true; $('applyJobDative').disabled=true;
     return;
@@ -1591,7 +1625,7 @@ function openRecordCard(id) {
   $('modalTitle').textContent='Карточка адресата';
   $('modalRecordLabel').textContent=[fieldValue(record,'Регион'),fieldValue(record,'ФИО')||fieldValue(record,'Руководитель'),record.source].filter(Boolean).join(' · ');
   $('modalMoreDetails').open=false;
-  derivedManual={nameDative:false,jobDative:false,initials:false,nameParts:false};
+  derivedManual={nameDative:false,jobDative:false,initials:false,nameParts:false,salutation:false};
   modalSourceEdited={name:false,job:false};
   latestInflections=null;
   $('recordModal').hidden=false;
@@ -1605,6 +1639,7 @@ function openRecordCard(id) {
     else if(name==='Должность руководителя дательный') derivedManual.jobDative=true;
     else if(name==='Фамилия И.О.') derivedManual.initials=true;
     else if(name==='Имя Отчество') derivedManual.nameParts=true;
+    else if(name==='Обращение') derivedManual.salutation=true;
   }));
   updateInflections();
 }
@@ -2419,6 +2454,16 @@ $('testSmtpBtn').addEventListener('click',testSmtp);
 $('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);
 $('deleteSmtpAccountBtn').addEventListener('click',deleteSmtpAccount);
 $('smtpAccountSelect').addEventListener('change',()=>applySmtpAccountToForm($('smtpAccountSelect').value));
+$('managerCheckDetail').addEventListener('click',event=>{
+  const button=event.target.closest('[data-apply-manager-name]');
+  if(!button||!button.dataset.applyManagerName)return;
+  const name=button.dataset.applyManagerName;
+  ['ФИО','Руководитель'].forEach(field=>{if(modalInput(field))setModalField(field,name);});
+  derivedManual.nameDative=false;derivedManual.initials=false;derivedManual.nameParts=false;derivedManual.salutation=false;
+  modalSourceEdited.name=true;
+  updateInflections('name');
+  showToast('ФИО из DaData подставлено. Проверьте карточку и нажмите «Сохранить карточку».','success');
+});
 ['smtpHost','smtpFromEmail'].forEach(id=>$(id).addEventListener('input',updateSmtpState));
 $('smtpPort').addEventListener('change',()=>{
   const port=$('smtpPort').value.trim();

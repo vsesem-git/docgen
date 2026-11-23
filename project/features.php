@@ -675,6 +675,24 @@ function docgenLocalManagerValues(array $fields): array
     return [$name, $position];
 }
 
+/** DaData returns epoch milliseconds in management.start_date. */
+function docgenFormatDaDataDate($value): string
+{
+    $timestamp = 0;
+    if (is_numeric($value) && (int) $value > 0) {
+        $timestamp = intdiv((int) $value, 1000);
+    } elseif (is_string($value) && trim($value) !== '') {
+        $parsed = strtotime(trim($value));
+        $timestamp = $parsed === false ? 0 : $parsed;
+    }
+    if ($timestamp <= 0) {
+        return '';
+    }
+    $months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    $month = $months[(int) gmdate('n', $timestamp) - 1] ?? '';
+    return trim(gmdate('j', $timestamp) . ' ' . $month . ' ' . gmdate('Y', $timestamp) . ' г.');
+}
+
 function docgenManagerCheckBase(string $status, string $message, string $recordId, string $inn, string $kpp, array $fields): array
 {
     [$localName, $localPosition] = docgenLocalManagerValues($fields);
@@ -688,6 +706,7 @@ function docgenManagerCheckBase(string $status, string $message, string $recordI
         'localPosition' => $localPosition,
         'managerName' => '',
         'managerPost' => '',
+        'managerStartDate' => '',
         'organizationName' => '',
         'nameMatch' => null,
         'positionMatch' => null,
@@ -800,6 +819,7 @@ function docgenCompareManager(array $record, string $inn, string $kpp, array $su
     $orgName = trim((string) ($data['name']['full_with_opf'] ?? $suggestion['value'] ?? ''));
     $comparison['managerName'] = $remoteName;
     $comparison['managerPost'] = $remotePost;
+    $comparison['managerStartDate'] = docgenFormatDaDataDate($management['start_date'] ?? '');
     $comparison['organizationName'] = $orgName;
     if ($remoteName === '') {
         $comparison['status'] = 'no_manager';
