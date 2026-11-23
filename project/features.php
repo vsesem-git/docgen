@@ -855,6 +855,170 @@ function docgenCompareManager(array $record, string $inn, string $kpp, array $su
     return $comparison;
 }
 
+/** Fields offered in the manual DaData update dialog. Nothing is applied automatically. */
+function docgenDadataFieldCatalog(): array
+{
+    return [
+        ['key' => 'name.full_with_opf', 'label' => 'Наименование организации (полное с ОПФ)'],
+        ['key' => 'name.short_with_opf', 'label' => 'Краткое наименование с ОПФ'],
+        ['key' => 'name.full', 'label' => 'Наименование организации (без ОПФ)'],
+        ['key' => 'name.short', 'label' => 'Краткое наименование'],
+        ['key' => 'inn', 'label' => 'ИНН'],
+        ['key' => 'kpp', 'label' => 'КПП'],
+        ['key' => 'ogrn', 'label' => 'ОГРН'],
+        ['key' => 'ogrn_date', 'label' => 'Дата регистрации'],
+        ['key' => 'address.unstructured', 'label' => 'Юридический адрес'],
+        ['key' => 'address.full', 'label' => 'Адрес (структурированный)'],
+        ['key' => 'management.name', 'label' => 'Руководитель'],
+        ['key' => 'management.post', 'label' => 'Должность руководителя'],
+        ['key' => 'management.start_date', 'label' => 'Дата назначения на должность'],
+        ['key' => 'opf.full', 'label' => 'Организационно-правовая форма'],
+        ['key' => 'okved', 'label' => 'Основной ОКВЭД'],
+        ['key' => 'state.status', 'label' => 'Статус организации'],
+        ['key' => 'type', 'label' => 'Тип организации'],
+    ];
+}
+
+/** Flatten the exact DaData party into preview values keyed by catalog key. */
+function docgenDadataFlattenValues(array $suggestion): array
+{
+    $data = is_array($suggestion['data'] ?? null) ? $suggestion['data'] : [];
+    $values = [];
+    $add = static function (string $key, $value) use (&$values): void {
+        if (!is_scalar($value)) {
+            return;
+        }
+        $text = trim((string) $value);
+        if ($text !== '') {
+            $values[$key] = mb_substr($text, 0, 5000, 'UTF-8');
+        }
+    };
+    $name = is_array($data['name'] ?? null) ? $data['name'] : [];
+    foreach (['full_with_opf', 'short_with_opf', 'full', 'short'] as $part) {
+        $add('name.' . $part, $name[$part] ?? '');
+    }
+    foreach (['inn', 'kpp', 'ogrn', 'okved', 'type'] as $key) {
+        $add($key, $data[$key] ?? '');
+    }
+    $add('ogrn_date', docgenFormatDaDataDate($data['ogrn_date'] ?? ''));
+    $address = is_array($data['address'] ?? null) ? $data['address'] : [];
+    $add('address.unstructured', $address['unstructured'] ?? '');
+    $add('address.full', $address['full'] ?? '');
+    $management = is_array($data['management'] ?? null) ? $data['management'] : [];
+    $add('management.name', $management['name'] ?? '');
+    $add('management.post', $management['post'] ?? '');
+    $add('management.start_date', docgenFormatDaDataDate($management['start_date'] ?? ''));
+    $opf = is_array($data['opf'] ?? null) ? $data['opf'] : [];
+    $add('opf.full', $opf['full'] ?? '');
+    $state = is_array($data['state'] ?? null) ? $data['state'] : [];
+    $add('state.status', $state['status'] ?? '');
+    return $values;
+}
+
+/** Read-only DaData fetch for the mapping dialog. Never writes record fields. */
+function docgenDadataFetchForUpdate(): never
+{
+    set_time_limit(360);
+    $token = docgenDadataToken();
+    if ($token === '') {
+        sendJson(['ok' => false, 'error' => 'Сначала сохраните API-ключ DaData в настройках.'], 422);
+    }
+    $ids = json_decode((string) ($_POST['selected_ids'] ?? '[]'), true);
+    if (!is_array($ids)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось прочитать выбранные записи.'], 400);
+    }
+    $cleanIds = [];
+    foreach ($ids as $id) {
+        if (!is_scalar($id)) {
+            continue;
+        }
+        $id = trim((string) $id);
+        if ($id !== '' && strlen($id) <= 120) {
+            $cleanIds[] = $id;
+        }
+    }
+    $ids = array_values(array_unique($cleanIds));
+    if ($ids === []) {
+        sendJson(['ok' => false, 'error' => 'Отметьте записи для обновления через DaData.'], 422);
+    }
+    if (count($ids) > DOCGEN_DADATA_BATCH_SIZE) {
+        sendJson(['ok' => false, 'error' => 'За один запрос можно обновить не более ' . DOCGEN_DADATA_BATCH_SIZE . ' записей.'], 422);
+    }
+
+    $dataset = loadDataset();
+    $byId = [];
+    foreach (($dataset['records'] ?? []) as $record) {
+        if (is_array($record) && isset($record['id'])) {
+            $byId[(string) $record['id']] = $record;
+        }
+    }
+    $rows = [];
+    $stopBatch = false;
+    $stopReason = '';
+    foreach ($ids as $id) {
+        if (!isset($byId[$id])) {
+            continue;
+        }
+        $record = $byId[$id];
+        $fields = baseFields($record);
+        $inn = preg_replace('/\D+/', '', (string) ($fields['ИНН'] ?? '')) ?? '';
+        $rawKpp = preg_replace('/\D+/', '', (string) ($fields['КПП'] ?? '')) ?? '';
+        $kpp = strlen($rawKpp) === 9 ? $rawKpp : '';
+        $row = [
+            'id' => $id,
+            'label' => trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? $fields['Наименование'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? $id)),
+            'inn' => $inn,
+            'kpp' => $kpp,
+            'status' => 'error',
+            'message' => '',
+            'values' => new stdClass(),
+        ];
+        if (!in_array(strlen($inn), [10, 12], true)) {
+            $row['message'] = 'Корректный ИНН не заполнен — запрос к DaData не отправлялся.';
+            $rows[$id] = $row;
+            continue;
+        }
+        $api = docgenDadataRequest($token, $inn . ($kpp !== '' ? '/' . $kpp : ''));
+        if (empty($api['ok'])) {
+            $row['message'] = (string) ($api['error'] ?? 'Ошибка запроса DaData.');
+            $rows[$id] = $row;
+            if (!empty($api['stopBatch'])) {
+                $stopBatch = true;
+                $stopReason = $row['message'];
+                break;
+            }
+            continue;
+        }
+        $rawSuggestions = $api['data']['suggestions'] ?? [];
+        $suggestions = is_array($rawSuggestions) ? $rawSuggestions : [];
+        $suggestion = docgenDadataExactParty($suggestions, $inn, $kpp);
+        if ($suggestion === null) {
+            $row['status'] = docgenDadataPartyIsAmbiguous($suggestions, $inn, $kpp) ? 'ambiguous' : 'not_found';
+            $row['message'] = $row['status'] === 'ambiguous'
+                ? 'Найдено несколько похожих записей или филиалов. Ничего не выбрано автоматически; уточните КПП.'
+                : 'Точного совпадения по ИНН/КПП не найдено. Другая организация не подставлялась.';
+            $rows[$id] = $row;
+            continue;
+        }
+        $row['status'] = 'ok';
+        $row['message'] = 'Данные загружены. Сопоставьте поля и сохраните карточки вручную.';
+        $row['values'] = (object) docgenDadataFlattenValues($suggestion);
+        $rows[$id] = $row;
+        if ($id !== $ids[count($ids) - 1]) {
+            usleep(100000);
+        }
+    }
+    sendJson([
+        'ok' => true,
+        'fields' => docgenDadataFieldCatalog(),
+        'rows' => (object) $rows,
+        'processed' => count($rows),
+        'total' => count($ids),
+        'stop' => $stopBatch,
+        'stopReason' => $stopReason,
+    ]);
+}
+
 function docgenCheckManagers(): never
 {
     set_time_limit(360);
@@ -2380,7 +2544,7 @@ function docgenCronSend(): array
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
+    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -2427,6 +2591,10 @@ function docgenDispatch(string $action): void
             docgenSaveDadataSettings();
         case 'check_managers':
             docgenCheckManagers();
+        case 'dadata_fetch':
+            docgenDadataFetchForUpdate();
+        case 'save_records_bulk':
+            handleBulkSaveRecords();
         case 'preview_excel_import':
             docgenExcelImportPreview();
         case 'commit_excel_import':

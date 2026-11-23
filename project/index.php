@@ -269,6 +269,104 @@ function saveRecordEdits(array $edits): void
     }
 }
 
+/** Bulk save only the values the operator explicitly mapped and confirmed in the preview. */
+function handleBulkSaveRecords(): never
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        sendJson(['ok' => false, 'error' => 'Для сохранения карточек используйте POST.'], 405);
+    }
+    $ids = json_decode((string) ($_POST['ids'] ?? '[]'), true);
+    $submittedEdits = json_decode((string) ($_POST['edits'] ?? '{}'), true);
+    $newFields = json_decode((string) ($_POST['new_fields'] ?? '[]'), true);
+    if (!is_array($ids) || !is_array($submittedEdits) || !is_array($newFields)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось прочитать сопоставление карточек.'], 400);
+    }
+    $cleanIds = [];
+    foreach ($ids as $id) {
+        if (!is_scalar($id)) {
+            continue;
+        }
+        $id = trim((string) $id);
+        if ($id !== '' && strlen($id) <= 120 && !in_array($id, $cleanIds, true)) {
+            $cleanIds[] = $id;
+        }
+    }
+    if ($cleanIds === [] || count($cleanIds) > MAX_ROWS_PER_RUN) {
+        sendJson(['ok' => false, 'error' => 'Выберите от 1 до ' . MAX_ROWS_PER_RUN . ' карточек для сохранения.'], 422);
+    }
+
+    $dataset = loadDataset();
+    $byId = [];
+    foreach (($dataset['records'] ?? []) as $candidate) {
+        if (is_array($candidate) && isset($candidate['id'])) {
+            $byId[(string) $candidate['id']] = $candidate;
+        }
+    }
+    foreach ($cleanIds as $id) {
+        if (!isset($byId[$id])) {
+            sendJson(['ok' => false, 'error' => 'Одна из выбранных записей больше не существует.'], 404);
+        }
+    }
+
+    $cleanEdits = [];
+    foreach ($cleanIds as $id) {
+        $fields = $submittedEdits[$id] ?? [];
+        if (!is_array($fields) || $fields === []) {
+            continue;
+        }
+        $clean = [];
+        foreach ($fields as $name => $value) {
+            $name = trim((string) $name);
+            if ($name === '' || mb_strlen($name, 'UTF-8') > 120 || preg_match('/[\x00-\x1F\x7F]/u', $name)) {
+                continue;
+            }
+            if (!is_scalar($value)) {
+                continue;
+            }
+            $value = trim((string) $value);
+            if (mb_strlen($value, 'UTF-8') > 5000) {
+                sendJson(['ok' => false, 'error' => 'Одно из полей превышает ограничение 5 000 символов.'], 422);
+            }
+            $clean[$name] = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value) ?? $value;
+        }
+        if ($clean !== []) {
+            $cleanEdits[$id] = $clean;
+        }
+    }
+    if ($cleanEdits === []) {
+        sendJson(['ok' => false, 'error' => 'Нет сопоставленных полей для сохранения. Сначала сопоставьте данные DaData с колонками.'], 422);
+    }
+
+    try {
+        $addedColumns = docgenEnsureColumns($newFields);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    $edits = loadRecordEdits();
+    foreach ($cleanEdits as $id => $fields) {
+        $existing = $edits[$id] ?? [];
+        $edits[$id] = array_merge(is_array($existing) ? $existing : [], $fields);
+    }
+    try {
+        saveRecordEdits($edits);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+    $savedRecords = [];
+    foreach ($cleanEdits as $id => $fields) {
+        $record = $byId[$id];
+        $record['fields'] = array_merge(baseFields($record), $edits[$id]);
+        $savedRecords[] = $record;
+    }
+    sendJson([
+        'ok' => true,
+        'records' => $savedRecords,
+        'savedIds' => array_keys($cleanEdits),
+        'savedFields' => array_sum(array_map('count', $cleanEdits)),
+        'newColumns' => $addedColumns,
+    ]);
+}
+
 function cleanupExpiredDownloads(): void
 {
     if (!is_dir(DOWNLOADS_DIR)) {
@@ -986,7 +1084,18 @@ body.modal-open{overflow:hidden}
 .modal-details summary{cursor:pointer;font-size:12.5px;font-weight:700;color:#315c82}
 .modal-details .modal-fields{margin-top:11px}
 .modal-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 20px;border-top:1px solid var(--line);background:#fbfdff}
-.modal-actions .right{display:flex;gap:8px;align-items:center}
+.modal-actions .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.dadata-map-row{display:grid;grid-template-columns:minmax(210px,1fr) minmax(200px,1fr) minmax(180px,1fr);gap:10px;align-items:center;border:1px solid var(--line);border-radius:9px;background:#fff;padding:9px 11px;margin-bottom:8px}
+.dadata-map-row select,.dadata-map-row input{width:100%;min-height:34px;border:1px solid #cbd7e3;border-radius:7px;padding:6px 8px;background:#fff;color:var(--ink);font-size:12px}
+.dadata-map-row input[hidden]{display:none}
+.dadata-map-label{min-width:0}.dadata-map-label b{display:block;font-size:12px;color:#234765}.dadata-map-label span{display:block;margin-top:3px;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dadata-preview-card{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;margin-bottom:9px}
+.dadata-preview-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:8px}
+.dadata-preview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px}
+.dadata-preview-change{border:1px solid #e2eaf2;border-radius:8px;background:#fbfdff;padding:8px 9px;font-size:11.5px;min-width:0}
+.dadata-preview-change b{display:block;color:#234765;margin-bottom:4px}
+.dadata-preview-change .old{color:var(--muted);overflow-wrap:anywhere}.dadata-preview-change .new{color:#176142;font-weight:650;margin-top:3px;overflow-wrap:anywhere}
+@media(max-width:760px){.dadata-map-row{grid-template-columns:1fr}}
 .small-muted{font-size:11px;color:#7b8da1}
 .settings-card,.queue-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin:0 0 14px;overflow:hidden}
 .settings-card details>summary{cursor:pointer;list-style:none;padding:13px 16px;display:flex;align-items:center;gap:12px;color:#173b60}
@@ -1037,7 +1146,7 @@ body.modal-open{overflow:hidden}
   </div>
 </header>
 <main>
-  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <a href="queue.php">менеджере очереди</a>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
+  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Чтобы обновить данные организаций, нажмите «Обновить через DaData» для отмеченных записей: в диалоге сопоставьте поля DaData с колонками книги или создайте новые, проверьте список «было → стало» и только затем нажмите «Сохранить карточки».</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <a href="queue.php">менеджере очереди</a>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
 
   <section class="top-grid">
     <div class="card">
@@ -1126,6 +1235,7 @@ body.modal-open{overflow:hidden}
     <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
     <label class="small-muted" for="smtpAccountForRun">Ящик для отправки</label><select id="smtpAccountForRun" aria-label="Ящик для отправки"></select>
     <button class="btn-ghost" id="checkManagersBtn" type="button" disabled>Сверить руководителей по ИНН</button>
+    <button class="btn-ghost" id="refreshFromDadataBtn" type="button" disabled>Обновить через DaData</button>
     <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
     <button class="btn-ghost" id="clearSelectionBtn" type="button">Снять выбор</button>
     <div class="search-box"><input type="search" id="searchInput" placeholder="Поиск по региону, ФИО, ИНН…" aria-label="Поиск по записям"></div>
@@ -1134,6 +1244,7 @@ body.modal-open{overflow:hidden}
 
   <div class="progress-wrap" id="progressWrap"><span class="spinner"></span><span id="progressText">Формируем PDF и DOCX…</span></div>
   <div class="progress-wrap" id="managerCheckProgress"><span class="spinner"></span><span id="managerCheckProgressText">Сверяем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelManagerCheckBtn">Остановить после текущего пакета</button></div>
+  <div class="progress-wrap" id="dadataRefreshProgress"><span class="spinner"></span><span id="dadataRefreshProgressText">Загружаем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelDadataRefreshBtn">Остановить после текущего пакета</button></div>
   <div class="download-result" id="downloadResult" hidden></div>
   <section class="settings-card" id="smtpCard">
     <details id="smtpDetails">
@@ -1228,6 +1339,36 @@ body.modal-open{overflow:hidden}
     </div>
   </section>
 </div>
+<div class="modal-backdrop" id="dadataRefreshModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="dadataRefreshTitle">
+    <div class="modal-head">
+      <div><h2 id="dadataRefreshTitle">Обновление через DaData</h2><div class="modal-subtitle" id="dadataRefreshSubtitle"></div></div>
+      <button type="button" class="modal-close" id="dadataRefreshClose" aria-label="Закрыть окно обновления">×</button>
+    </div>
+    <div class="modal-main">
+      <div class="notice" style="margin-bottom:14px"><span>🔎</span><div>Данные загружены, но <b>ничего не сохранено</b>. Выберите, какие сведения DaData сопоставить с существующими колонками книги, либо создайте новую колонку. Например: «Наименование организации (полное с ОПФ)» → «Полное наименование», «Юридический адрес» → «Юридический адрес». После сопоставления проверьте список изменений и только потом нажмите «Сохранить карточки».</div></div>
+      <div id="dadataRefreshSummary" class="small-muted" style="margin-bottom:15px"></div>
+      <section class="modal-section">
+        <h3>1. Сопоставление полей DaData с колонками книги</h3>
+        <div id="dadataMappingList"></div>
+      </section>
+      <section class="modal-section">
+        <h3>2. Список новых данных по отмеченным организациям</h3>
+        <div id="dadataSourceList" style="margin-bottom:12px"></div>
+        <h3 style="margin-top:12px">Изменения, которые будут сохранены</h3>
+        <div id="dadataPreviewList"></div>
+      </section>
+    </div>
+    <div class="modal-actions">
+      <span class="small-muted" id="dadataRefreshStatus">Черновик: карточки ещё не изменены.</span>
+      <div class="right">
+        <button type="button" class="btn-ghost" id="dadataRefreshCancelBtn">Отмена</button>
+        <button type="button" class="btn-ghost" id="applyDadataMappingBtn">Сопоставить и показать изменения</button>
+        <button type="button" class="btn-primary" id="saveDadataCardsBtn" disabled>Сохранить карточки</button>
+      </div>
+    </div>
+  </section>
+</div>
 <div class="modal-backdrop" id="htmlTemplateModal" hidden>
   <section class="modal html-editor-modal" role="dialog" aria-modal="true" aria-labelledby="htmlEditorTitle">
     <div class="modal-head"><div><h2 id="htmlEditorTitle">HTML-редактор шаблона</h2><div class="modal-subtitle">Коды полей пишите в фигурных скобках, например {Регион} или {ФИО ДП}. Итог будет сформирован в PDF.</div></div><button type="button" class="modal-close" id="htmlEditorClose" aria-label="Закрыть редактор">×</button></div>
@@ -1298,6 +1439,11 @@ let dadataConfigured = false;
 let managerChecks = {};
 let managerCheckRunning = false;
 let managerCheckCancelRequested = false;
+let dadataRefreshRunning = false;
+let dadataRefreshCancelRequested = false;
+let dadataRefreshData = null;
+let dadataPreviewEdits = null;
+let dadataPreviewNewFields = [];
 let pendingExcelImportId = '';
 let selectedIds = new Set();
 let overrides = {};
@@ -1736,6 +1882,7 @@ function updateManagerCheckButton() {
   button.disabled=selectedIds.size===0||!dadataConfigured||managerCheckRunning;
   button.textContent=managerCheckRunning?'Сверка DaData…':`Сверить руководителей по ИНН${selectedIds.size?` (${selectedIds.size})`:''}`;
   button.title=!dadataConfigured?'Сначала сохраните API-ключ DaData в настройках.':'Проверка выполняется только вручную для отмеченных записей.';
+  updateDadataRefreshButton();
 }
 function renderTable() {
   if (!dataset.records.length) return;
@@ -2375,6 +2522,184 @@ async function runManagerCheckIds(ids, askConfirmation=true) {
 function checkSelectedManagers() {
   return runManagerCheckIds([...selectedIds],true);
 }
+function updateDadataRefreshButton() {
+  const button=$('refreshFromDadataBtn');
+  if(!button)return;
+  button.disabled=selectedIds.size===0||!dadataConfigured||dadataRefreshRunning;
+  button.textContent=dadataRefreshRunning?'Загрузка DaData…':`Обновить через DaData${selectedIds.size?` (${selectedIds.size})`:''}`;
+  button.title=!dadataConfigured?'Сначала сохраните API-ключ DaData в настройках.':'Данные загружаются в диалог и сохраняются только после подтверждения.';
+}
+function closeDadataRefreshModal() {
+  $('dadataRefreshModal').hidden=true;
+  document.body.classList.remove('modal-open');
+  dadataRefreshData=null;dadataPreviewEdits=null;dadataPreviewNewFields=[];
+}
+function allEditableFieldNames() {
+  const names=new Set(dataset.customColumns||[]);
+  (dataset.records||[]).forEach(record=>Object.keys(record.fields||{}).forEach(name=>{if(name)names.add(name);}));
+  return [...names].sort((a,b)=>a.localeCompare(b,'ru'));
+}
+function dadataStatusLabel(status) {
+  return ({ok:'Найдено',ambiguous:'Неоднозначно',not_found:'Не найдено',error:'Ошибка'})[status]||'Не проверено';
+}
+function renderDadataSources() {
+  if(!dadataRefreshData)return;
+  const labels=new Map((dadataRefreshData.fields||[]).map(field=>[field.key,field.label]));
+  const rows=Object.values(dadataRefreshData.rows||{});
+  $('dadataRefreshSummary').textContent=`Загружено ${rows.length} из ${dadataRefreshData.ids.length}: найдено ${rows.filter(row=>row.status==='ok').length}, с ошибками ${rows.filter(row=>row.status!=='ok').length}. Данные не сохранены.`;
+  $('dadataSourceList').innerHTML=rows.map(row=>{
+    const values=Object.entries(row.values||{});
+    const list=values.length?`<details><summary>Все поля DaData (${values.length})</summary><div class="dadata-preview-grid" style="margin-top:8px">${values.map(([key,value])=>`<div class="dadata-preview-change"><b>${esc(labels.get(key)||key)}</b><div>${esc(value)}</div></div>`).join('')}</div></details>`:'';
+    return `<div class="dadata-preview-card"><div class="dadata-preview-head"><b>${esc(row.label||row.id)}</b><span class="pill ${row.status==='ok'?'ok':'warn'}">${esc(dadataStatusLabel(row.status))}</span></div><div class="small-muted">ИНН ${esc(row.inn||'—')}${row.kpp?` / ${esc(row.kpp)}`:''} · ${esc(row.message||'')}</div>${list}</div>`;
+  }).join('');
+}
+function renderDadataMapping() {
+  if(!dadataRefreshData)return;
+  const sample=Object.values(dadataRefreshData.rows||{}).find(row=>row.status==='ok'&&Object.keys(row.values||{}).length);
+  const sampleValues=sample?.values||{};
+  const options=allEditableFieldNames().map(name=>`<option value="${esc(name)}">${esc(name)}</option>`).join('')+'<option value="__new__">+ Создать своё поле</option>';
+  $('dadataMappingList').innerHTML=(dadataRefreshData.fields||[]).map(field=>{
+    const sampleValue=String(sampleValues[field.key]||'');
+    return `<div class="dadata-map-row" data-dadata-key="${esc(field.key)}"><div class="dadata-map-label"><b>${esc(field.label)}</b><span title="${esc(sampleValue)}">${sampleValue?esc(sampleValue):'Значений в ответе нет'}</span></div><select data-role="target"><option value="">Не обновлять</option>${options}</select><input type="text" data-role="new-name" maxlength="120" placeholder="Название нового поля" hidden></div>`;
+  }).join('');
+  $('dadataRefreshStatus').textContent='Выберите сопоставление. Пока ничего не сохранено.';
+  $('saveDadataCardsBtn').disabled=true;
+  $('dadataPreviewList').innerHTML='<span class="small-muted">После сопоставления здесь появятся конкретные значения «было → стало».</span>';
+}
+function markDadataMappingChanged() {
+  dadataPreviewEdits=null;dadataPreviewNewFields=[];
+  $('saveDadataCardsBtn').disabled=true;
+  $('dadataRefreshStatus').textContent='Сопоставление изменилось. Нажмите «Сопоставить и показать изменения».';
+  $('dadataPreviewList').innerHTML='<span class="small-muted">Предпросмотр устарел. Повторите сопоставление.</span>';
+}
+function readDadataMapping() {
+  const pairs=[],newFields=[],used=new Set();
+  document.querySelectorAll('#dadataMappingList .dadata-map-row').forEach(row=>{
+    const source=row.dataset.dadataKey;
+    const select=row.querySelector('[data-role="target"]');
+    const target=select?.value||'';
+    if(!target)return;
+    let name=target;
+    if(target==='__new__'){
+      name=row.querySelector('[data-role="new-name"]')?.value.trim()||'';
+      if(!name)throw new Error(`Укажите название нового поля для «${source}».`);
+      newFields.push(name);
+    }
+    if(used.has(name))throw new Error(`Колонка «${name}» выбрана для двух полей DaData. Выберите разные колонки.`);
+    used.add(name);
+    pairs.push({source,target:name});
+  });
+  if(!pairs.length)throw new Error('Выберите хотя бы одно поле DaData и колонку книги.');
+  return {pairs,newFields};
+}
+function renderDadataPreview(edits,pairs) {
+  const rows=Object.values(dadataRefreshData.rows||{}).filter(row=>row.status==='ok');
+  if(!rows.length){$('dadataPreviewList').innerHTML='<span class="small-muted">Нет организаций с загруженными данными.</span>';return;}
+  $('dadataPreviewList').innerHTML=rows.map(row=>{
+    const record=dataset.records.find(item=>item.id===row.id);
+    const fields=edits[row.id]||{};
+    const changes=pairs.map(pair=>{
+      const newValue=String(row.values?.[pair.source]??'');
+      if(newValue==='')return '';
+      const oldValue=fieldValue(record,pair.target);
+      const changed=oldValue!==newValue;
+      return `<div class="dadata-preview-change"><b>${esc(pair.target)}</b><div class="old">Было: ${esc(oldValue||'—')}</div><div class="new">${changed?'Стало: ':'Уже совпадает: '}${esc(newValue)}</div></div>`;
+    }).join('');
+    return `<div class="dadata-preview-card"><div class="dadata-preview-head"><b>${esc(row.label||row.id)}</b><span class="pill ${Object.keys(fields).length?'warn':'ok'}">${Object.keys(fields).length?`Изменений: ${Object.keys(fields).length}`:'Без изменений'}</span></div><div class="dadata-preview-grid">${changes||'<span class="small-muted">Для этой записи нет значений по выбранным полям.</span>'}</div></div>`;
+  }).join('');
+}
+function buildDadataPreview() {
+  if(!dadataRefreshData){showToast('Сначала загрузите данные DaData.','error');return;}
+  let mapping;
+  try{mapping=readDadataMapping();}catch(e){showToast(e.message,'error');return;}
+  const edits={};let changed=0;
+  for(const [id,row] of Object.entries(dadataRefreshData.rows||{})){
+    if(row.status!=='ok')continue;
+    const fields={};
+    mapping.pairs.forEach(pair=>{
+      const value=String(row.values?.[pair.source]??'');
+      if(value!==''&&value!==fieldValue(dataset.records.find(item=>item.id===id),pair.target))fields[pair.target]=value;
+    });
+    if(Object.keys(fields).length){edits[id]=fields;changed+=Object.keys(fields).length;}
+  }
+  dadataPreviewEdits=edits;dadataPreviewNewFields=mapping.newFields;
+  renderDadataPreview(edits,mapping.pairs);
+  $('saveDadataCardsBtn').disabled=changed===0;
+  $('dadataRefreshStatus').textContent=changed
+    ? `К сохранению готово ${Object.keys(edits).length} карточек и ${changed} значений. Изменения ещё не записаны.`
+    : 'Изменений нет: выбранные значения уже совпадают с книгой.';
+  if(changed)showToast(`Сопоставлено ${changed} значений. Проверьте список и нажмите «Сохранить карточки».`,'success');
+}
+async function fetchDadataForUpdate() {
+  const ids=[...selectedIds];
+  if(!ids.length){showToast('Отметьте организации в списке.','error');return;}
+  if(!dadataConfigured){$('dadataDetails').open=true;$('dadataToken').focus();showToast('Сначала сохраните API-ключ DaData.','error');return;}
+  if(!window.confirm(`Будут запрошены данные DaData для ${ids.length} отмеченных записей. Это может расходовать лимит тарифа. Ничего не сохранится до нажатия «Сохранить карточки». Продолжить?`))return;
+  dadataRefreshRunning=true;dadataRefreshCancelRequested=false;updateDadataRefreshButton();updateManagerCheckButton();
+  $('dadataRefreshProgress').classList.add('show');
+  const rows={};let fields=[];let processed=0;let stopReason='';let cancelled=false;let errorText='';
+  try{
+    for(let offset=0;offset<ids.length;offset+=20){
+      if(dadataRefreshCancelRequested){cancelled=true;break;}
+      const batch=ids.slice(offset,offset+20);
+      const fd=new FormData();fd.append('selected_ids',JSON.stringify(batch));
+      const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),120000);
+      try{
+        const response=await fetch('?action=dadata_fetch',{method:'POST',headers:csrfHeaders(),body:fd,signal:controller.signal});
+        const payload=await response.json();
+        if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось загрузить данные DaData.');
+        Object.assign(rows,payload.rows||{});
+        if(!fields.length)fields=payload.fields||[];
+        processed+=Number(payload.processed||0);
+        $('dadataRefreshProgressText').textContent=`DaData: обработано ${processed} из ${ids.length}…`;
+        if(payload.stop){stopReason=String(payload.stopReason||'DaData остановила пакет.');break;}
+      }catch(e){
+        errorText=e.name==='AbortError'?'DaData не ответила за 120 секунд.':(e.message||'Ошибка загрузки DaData.');
+        break;
+      }finally{clearTimeout(timer);}
+    }
+    if(errorText){$('dadataFeedback').textContent=errorText;showToast(errorText,'error');return;}
+    if(!Object.keys(rows).length){showToast(stopReason||'DaData не вернула данных по отмеченным записям.','error');return;}
+    dadataRefreshData={ids,rows,fields};
+    $('dadataRefreshSubtitle').textContent=`Отмечено записей: ${ids.length}. Загружено: ${processed}.`;
+    renderDadataSources();renderDadataMapping();
+    $('dadataRefreshModal').hidden=false;document.body.classList.add('modal-open');
+    if(stopReason||cancelled){
+      const note=(stopReason?`Остановлено: ${stopReason}`:'Загрузка остановлена по вашему запросу.')+' Показан загруженный список.';
+      $('dadataFeedback').textContent=note;showToast(note,'error');
+    }
+  }finally{
+    dadataRefreshRunning=false;$('dadataRefreshProgress').classList.remove('show');
+    updateDadataRefreshButton();updateManagerCheckButton();
+  }
+}
+async function saveDadataCards() {
+  if(!dadataPreviewEdits||!Object.keys(dadataPreviewEdits).length){showToast('Нет сопоставленных изменений для сохранения.','error');return;}
+  const ids=Object.keys(dadataPreviewEdits);
+  const button=$('saveDadataCardsBtn'),old=button.textContent;
+  button.disabled=true;button.textContent='Сохраняем карточки…';
+  const fd=new FormData();
+  fd.append('ids',JSON.stringify(ids));
+  fd.append('edits',JSON.stringify(dadataPreviewEdits));
+  fd.append('new_fields',JSON.stringify(dadataPreviewNewFields||[]));
+  try{
+    const response=await fetch('?action=save_records_bulk',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось сохранить карточки.');
+    (payload.records||[]).forEach(record=>{
+      const index=dataset.records.findIndex(item=>item.id===record.id);
+      if(index>=0)dataset.records[index]=record;
+      delete overrides[record.id];
+    });
+    if((payload.newColumns||[]).length)dataset.customColumns=[...new Set([...(dataset.customColumns||[]),...payload.newColumns])];
+    const saved=Number(payload.savedFields||0);
+    closeDadataRefreshModal();updateMapping();renderTable();
+    showToast(`Сохранено ${ids.length} карточек · ${saved} значений.`,'success');
+  }catch(e){
+    showToast(e.message||'Ошибка сохранения карточек.','error');
+  }finally{button.disabled=false;button.textContent=old;}
+}
+
 async function init() {
   try {
     const response=await fetch('?action=data',{cache:'no-store'});
@@ -2410,6 +2735,19 @@ $('nextPage').addEventListener('click',()=>{pageNumber++;renderTable();});
 $('generateBtn').addEventListener('click',generate);
 $('checkManagersBtn').addEventListener('click',checkSelectedManagers);
 $('cancelManagerCheckBtn').addEventListener('click',()=>{managerCheckCancelRequested=true;$('managerCheckProgressText').textContent='Завершаем текущий пакет DaData; новые запросы больше не запускаются…';});
+$('refreshFromDadataBtn').addEventListener('click',fetchDadataForUpdate);
+$('dadataRefreshClose').addEventListener('click',closeDadataRefreshModal);
+$('dadataRefreshCancelBtn').addEventListener('click',closeDadataRefreshModal);
+$('cancelDadataRefreshBtn').addEventListener('click',()=>{dadataRefreshCancelRequested=true;$('dadataRefreshProgressText').textContent='Завершаем текущий пакет DaData; новые запросы больше не запускаются…';});
+$('dadataMappingList').addEventListener('change',event=>{
+  if(event.target.dataset.role!=='target')return;
+  const input=event.target.closest('.dadata-map-row')?.querySelector('[data-role="new-name"]');
+  if(input){input.hidden=event.target.value!=='__new__';if(!input.hidden)input.focus();}
+  markDadataMappingChanged();
+});
+$('dadataMappingList').addEventListener('input',event=>{if(event.target.dataset.role==='new-name')markDadataMappingChanged();});
+$('applyDadataMappingBtn').addEventListener('click',buildDadataPreview);
+$('saveDadataCardsBtn').addEventListener('click',saveDadataCards);
 $('saveDadataBtn').addEventListener('click',saveDadataSettings);
 $('templateSelect').addEventListener('change',()=>selectTemplate(templateSelect.value));
 $('saveUploadedTemplate').addEventListener('click',saveUploadedTemplate);

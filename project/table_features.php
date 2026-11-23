@@ -1092,6 +1092,35 @@ function docgenCommitExcelImport(): never
     }
 }
 
+/** Create new shared columns for values mapped from an external source. */
+function docgenEnsureColumns(array $names): array
+{
+    $table = docgenTableData();
+    $dataset = loadDataset();
+    $columnMap = docgenExcelCanonicalColumnMap($dataset, $table);
+    $added = [];
+    foreach ($names as $name) {
+        $name = docgenExcelCleanFieldName((string) $name);
+        if ($name === '' || mb_strlen($name, 'UTF-8') > 120) {
+            throw new RuntimeException('Название нового поля должно содержать от 1 до 120 символов.');
+        }
+        if (docgenExcelReservedHeader($name) !== null) {
+            throw new RuntimeException('Это название поля зарезервировано.');
+        }
+        $key = mb_strtolower($name, 'UTF-8');
+        if (isset($columnMap[$key])) {
+            continue;
+        }
+        $table['columns'][] = $name;
+        $columnMap[$key] = $name;
+        $added[] = $name;
+    }
+    if ($added !== []) {
+        docgenSaveTableData($table);
+    }
+    return $added;
+}
+
 function docgenAddTableColumn(): never
 {
     $name = docgenExcelCleanFieldName((string) ($_POST['name'] ?? ''));
