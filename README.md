@@ -1,1 +1,138 @@
-# docgen
+# docgen — локальное приложение формирования документов
+
+PHP-приложение для подготовки писем по снимку Единой книги ведомств: XLSX-импорт/экспорт,
+DOCX/HTML-шаблоны, PDF через LibreOffice, ручная очередь отправки писем через SMTP.
+Исходный код приложения лежит в `project/`, web-root — `project/public/` (данные, шаблоны,
+очередь и SMTP-секреты хранятся вне web-root).
+
+## Развёртывание на Ubuntu 22.04
+
+### Первый раз
+
+```sh
+sudo apt-get update
+sudo apt-get install -y git curl
+git clone -b arena/f833c43b-docgen https://github.com/vsesem-git/docgen.git /opt/docgen-src
+cd /opt/docgen-src
+sudo sh ./install_ubuntu.sh
+```
+
+Сейчас изменения находятся в ветке `arena/f833c43b-docgen` (см. `-b` в команде выше).
+После влития изменений в `main` можно клонировать без `-b`, а на уже развёрнутом сервере
+достаточно `git pull` — `deploy.sh` сам подтянет текущую ветку.
+
+Установщик поставит PHP 8.1+, расширения и LibreOffice Writer, создаст хранилище
+`/var/lib/docgen`, конфиг `/etc/docgen/app.env`, systemd-службу `docgen.service` и покажет
+пароль первого входа. Приложение будет доступно на `http://<ip-сервера>:8080/`.
+
+Переменные перед установкой (опционально):
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `DOCGEN_ADMIN_PASSWORD` | генерируется и показывается один раз | пароль администратора (от 12 символов) |
+| `DOCGEN_PORT` | `8080` | порт HTTP-сервера |
+| `DOCGEN_BIND` | `0.0.0.0` | адрес привязки |
+| `DOCGEN_INSTALL_DIR` | `/opt/docgen-handoff` | каталог установки кода |
+| `DOCGEN_STORAGE_DIR` | `/var/lib/docgen` | приватное хранилище данных |
+
+Например: `sudo DOCGEN_ADMIN_PASSWORD='...' DOCGEN_PORT=8080 sh ./install_ubuntu.sh`
+(чтобы переменные дошли через `sudo`, используйте `sudo -E` или задайте их сразу после `sudo`).
+
+### Обновление из Git — одна команда
+
+```sh
+cd /opt/docgen-src && sudo DOCGEN_HEALTH_HOST=127.0.0.1 ./deploy.sh
+```
+
+`deploy.sh`:
+
+1. делает `git pull --ff-only` (от имени владельца каталога репозитория);
+2. проверяет синтаксис PHP-файлов;
+3. копирует `project/` в `/opt/docgen-handoff/app`, сохраняя `/etc/docgen/app.env`
+   и всё приватное хранилище `/var/lib/docgen` нетронутыми;
+4. перезапускает `docgen.service` и проверяет, что приложение отвечает;
+5. обновляет и включает `docgen-mailer.timer` — планировщик очередных писем (раз в минуту);
+6. при ошибке автоматически возвращает предыдущую версию кода.
+
+Если нужно обновить только код без обращения к Git (например, конфликт локальных правок):
+
+```sh
+cd /opt/docgen-src && sudo ./deploy.sh --no-pull
+```
+
+Полезные команды:
+
+```sh
+systemctl status docgen.service
+journalctl -u docgen.service -f
+sudo systemctl restart docgen.service
+systemctl status docgen-mailer.timer
+journalctl -u docgen-mailer.service -f
+```
+
+### Локальный preview (без установки системных зависимостей)
+
+```sh
+sh ./start_preview.sh           # http://0.0.0.0:8765/
+PORT=8766 sh ./start_preview.sh
+```
+
+Для preview нужно окружение PHP 8.1+ с расширениями `zip`, `dom`, `xml`, `xmlwriter`,
+`mbstring`, `gd`, `ctype`, `openssl` и установленный `vendor/` (он лежит в репозитории). Без `openssl` PHP не сможет подключиться к SMTP по `ssl://`.
+
+## Диагностика «Could not connect to SMTP host»
+
+Выполните внутри LXC, подставив свой адрес сервера и порт (это не секреты):
+
+```sh
+HOST=smtp.example.org   # только имя хоста, без https:// и без пути
+PORT=587                # 587 = STARTTLS, 465 = SSL/TLS
+
+getent hosts "$HOST" || echo "DNS не резолвится"
+timeout 5 bash -c "</dev/tcp/$HOST/$PORT" && echo "TCP OK" || echo "TCP недоступен"
+php -m | grep -i openssl || echo "В PHP нет openssl — SMTP 465/587 не заработает"
+```
+
+Если ошибка содержит `subjectAltName did not match` — сертификат выдан на другое имя.
+Укажите в поле «SMTP-сервер» имя из сертификата (канонический hostname), а в «Логине»
+и «Email отправителя» оставьте свой почтовый адрес. Это нормальная ситуация, когда
+у одного сервера есть несколько DNS-алиасов.
+
+Если TCP доступен, проверьте TLS:
+
+```sh
+# для порта 587 (STARTTLS)
+timeout 8 openssl s_client -starttls smtp -connect "$HOST:$PORT" -servername "$HOST" </dev/null 2>&1 | head -20
+
+# для порта 465 (SSL/TLS)
+timeout 8 openssl s_client -connect "$HOST:$PORT" -servername "$HOST" </dev/null 2>&1 | head -20
+```
+
+Частые причины: неверная пара «порт — шифрование» (587 + STARTTLS, 465 + SSL/TLS),
+закрытый исходящий порт у провайдера/файрвола Proxmox, нерезолвящийся адрес внутри
+контейнера, блокировка по IP у почтового сервиса. Журнал приложения:
+
+```sh
+journalctl -u docgen.service --since '-10 min' --no-pager
+```
+
+Пароль SMTP, логин, DaData API-ключ, cookie/CSRF-токены и персональные данные
+никуда отправлять не нужно — достаточно сказать, на каком шаге проверка оборвалась.
+
+## Важно
+
+Сервис работает по HTTP без TLS. Оставляйте порт доступным только в доверенной локальной
+сети или настройте HTTPS/туннель и firewall; не публикуйте его в Интернет напрямую.
+См. `project/README.md` — описание функций, зависимостей и ручного тест-плана.
+
+## SMTP: что изменилось в этой версии
+
+- Кнопка **«Проверить SMTP»** теперь проверяет значения, которые сейчас видны в форме,
+  и не сохраняет их. Кнопка блокируется на время запроса, показывает статус и имеет
+  таймаут 20 с; только сама проверка соединения ограничена 8 с. Отправка писем из очереди
+  сохраняет обычный таймаут PHPMailer.
+- Кнопка **«Сохранить настройки»** тоже блокируется на время запроса и показывает статус.
+- PHP закрывает файл сессии до сетевого подключения, поэтому проверка SMTP не блокирует
+  остальные запросы того же браузера. Встроенный сервер запускается с несколькими worker'ами.
+- Некорректный адрес сервера (например, `https://smtp.example.ru`) отклоняется сразу
+  с понятным сообщением вместо долгого ожидания.

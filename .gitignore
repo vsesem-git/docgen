@@ -1,0 +1,4 @@
+# Runtime data created by start_preview.sh (real server uses /var/lib/docgen)
+/storage/
+*.log
+.DS_Store
