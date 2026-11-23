@@ -1,0 +1,2238 @@
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/vendor/autoload.php';
+
+use PhpOffice\PhpWord\TemplateProcessor;
+use morphos\Russian\AdjectiveDeclension;
+use morphos\Russian\Cases as RussianCases;
+use morphos\Russian\NounDeclension;
+
+const DATA_FILE = __DIR__ . '/data/records.json';
+const DEMO_OVERRIDES_FILE = __DIR__ . '/data/demo_overrides.json';
+const SAMPLE_TEMPLATE = __DIR__ . '/samples/letter_example.docx';
+const DOWNLOAD_TTL_SECONDS = 86400;
+const MAX_TEMPLATE_BYTES = 20_000_000;
+const MAX_ROWS_PER_RUN = 300;
+
+require __DIR__ . '/features.php';
+require __DIR__ . '/table_features.php';
+
+function sendJson(array $payload, int $status = 200): never
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+function loadJsonFile(string $path, array $fallback = []): array
+{
+    if (!is_file($path)) {
+        return $fallback;
+    }
+    $decoded = json_decode((string) file_get_contents($path), true);
+    return is_array($decoded) ? $decoded : $fallback;
+}
+
+function loadDataset(): array
+{
+    return docgenMergeUserTableData(loadJsonFile(DATA_FILE, ['origin' => '', 'sheets' => [], 'records' => []]));
+}
+
+function loadDemoOverrides(): array
+{
+    return loadJsonFile(DEMO_OVERRIDES_FILE, []);
+}
+
+function loadRecordEdits(): array
+{
+    return loadJsonFile(RECORD_EDITS_FILE, []);
+}
+
+function baseFields(array $record): array
+{
+    static $manualValues = null;
+    static $savedEdits = null;
+    static $customColumns = null;
+    if ($manualValues === null) {
+        $manualValues = loadDemoOverrides();
+    }
+    if ($savedEdits === null) {
+        $savedEdits = loadRecordEdits();
+    }
+    $fields = recordFields($record);
+    $id = (string) ($record['id'] ?? '');
+    $manual = $manualValues[$id] ?? [];
+    if (is_array($manual)) {
+        foreach ($manual as $name => $value) {
+            if (!array_key_exists($name, $fields)) {
+                $fields[$name] = $value;
+            }
+        }
+    }
+    $edits = $savedEdits[$id] ?? [];
+    if (is_array($edits)) {
+        foreach ($edits as $name => $value) {
+            $fields[$name] = $value;
+        }
+    }
+    if ($customColumns === null) {
+        $customColumns = docgenTableData()['columns'];
+    }
+    foreach ($customColumns as $column) {
+        if (!array_key_exists($column, $fields)) {
+            $fields[$column] = '';
+        }
+    }
+    return $fields;
+}
+
+function preserveWordCase(string $original, string $inflected): string
+{
+    $letters = preg_replace('/[^\p{L}]/u', '', $original) ?? '';
+    if ($letters !== '' && mb_strtoupper($letters, 'UTF-8') === $letters) {
+        return mb_strtoupper($inflected, 'UTF-8');
+    }
+    $first = mb_substr($original, 0, 1, 'UTF-8');
+    if ($first !== '' && mb_strtoupper($first, 'UTF-8') === $first && mb_strtolower($first, 'UTF-8') !== $first) {
+        return mb_strtoupper(mb_substr($inflected, 0, 1, 'UTF-8'), 'UTF-8') . mb_substr($inflected, 1, null, 'UTF-8');
+    }
+    return mb_strtolower($inflected, 'UTF-8');
+}
+
+function inflectTitleAdjective(string $word, string $case): string
+{
+    $lower = mb_strtolower($word, 'UTF-8');
+    if (mb_substr($lower, -2, null, 'UTF-8') === 'ий') {
+        $stem = mb_substr($lower, 0, -2, 'UTF-8');
+        $ending = match ($case) {
+            RussianCases::GENITIVE, RussianCases::ACCUSATIVE => 'его',
+            RussianCases::DATIVE => 'ему',
+            RussianCases::ABLATIVE => 'им',
+            RussianCases::PREPOSITIONAL => 'ем',
+            default => '',
+        };
+        if ($case === RussianCases::NOMINATIVE) {
+            return $word;
+        }
+        return preserveWordCase($word, $stem . $ending);
+    }
+    try {
+        return preserveWordCase($word, AdjectiveDeclension::getCase($word, $case, true, 'm'));
+    } catch (Throwable $e) {
+        return $word;
+    }
+}
+
+function inflectTitleNoun(string $word, string $case): string
+{
+    try {
+        return preserveWordCase($word, NounDeclension::getCase($word, $case, true));
+    } catch (Throwable $e) {
+        return $word;
+    }
+}
+
+function inflectJobTitleSegment(string $segment, string $case): array
+{
+    $pattern = '/^(\\s*)(?:(временно)\\s+)?(?:(первый|второй|главный|старший|младший|ведущий)\\s+)?(исполняющий|управляющий|заместитель|председатель|министр|губернатор|вице-губернатор|глава|директор|начальник|руководитель|мэр|член|секретарь|советник|командующий|администратор|уполномоченный|премьер-министр|врач)\\b/iu';
+    $recognized = false;
+    $result = preg_replace_callback($pattern, static function (array $m) use ($case, &$recognized): string {
+        $recognized = true;
+        $leading = $m[1] ?? '';
+        $temporary = $m[2] ?? '';
+        $ordinal = $m[3] ?? '';
+        $head = $m[4] ?? '';
+        $parts = [];
+        if ($temporary !== '') {
+            $parts[] = $temporary;
+        }
+        if ($ordinal !== '') {
+            $parts[] = inflectTitleAdjective($ordinal, $case);
+        }
+        if (in_array(mb_strtolower($head, 'UTF-8'), ['исполняющий', 'управляющий'], true)) {
+            $parts[] = inflectTitleAdjective($head, $case);
+        } else {
+            $parts[] = inflectTitleNoun($head, $case);
+        }
+        return $leading . implode(' ', $parts);
+    }, $segment, 1);
+    $result = is_string($result) ? $result : $segment;
+
+    // In compound titles such as «Глава (Раис) Республики», inflect the explanatory synonym too.
+    $result = preg_replace_callback('/\\(([^)]*)\\)/u', static function (array $m) use ($case): string {
+        $inside = preg_replace_callback('/\\b(раис)\\b/iu', static fn(array $word): string => inflectTitleNoun($word[1], $case), $m[1]);
+        return '(' . ($inside ?? $m[1]) . ')';
+    }, $result) ?? $result;
+    return [$result, $recognized];
+}
+
+function jobTitleCaseForms(string $title): array
+{
+    $cases = [
+        'nominative' => RussianCases::NOMINATIVE,
+        'genitive' => RussianCases::GENITIVE,
+        'dative' => RussianCases::DATIVE,
+        'accusative' => RussianCases::ACCUSATIVE,
+        'ablative' => RussianCases::ABLATIVE,
+        'prepositional' => RussianCases::PREPOSITIONAL,
+    ];
+    $forms = [];
+    $recognizedAny = false;
+    foreach ($cases as $label => $case) {
+        $parts = preg_split('/(\\s+[—–-]\\s+|[,;]\\s*)/u', $title, -1, PREG_SPLIT_DELIM_CAPTURE);
+        if (!is_array($parts)) {
+            $forms[$label] = $title;
+            continue;
+        }
+        foreach ($parts as $index => $part) {
+            if ($index % 2 === 0) {
+                [$parts[$index], $recognized] = inflectJobTitleSegment($part, $case);
+                $recognizedAny = $recognizedAny || $recognized;
+            }
+        }
+        $forms[$label] = implode('', $parts);
+    }
+    return ['cases' => $forms, 'recognized' => $recognizedAny];
+}
+
+function recipientInflections(string $fullName, string $jobTitle): array
+{
+    $nameCases = [];
+    $nameError = '';
+    if (trim($fullName) !== '') {
+        try {
+            $result = \morphos\Russian\getNameCases(trim($fullName));
+            if (is_array($result)) {
+                $nameCases = $result;
+            } else {
+                $nameError = 'Не удалось разобрать ФИО автоматически.';
+            }
+        } catch (Throwable $e) {
+            $nameError = 'Не удалось разобрать ФИО автоматически.';
+        }
+    }
+    $job = jobTitleCaseForms($jobTitle);
+    return [
+        'ok' => true,
+        'nameCases' => $nameCases,
+        'nameError' => $nameError,
+        'jobCases' => $job['cases'],
+        'jobRecognized' => $job['recognized'],
+    ];
+}
+
+function saveRecordEdits(array $edits): void
+{
+    $directory = dirname(RECORD_EDITS_FILE);
+    if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+        throw new RuntimeException('Не удалось создать папку для правок.');
+    }
+    $temp = RECORD_EDITS_FILE . '.' . bin2hex(random_bytes(5)) . '.tmp';
+    $json = json_encode($edits, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE);
+    if (!is_string($json) || file_put_contents($temp, $json . PHP_EOL, LOCK_EX) === false) {
+        @unlink($temp);
+        throw new RuntimeException('Не удалось сохранить карточку записи.');
+    }
+    if (!rename($temp, RECORD_EDITS_FILE)) {
+        @unlink($temp);
+        throw new RuntimeException('Не удалось завершить сохранение карточки записи.');
+    }
+}
+
+function cleanupExpiredDownloads(): void
+{
+    if (!is_dir(DOWNLOADS_DIR)) {
+        return;
+    }
+    foreach (scandir(DOWNLOADS_DIR) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..' || !preg_match('/^[a-f0-9]{32}$/', $entry)) {
+            continue;
+        }
+        $directory = DOWNLOADS_DIR . '/' . $entry;
+        $metaPath = $directory . '/meta.json';
+        $meta = is_file($metaPath) ? json_decode((string) file_get_contents($metaPath), true) : null;
+        $expiry = is_array($meta) ? (int) ($meta['expiresAt'] ?? 0) : 0;
+        if ($expiry === 0 || $expiry < time()) {
+            cleanupTree($directory);
+        }
+    }
+}
+
+function streamStoredDownload(): never
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+        sendJson(['ok' => false, 'error' => 'Для скачивания используйте GET.'], 405);
+    }
+    $id = (string) ($_GET['id'] ?? '');
+    if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
+        sendJson(['ok' => false, 'error' => 'Ссылка на результат некорректна.'], 400);
+    }
+    $directory = DOWNLOADS_DIR . '/' . $id;
+    $metaPath = $directory . '/meta.json';
+    $meta = is_file($metaPath) ? json_decode((string) file_get_contents($metaPath), true) : null;
+    if (!is_array($meta) || (int) ($meta['expiresAt'] ?? 0) < time()) {
+        cleanupTree($directory);
+        sendJson(['ok' => false, 'error' => 'Ссылка на результат истекла или файл уже удалён. Сформируйте документы ещё раз.'], 410);
+    }
+    $format = ($meta['format'] ?? '') === 'docx' ? 'docx' : (($meta['format'] ?? '') === 'zip' ? 'zip' : '');
+    if ($format === '') {
+        sendJson(['ok' => false, 'error' => 'Неизвестный формат результата.'], 500);
+    }
+    $path = $directory . '/payload.' . $format;
+    if (!is_file($path)) {
+        sendJson(['ok' => false, 'error' => 'Файл результата не найден. Сформируйте документы ещё раз.'], 404);
+    }
+    $filename = (string) ($meta['filename'] ?? ($format === 'docx' ? 'Документ.docx' : 'Пакет_DOCX.zip'));
+    $fallback = $format === 'docx' ? 'document.docx' : 'documents.zip';
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: ' . ($format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/zip'));
+    header('Content-Disposition: attachment; filename="' . $fallback . '"; filename*=UTF-8\'\'' . rawurlencode($filename));
+    header('Content-Length: ' . filesize($path));
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('X-Documents-Created: ' . (int) ($meta['created'] ?? 0));
+    header('X-Documents-Skipped: ' . (int) ($meta['skipped'] ?? 0));
+    header('X-Document-Format: ' . $format);
+    readfile($path);
+    exit;
+}
+
+function isUuidLike(string $value): bool
+{
+    return (bool) preg_match('/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i', trim($value));
+}
+
+/**
+ * Scan Word text paragraphs only (not XML attributes), so GUIDs in image metadata
+ * are not mistaken for template variables. Both FillDocuments {field} and PHPWord
+ * ${field} forms are recognized.
+ */
+function scanDocxVariables(string $path): array
+{
+    $zip = new ZipArchive();
+    $opened = $zip->open($path);
+    if ($opened !== true || $zip->locateName('word/document.xml') === false) {
+        if ($opened === true) {
+            $zip->close();
+        }
+        throw new RuntimeException('Файл не похож на корректный DOCX-шаблон.');
+    }
+
+    $variables = [];
+    $hasLegacy = false;
+    $hasPhpWord = false;
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $name = $zip->getNameIndex($i);
+        if (!is_string($name) || !preg_match('#^word/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$#', $name)) {
+            continue;
+        }
+        $xml = $zip->getFromName($name);
+        if (!is_string($xml) || $xml === '') {
+            continue;
+        }
+        $dom = new DOMDocument();
+        $dom->preserveWhiteSpace = true;
+        $dom->formatOutput = false;
+        if (!@$dom->loadXML($xml, LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR)) {
+            continue;
+        }
+        $xpath = new DOMXPath($dom);
+        $xpath->registerNamespace('w', $wordNs);
+        foreach ($xpath->query('//w:p') as $paragraph) {
+            $text = '';
+            foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+                $text .= $textNode->textContent;
+            }
+            if ($text === '') {
+                continue;
+            }
+            if (preg_match_all('/\$\{([^{}]+)\}/u', $text, $matches)) {
+                $hasPhpWord = true;
+                foreach ($matches[1] as $variable) {
+                    $variable = trim($variable);
+                    if ($variable !== '' && !isUuidLike($variable)) {
+                        $variables[$variable] = true;
+                    }
+                }
+            }
+            if (preg_match_all('/(?<!\$)\{([^{}]+)\}/u', $text, $matches)) {
+                foreach ($matches[1] as $variable) {
+                    $variable = trim($variable);
+                    if ($variable !== '' && !isUuidLike($variable)) {
+                        $hasLegacy = true;
+                        $variables[$variable] = true;
+                    }
+                }
+            }
+        }
+    }
+    $zip->close();
+
+    $names = array_keys($variables);
+    return [
+        'fields' => $names,
+        'syntax' => $hasLegacy && $hasPhpWord ? 'mixed' : ($hasLegacy ? 'filldocuments' : ($hasPhpWord ? 'phpword' : 'none')),
+        'syntaxLabel' => $hasLegacy && $hasPhpWord ? 'Смешанный формат' : ($hasLegacy ? 'FillDocuments {поле}' : ($hasPhpWord ? 'PHPWord ${поле}' : 'переменные не найдены')),
+    ];
+}
+
+function validateDocxPath(string $path): void
+{
+    if (!is_file($path) || filesize($path) > MAX_TEMPLATE_BYTES) {
+        throw new RuntimeException('Шаблон отсутствует или превышает ограничение 20 МБ.');
+    }
+    $zip = new ZipArchive();
+    $opened = $zip->open($path);
+    if ($opened !== true) {
+        throw new RuntimeException('Не удалось открыть DOCX как ZIP-пакет. Проверьте файл.');
+    }
+    $valid = $zip->locateName('word/document.xml') !== false;
+    $zip->close();
+    if (!$valid) {
+        throw new RuntimeException('В файле не найдена основная часть Word-документа. Нужен файл .docx.');
+    }
+}
+
+function uploadedTemplatePath(): ?string
+{
+    if (!isset($_FILES['template']) || !is_array($_FILES['template'])) {
+        return null;
+    }
+    $file = $_FILES['template'];
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return null;
+    }
+    if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('Ошибка загрузки шаблона DOCX.');
+    }
+    $originalName = (string) ($file['name'] ?? '');
+    if (strtolower(pathinfo($originalName, PATHINFO_EXTENSION)) !== 'docx') {
+        throw new RuntimeException('Поддерживаются только шаблоны .docx.');
+    }
+    if ((int) ($file['size'] ?? 0) > MAX_TEMPLATE_BYTES) {
+        throw new RuntimeException('Размер шаблона превышает 20 МБ.');
+    }
+    $path = (string) ($file['tmp_name'] ?? '');
+    validateDocxPath($path);
+    return $path;
+}
+
+function templateFromRequest(): array
+{
+    $uploaded = uploadedTemplatePath();
+    if ($uploaded !== null) {
+        return ['path' => $uploaded, 'name' => basename((string) $_FILES['template']['name']), 'sample' => false];
+    }
+    if (isset($_POST['use_sample']) && (string) $_POST['use_sample'] === '1') {
+        validateDocxPath(SAMPLE_TEMPLATE);
+        return ['path' => SAMPLE_TEMPLATE, 'name' => 'Письмо-пример.docx', 'sample' => true];
+    }
+    throw new RuntimeException('Загрузите DOCX-шаблон или выберите пример.');
+}
+
+function recordFields(array $record): array
+{
+    $fields = $record['fields'] ?? [];
+    return is_array($fields) ? $fields : [];
+}
+
+function buildFieldAnalysis(array $templateInfo, array $records, string $sourceKey = ''): array
+{
+    $sourceRecords = array_values(array_filter($records, static function ($record) use ($sourceKey) {
+        return $sourceKey === '' || ($record['source_key'] ?? '') === $sourceKey;
+    }));
+    $columns = [];
+    foreach ($sourceRecords as $record) {
+        foreach (array_keys(baseFields($record)) as $column) {
+            $columns[$column] = true;
+        }
+    }
+    $fields = [];
+    foreach ($templateInfo['fields'] as $name) {
+        $fields[] = [
+            'name' => $name,
+            'mapped' => isset($columns[$name]),
+            'source' => isset($columns[$name]) ? $name : null,
+        ];
+    }
+    return $fields;
+}
+
+function cleanupTree(string $path): void
+{
+    if (!is_dir($path)) {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+        return;
+    }
+    foreach (scandir($path) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $child = $path . DIRECTORY_SEPARATOR . $entry;
+        if (is_dir($child)) {
+            cleanupTree($child);
+        } else {
+            @unlink($child);
+        }
+    }
+    @rmdir($path);
+}
+
+function safeFilename(string $value): string
+{
+    $value = preg_replace('/[\\\\\/\:\*\?"<>\|\x00-\x1F]+/u', ' ', $value) ?? '';
+    $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
+    $value = trim($value, ' .-_');
+    if ($value === '') {
+        $value = 'Документ';
+    }
+    return mb_substr($value, 0, 110, 'UTF-8');
+}
+
+function handleSaveRecord(): never
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        sendJson(['ok' => false, 'error' => 'Для сохранения записи используйте POST.'], 405);
+    }
+    $id = trim((string) ($_POST['id'] ?? ''));
+    $submitted = json_decode((string) ($_POST['fields'] ?? '{}'), true);
+    if ($id === '' || !is_array($submitted)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось прочитать карточку записи.'], 400);
+    }
+
+    $dataset = loadDataset();
+    $record = null;
+    foreach (($dataset['records'] ?? []) as $candidate) {
+        if ((string) ($candidate['id'] ?? '') === $id) {
+            $record = $candidate;
+            break;
+        }
+    }
+    if ($record === null) {
+        sendJson(['ok' => false, 'error' => 'Запись не найдена в демо-наборе.'], 404);
+    }
+
+    $clean = [];
+    foreach ($submitted as $name => $value) {
+        $name = trim((string) $name);
+        if ($name === '' || mb_strlen($name, 'UTF-8') > 120 || preg_match('/[\\x00-\\x1F\\x7F]/u', $name)) {
+            continue;
+        }
+        if (!is_scalar($value)) {
+            continue;
+        }
+        $value = trim((string) $value);
+        if (mb_strlen($value, 'UTF-8') > 5000) {
+            sendJson(['ok' => false, 'error' => 'Одно из полей превышает ограничение 5 000 символов.'], 422);
+        }
+        $clean[$name] = preg_replace('/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]/u', '', $value) ?? $value;
+    }
+
+    $edits = loadRecordEdits();
+    $existing = $edits[$id] ?? [];
+    $edits[$id] = array_merge(is_array($existing) ? $existing : [], $clean);
+    try {
+        saveRecordEdits($edits);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+
+    $record['fields'] = array_merge(baseFields($record), $edits[$id]);
+    sendJson(['ok' => true, 'record' => $record, 'savedFields' => array_keys($clean)]);
+}
+
+function generateDocuments(): never
+{
+    set_time_limit(240);
+    cleanupExpiredDownloads();
+    $dataset = loadDataset();
+    $byId = [];
+    foreach (($dataset['records'] ?? []) as $record) {
+        if (isset($record['id'])) {
+            $byId[(string) $record['id']] = $record;
+        }
+    }
+
+    $ids = json_decode((string) ($_POST['selected_ids'] ?? '[]'), true);
+    if (!is_array($ids)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось прочитать выбранные строки.'], 400);
+    }
+    $ids = array_values(array_unique(array_filter(array_map('strval', $ids), static fn($id) => $id !== '')));
+    if (count($ids) === 0) {
+        sendJson(['ok' => false, 'error' => 'Сначала отметьте хотя бы одну запись.'], 422);
+    }
+    if (count($ids) > MAX_ROWS_PER_RUN) {
+        sendJson(['ok' => false, 'error' => 'В демо можно сформировать не более ' . MAX_ROWS_PER_RUN . ' документов за один запуск. Уточните фильтр или разделите пакет.'], 422);
+    }
+
+    try {
+        $template = templateFromRequest();
+        $templateInfo = scanDocxVariables($template['path']);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    if ($templateInfo['syntax'] === 'mixed') {
+        sendJson(['ok' => false, 'error' => 'В одном шаблоне смешаны {поле} и ${поле}. Оставьте один формат переменных.'], 422);
+    }
+    if (count($templateInfo['fields']) === 0) {
+        sendJson(['ok' => false, 'error' => 'В DOCX не найдены переменные для подстановки.'], 422);
+    }
+
+    $overrides = json_decode((string) ($_POST['overrides'] ?? '{}'), true);
+    if (!is_array($overrides)) {
+        $overrides = [];
+    }
+    $workRoot = __DIR__ . '/../docgen_demo_storage/tmp';
+    if (!is_dir($workRoot) && !mkdir($workRoot, 0700, true) && !is_dir($workRoot)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось создать временную папку для обработки.'], 500);
+    }
+    $jobDir = $workRoot . '/' . bin2hex(random_bytes(8));
+    if (!mkdir($jobDir, 0700, true)) {
+        sendJson(['ok' => false, 'error' => 'Не удалось подготовить пакет документов.'], 500);
+    }
+
+    $archivePath = $jobDir . '/Пакет_DOCX.zip';
+    $archive = new ZipArchive();
+    if ($archive->open($archivePath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        cleanupTree($jobDir);
+        sendJson(['ok' => false, 'error' => 'Не удалось создать ZIP-архив.'], 500);
+    }
+
+    $created = 0;
+    $errors = [];
+    $counter = 0;
+    $singleDocxPath = null;
+    $singleFilename = '';
+    $macroOpen = $templateInfo['syntax'] === 'filldocuments' ? '{' : '${';
+
+    foreach ($ids as $id) {
+        if (!isset($byId[$id])) {
+            $errors[] = ['id' => $id, 'region' => '', 'reason' => 'Запись не найдена в демо-наборе.'];
+            continue;
+        }
+        $record = $byId[$id];
+        $fields = baseFields($record);
+        $rowOverrides = [];
+        if (isset($overrides[$id]) && is_array($overrides[$id])) {
+            $rowOverrides = $overrides[$id];
+        }
+
+        $values = [];
+        $missing = [];
+        foreach ($templateInfo['fields'] as $variable) {
+            if (array_key_exists($variable, $rowOverrides) && trim((string) $rowOverrides[$variable]) !== '') {
+                $values[$variable] = trim((string) $rowOverrides[$variable]);
+            } elseif (array_key_exists($variable, $fields) && trim((string) $fields[$variable]) !== '') {
+                $values[$variable] = (string) $fields[$variable];
+            } else {
+                $missing[] = $variable;
+            }
+        }
+        if ($missing) {
+            $errors[] = [
+                'id' => $id,
+                'region' => (string) ($fields['Регион'] ?? ''),
+                'reason' => 'Не сопоставлены поля: ' . implode(', ', $missing),
+            ];
+            continue;
+        }
+
+        try {
+            $processor = new TemplateProcessor($template['path']);
+            $processor->setMacroChars($macroOpen, '}');
+            foreach ($values as $key => $value) {
+                $processor->setValue($key, $value);
+            }
+            $docxPath = $jobDir . '/doc_' . str_pad((string) (++$counter), 4, '0', STR_PAD_LEFT) . '.docx';
+            $processor->saveAs($docxPath);
+            unset($processor);
+
+            $region = (string) ($fields['Регион'] ?? 'Без региона');
+            $person = (string) ($fields['Фамилия И.О.'] ?? $fields['ФИО'] ?? 'Адресат');
+            $inn = (string) ($fields['ИНН'] ?? '');
+            $base = safeFilename($region . ' — ' . $person . ($inn !== '' ? ' — ' . $inn : ''));
+            $archiveName = $base . '.docx';
+            if (!$archive->addFile($docxPath, $archiveName)) {
+                $errors[] = ['id' => $id, 'region' => $region, 'reason' => 'Не удалось добавить документ в ZIP.'];
+                @unlink($docxPath);
+                continue;
+            }
+            $singleDocxPath = $docxPath;
+            $singleFilename = $archiveName;
+            $created++;
+        } catch (Throwable $e) {
+            $errors[] = [
+                'id' => $id,
+                'region' => (string) ($fields['Регион'] ?? ''),
+                'reason' => 'Ошибка обработки DOCX: ' . $e->getMessage(),
+            ];
+        }
+    }
+
+    if ($errors) {
+        $lines = [
+            'Результат демо-формирования DOCX',
+            'Создано документов: ' . $created,
+            'Пропущено/ошибок: ' . count($errors),
+            '',
+        ];
+        foreach ($errors as $error) {
+            $lines[] = ($error['region'] !== '' ? $error['region'] . ' · ' : '') . ($error['id'] ?? '') . ' — ' . $error['reason'];
+        }
+        $archive->addFromString('Отчет_по_ошибкам.txt', implode("\r\n", $lines));
+    }
+    $archive->close();
+
+    if ($created === 0) {
+        $summary = array_map(static function ($item) {
+            return ($item['region'] !== '' ? $item['region'] . ': ' : '') . $item['reason'];
+        }, $errors);
+        cleanupTree($jobDir);
+        sendJson(['ok' => false, 'error' => 'Не создан ни один DOCX.', 'details' => $summary], 422);
+    }
+
+    $singleDownload = $created === 1 && count($errors) === 0 && is_string($singleDocxPath) && is_file($singleDocxPath);
+    if ($singleDownload) {
+        $sourcePath = $singleDocxPath;
+        $format = 'docx';
+        $downloadName = $singleFilename !== '' ? $singleFilename : 'Документ.docx';
+    } else {
+        $sourcePath = $archivePath;
+        $format = 'zip';
+        $downloadName = 'Пакет_DOCX_' . date('Ymd_His') . '.zip';
+    }
+
+    if (!is_dir(DOWNLOADS_DIR) && !mkdir(DOWNLOADS_DIR, 0700, true) && !is_dir(DOWNLOADS_DIR)) {
+        cleanupTree($jobDir);
+        sendJson(['ok' => false, 'error' => 'Не удалось подготовить ссылку для скачивания.'], 500);
+    }
+    $downloadId = bin2hex(random_bytes(16));
+    $downloadDirectory = DOWNLOADS_DIR . '/' . $downloadId;
+    if (!mkdir($downloadDirectory, 0700, true)) {
+        cleanupTree($jobDir);
+        sendJson(['ok' => false, 'error' => 'Не удалось создать временное хранилище результата.'], 500);
+    }
+    $storedPath = $downloadDirectory . '/payload.' . $format;
+    $metadata = [
+        'format' => $format,
+        'filename' => $downloadName,
+        'created' => $created,
+        'skipped' => count($errors),
+        'expiresAt' => time() + DOWNLOAD_TTL_SECONDS,
+    ];
+    $metadataJson = json_encode($metadata, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if (!copy($sourcePath, $storedPath) || !is_string($metadataJson) || file_put_contents($downloadDirectory . '/meta.json', $metadataJson, LOCK_EX) === false) {
+        cleanupTree($downloadDirectory);
+        cleanupTree($jobDir);
+        sendJson(['ok' => false, 'error' => 'Не удалось сохранить сформированный файл для скачивания.'], 500);
+    }
+    cleanupTree($jobDir);
+    sendJson([
+        'ok' => true,
+        'downloadUrl' => '?action=download&id=' . $downloadId,
+        'filename' => $downloadName,
+        'format' => $format,
+        'created' => $created,
+        'skipped' => count($errors),
+        'expiresInSeconds' => DOWNLOAD_TTL_SECONDS,
+    ]);
+}
+
+$action = (string) ($_GET['action'] ?? '');
+docgenBoot($action);
+docgenDispatch($action);
+if ($action === 'download') {
+    streamStoredDownload();
+}
+if ($action === 'inflect') {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        sendJson(['ok' => false, 'error' => 'Для склонения используйте POST.'], 405);
+    }
+    sendJson(recipientInflections(trim((string) ($_POST['full_name'] ?? '')), trim((string) ($_POST['job_title'] ?? ''))));
+}
+if ($action === 'save_record') {
+    handleSaveRecord();
+}
+if ($action === 'data') {
+    $dataset = loadDataset();
+    $records = $dataset['records'] ?? [];
+    foreach ($records as &$record) {
+        if (is_array($record)) {
+            $record['fields'] = baseFields($record);
+        }
+    }
+    unset($record);
+    sendJson([
+        'origin' => $dataset['origin'] ?? '',
+        'sheets' => $dataset['sheets'] ?? [],
+        'records' => $records,
+        'demoOverrides' => loadDemoOverrides(),
+        'managerChecks' => (object) docgenManagerChecks(),
+        'customColumns' => $dataset['customColumns'] ?? [],
+    ]);
+}
+if ($action === 'analyze') {
+    try {
+        $template = templateFromRequest();
+        $info = scanDocxVariables($template['path']);
+        if ($info['syntax'] === 'mixed') {
+            sendJson(['ok' => false, 'error' => 'В шаблоне смешаны {поле} и ${поле}. Используйте один формат.'], 422);
+        }
+        $dataset = loadDataset();
+        $sourceKey = (string) ($_POST['source_key'] ?? '');
+        $info['analysis'] = buildFieldAnalysis($info, $dataset['records'] ?? [], $sourceKey);
+        $info['ok'] = true;
+        $info['templateName'] = $template['name'];
+        sendJson($info);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+}
+if ($action === 'download_sample') {
+    validateDocxPath(SAMPLE_TEMPLATE);
+    header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    header("Content-Disposition: attachment; filename*=UTF-8''letter_example.docx");
+    header('Content-Length: ' . filesize(SAMPLE_TEMPLATE));
+    header('Cache-Control: no-store');
+    readfile(SAMPLE_TEMPLATE);
+    exit;
+}
+if ($action === 'generate' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    generateDocuments();
+}
+
+$sampleInfo = ['fields' => [], 'syntax' => 'none', 'syntaxLabel' => 'Переменные не найдены'];
+try {
+    validateDocxPath(SAMPLE_TEMPLATE);
+    $sampleInfo = scanDocxVariables(SAMPLE_TEMPLATE);
+} catch (Throwable $e) {
+    // The UI still loads and reports the missing sample template below.
+}
+$sampleInfo['analysis'] = buildFieldAnalysis($sampleInfo, loadDataset()['records'] ?? [], 'guber');
+$sampleInfo['type'] = 'docx';
+$sampleInfo['templateId'] = 'sample-docx';
+$sampleInfo['templateName'] = 'Письмо-пример.docx';
+
+?><!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Демо формирования документов — Единая книга ведомств</title>
+<style>
+:root {
+  --bg:#f2f5f9; --card:#fff; --ink:#16283c; --muted:#5b6b7f; --line:#dde5ee;
+  --brand:#0e4f8a; --brand-dark:#0a3a66; --brand-soft:#eef5fc; --ok:#0f7b4f;
+  --ok-bg:#e7f6ef; --bad:#b3261e; --bad-bg:#fdecea; --warn:#a96300;
+  --warn-bg:#fff6e5; --warn-line:#f0c36d; --head:#0d3557; --head-line:#2a557d;
+  --radius:12px; --shadow:0 1px 2px rgba(16,40,64,.06),0 8px 24px rgba(16,40,64,.07);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
+button,input,select{font:inherit}
+.app-header{background:linear-gradient(115deg,#0a3154 0%,#12588f 70%,#1668a8 100%);color:#fff;padding:22px 28px 20px;box-shadow:0 2px 14px rgba(7,35,62,.18)}
+.header-inner{max-width:1480px;margin:auto;display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.app-header h1{margin:0 0 6px;font-size:22px;font-weight:650;letter-spacing:.2px}
+.app-header .sub{display:flex;align-items:center;gap:8px;color:#cfe3f5;font-size:13px}
+.app-header .sub svg{flex:none}
+.header-badge{border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.1);border-radius:999px;padding:7px 12px;color:#e9f4ff;white-space:nowrap;font-size:12px;font-weight:650}.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.logout-button{padding:7px 10px;border:1px solid rgba(255,255,255,.38);border-radius:8px;background:rgba(255,255,255,.08);color:#fff;font-size:12px}.logout-button:hover{background:rgba(255,255,255,.16)}
+main{max-width:1480px;margin:0 auto;padding:22px 24px 48px}
+.notice{border:1px solid #c9d9ea;border-radius:10px;background:#f8fbff;color:#39536f;padding:11px 14px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start}
+.notice strong{color:#173b60}
+.notice ol{margin:5px 0 0;padding-left:20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 24px}
+.notice li{padding-left:2px}
+.top-grid{display:grid;grid-template-columns:minmax(280px,.88fr) minmax(400px,1.12fr);gap:16px;margin-bottom:16px}
+@media(max-width:850px){.top-grid{grid-template-columns:1fr}.header-inner{display:block}.header-badge{display:inline-flex;margin-top:12px}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+.card-head{padding:15px 18px 10px;display:flex;align-items:center;gap:10px}
+.card-head h2{font-size:15px;margin:0;font-weight:700}
+.step{width:26px;height:26px;display:inline-grid;place-items:center;border-radius:8px;background:var(--brand-soft);color:var(--brand);font-weight:750;font-size:12px}
+.card-body{padding:0 18px 17px}
+.help{font-size:12.5px;color:var(--muted);margin:3px 0 12px}
+.control-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+@media(max-width:520px){.control-grid{grid-template-columns:1fr}}
+.field label{display:block;font-size:12px;color:var(--muted);font-weight:650;margin:0 0 5px}
+.field select,.field input[type=search]{width:100%;height:40px;border:1px solid #cbd7e3;border-radius:8px;background:#fff;color:var(--ink);padding:8px 10px;outline:none}
+.field select:focus,.field input:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(14,79,138,.12)}
+.source-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;color:var(--muted);font-size:12px}
+.pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 10px;font-size:11.5px;font-weight:700;background:#eef2f7;color:var(--muted)}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.bad{background:var(--bad-bg);color:var(--bad)}
+.dz{background:#fff;border:1.5px dashed #c6d4e3;border-radius:10px;padding:14px 15px;text-align:center;cursor:pointer;outline:none;transition:.15s;min-height:130px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dz:hover,.dz:focus-visible,.dz.dragover{border-color:var(--brand);background:var(--brand-soft);box-shadow:0 0 0 4px rgba(14,79,138,.08)}
+.dz.loaded{border-style:solid;border-color:#8fd0b2;background:#f4fbf8}
+.dz.error{border-style:solid;border-color:#e8a9a3;background:#fff7f6}
+.dz-icon{color:var(--brand);margin-bottom:4px}.dz.loaded .dz-icon{color:var(--ok)}
+.dz-title{font-size:14px;font-weight:700;margin:0 0 3px}.dz-hint{font-size:12px;color:var(--muted);margin-bottom:8px}
+.pill .file-name{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}
+.file-actions{display:flex;justify-content:center;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.link-button{border:0;background:transparent;color:var(--brand);text-decoration:underline;text-underline-offset:2px;padding:3px 5px;cursor:pointer;font-size:12px;font-weight:650}
+.toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:0 0 13px}
+button{border-radius:9px;padding:9px 15px;cursor:pointer;border:1px solid transparent;font-weight:650;transition:background .15s,opacity .15s,box-shadow .15s,color .15s}
+button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.btn-primary{background:var(--brand);color:#fff;box-shadow:0 2px 6px rgba(14,79,138,.3)}
+.btn-primary:not(:disabled):hover{background:var(--brand-dark)}
+.btn-ghost{background:transparent;color:var(--muted);border-color:var(--line)}
+.btn-ghost:not(:disabled):hover{background:#e9eef4;color:var(--ink)}
+.btn-small{padding:7px 10px;font-size:12px;border-radius:7px}
+.stats{margin-left:auto;display:flex;gap:16px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 12px;font-size:12.5px;color:var(--muted);box-shadow:var(--shadow)}
+.stats b{color:var(--ink);font-weight:750}.stats .blue b{color:var(--brand)}.stats .green b{color:var(--ok)}
+@media(max-width:900px){.stats{margin-left:0}}
+.search-box{margin-left:auto;min-width:220px;max-width:340px;flex:1}
+.search-box input{width:100%;height:38px;padding:8px 11px;border:1px solid var(--line);border-radius:8px;background:#fff;outline:none}
+.search-box input:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(14,79,138,.1)}
+.mapping-card{margin:0 0 14px;border:1px solid var(--line);border-radius:10px;background:#fff;box-shadow:var(--shadow)}
+.mapping-head{padding:11px 14px 7px;display:flex;align-items:center;gap:8px}
+.mapping-head strong{font-size:13px}.mapping-body{padding:0 14px 12px;display:flex;gap:7px;flex-wrap:wrap}
+.map-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;background:#fafcff;font-size:11.5px;color:var(--muted)}
+.map-chip b{color:var(--ink);font-weight:650}.map-chip .state{font-size:10.5px;font-weight:750;color:var(--ok)}.map-chip.manual{background:#fff9ec;border-color:#f0d9a8}.map-chip.manual .state{color:var(--warn)}
+.legend{display:flex;align-items:center;gap:8px;margin:0 0 9px;color:var(--muted);font-size:12px;flex-wrap:wrap}
+.table-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+.table-wrap{overflow:auto;max-height:63vh;min-height:280px}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;min-width:950px}
+thead th{position:sticky;top:0;z-index:3;background:var(--head);color:#fff;text-align:left;padding:11px 10px;border-right:1px solid var(--head-line);font-size:11.5px;white-space:nowrap}
+thead th:first-child{width:42px;text-align:center;left:0;z-index:5}
+tbody td{padding:8px 10px;border-bottom:1px solid #e7edf3;vertical-align:middle;color:#24394f;background:#fff}
+tbody tr:nth-child(even) td{background:#fbfdff}tbody tr:hover td{background:#f1f7fd}tbody tr.selected td{background:#edf6ff}
+tbody td:first-child{position:sticky;left:0;z-index:2;text-align:center;width:42px;background:inherit}
+tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 var(--brand)}
+tbody tr.manager-name-mismatch td:nth-child(3){background:#fff0ee!important;box-shadow:inset 0 0 0 1px #f1b9b4}
+tbody tr.manager-position-mismatch td:nth-child(4){background:#fff7e8!important;box-shadow:inset 0 0 0 1px #f0d49a}
+.manager-check-badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 7px;font-size:10px;font-weight:750;white-space:nowrap;background:#eef2f7;color:#586d82}
+.manager-check-badge.match{background:#e7f6ef;color:#0f7b4f}
+.manager-check-badge.mismatch{background:#fdecea;color:#a1332b}
+.manager-check-badge.position{background:#fff4e0;color:#9a6200}
+.manager-check-badge.neutral{background:#eef2f7;color:#586d82}
+.manager-check-badge.stale{background:#fff6e5;color:#8b5b00}
+.manager-name-note{display:block;font-size:10.5px;color:#a1332b;margin-top:2px;overflow-wrap:anywhere}
+.manager-position-note{display:block;font-size:10.5px;color:#9a6200;margin-top:2px;overflow-wrap:anywhere}
+.manager-check-detail{border:1px solid var(--line);border-radius:9px;background:#fbfdff;padding:11px 12px;font-size:12px;color:#39536f}
+.manager-check-detail.name-mismatch,.manager-check-detail.both-mismatch{border-color:#efc1bc;background:#fff7f6}
+.manager-check-detail.position-mismatch{border-color:#f0d49a;background:#fffaf0}
+.manager-check-detail.match{border-color:#bfe1ce;background:#f4fbf7}
+.manager-check-detail .manager-check-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:8px}
+.manager-check-detail .manager-check-value{min-width:0;border:1px solid #e2eaf1;border-radius:7px;background:#fff;padding:7px 8px;overflow-wrap:anywhere}
+.manager-check-detail .manager-check-value b{display:block;font-size:10.5px;color:#6b7e91;margin-bottom:3px}
+.check{width:16px;height:16px;accent-color:var(--brand);cursor:pointer}
+.cell-main{font-weight:650;color:#173b60}.cell-sub{font-size:11px;color:var(--muted);margin-top:2px;max-width:320px}
+.badge{display:inline-flex;padding:3px 7px;border-radius:999px;font-size:10.5px;font-weight:700;background:#eef2f7;color:#53687f;white-space:nowrap}
+.badge.active{background:#e7f6ef;color:#0f7b4f}.badge.inactive{background:#fff4e0;color:#9a6200}.badge.archive{background:#fdecea;color:#a1332b}.badge.custom-record{background:#eef2ff;color:#4945a3}
+.manual-input{width:230px;max-width:100%;height:32px;border:1px solid #e1c989;background:#fffdfa;border-radius:6px;padding:5px 7px;font-size:11.5px;color:var(--ink)}
+.manual-input:focus{outline:2px solid rgba(240,195,109,.35);border-color:#d29b23}
+.edit-record{white-space:nowrap}
+.table-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;background:#fbfcfe;flex-wrap:wrap}
+.pager{display:flex;align-items:center;gap:7px}.empty-state{padding:60px 20px;text-align:center;color:var(--muted)}.empty-state .big{font-size:16px;color:var(--ink);font-weight:700;margin-bottom:5px}
+.footer{max-width:1480px;margin:0 auto;padding:0 24px 22px;color:#8091a6;font-size:11.5px}
+.progress-wrap{display:none;align-items:center;gap:10px;background:#edf6ff;border:1px solid #c5ddf4;border-radius:9px;padding:10px 13px;margin:-2px 0 13px;color:#315c82;font-size:12.5px}
+.progress-wrap.show{display:flex}.spinner{width:16px;height:16px;border-radius:50%;border:2px solid #b7d4ef;border-top-color:var(--brand);animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;right:22px;bottom:22px;z-index:30;max-width:min(520px,calc(100vw - 36px));padding:12px 16px;border-radius:10px;background:#183a58;color:white;box-shadow:0 8px 24px rgba(0,0,0,.22);display:none;font-size:13px}
+.toast.show{display:block}.toast.error{background:#9f2e28}.toast.success{background:#0b7048}
+.download-result{border:1px solid #b4d8c5;background:#f1fbf5;border-radius:9px;padding:10px 13px;margin:-3px 0 13px;color:#205e43;font-size:12.5px}
+.download-result a{color:#0e6844;font-weight:750;text-underline-offset:2px;margin-left:5px}
+.modal-backdrop{position:fixed;inset:0;z-index:40;background:rgba(10,27,45,.56);display:flex;align-items:center;justify-content:center;padding:18px}
+body.modal-open{overflow:hidden}
+.modal{width:min(1100px,100%);max-height:calc(100vh - 36px);background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(5,25,45,.32);display:flex;flex-direction:column;overflow:hidden}
+.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:17px 20px;border-bottom:1px solid var(--line);background:#fbfdff}
+.modal-head h2{font-size:17px;margin:0 0 3px;color:#173b60}.modal-subtitle{color:var(--muted);font-size:12px}
+.modal-close{font-size:21px;line-height:1;padding:5px 10px;border:1px solid var(--line);background:#fff;color:var(--muted)}
+.modal-main{overflow:auto;padding:17px 20px 20px}
+.modal-hint{border:1px solid #c9d9ea;border-radius:9px;background:#f8fbff;color:#39536f;padding:10px 12px;font-size:12px;margin-bottom:15px}
+.modal-section{margin:0 0 18px}
+.modal-section h3{font-size:13px;margin:0 0 9px;color:#234765}
+.modal-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 13px}
+.modal-field{min-width:0}.modal-field label{display:block;font-size:11.5px;color:var(--muted);font-weight:700;margin-bottom:4px}
+.modal-field input,.modal-field textarea{width:100%;min-height:38px;border:1px solid #cbd7e3;border-radius:7px;padding:8px 9px;background:#fff;color:var(--ink);font-size:12.5px;outline:none}
+.modal-field textarea{min-height:74px;resize:vertical}.modal-field input:focus,.modal-field textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(14,79,138,.1)}
+.inflection-card{border:1px solid #d5e1ec;border-radius:10px;background:#f8fbff;padding:12px 13px;margin:0 0 14px}
+.inflection-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:7px}
+.inflection-head strong{font-size:12.5px;color:#234765}.inflection-head .small-muted{max-width:650px;text-align:right}
+.case-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 9px}
+.case-item{border:1px solid #e2eaf1;border-radius:7px;background:#fff;padding:6px 8px;min-width:0}
+.case-item b{display:block;font-size:10.5px;color:#6b7e91;font-weight:700;margin-bottom:2px}
+.case-item span{font-size:12px;color:#173b60;overflow-wrap:anywhere}
+.inflection-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:9px}
+.auto-button{padding:5px 9px;font-size:11px;border-radius:7px;border:1px solid #b8cee1;color:var(--brand);background:#fff}
+.modal-details{border:1px solid var(--line);border-radius:9px;background:#fbfcfe;padding:10px 12px}
+.modal-details summary{cursor:pointer;font-size:12.5px;font-weight:700;color:#315c82}
+.modal-details .modal-fields{margin-top:11px}
+.modal-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 20px;border-top:1px solid var(--line);background:#fbfdff}
+.modal-actions .right{display:flex;gap:8px;align-items:center}
+.small-muted{font-size:11px;color:#7b8da1}
+.settings-card,.queue-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);margin:0 0 14px;overflow:hidden}
+.settings-card details>summary{cursor:pointer;list-style:none;padding:13px 16px;display:flex;align-items:center;gap:12px;color:#173b60}
+.settings-card details>summary::-webkit-details-marker{display:none}
+.settings-card details>summary:after{content:'＋';margin-left:auto;color:var(--brand);font-weight:800}
+.settings-card details[open]>summary:after{content:'−'}
+.settings-state{font-size:11px;font-weight:650;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+.settings-state.ok{background:var(--ok-bg);color:var(--ok);border-color:#c3e5d2}.settings-state.bad{background:var(--bad-bg);color:var(--bad);border-color:#f0c7c3}
+.settings-body{padding:0 16px 16px;border-top:1px solid #e7edf3}
+.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px 13px}
+.settings-grid .field{min-width:0}.settings-grid .span2{grid-column:1/-1}
+.settings-grid input,.settings-grid select,.settings-grid textarea,.editor-name{width:100%;min-height:39px;border:1px solid #cbd7e3;border-radius:8px;padding:8px 10px;color:var(--ink);background:#fff;outline:none}
+.settings-grid textarea{resize:vertical}.settings-grid input:focus,.settings-grid select:focus,.settings-grid textarea:focus,.editor-name:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(14,79,138,.1)}
+.settings-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px}.settings-actions label{display:flex;align-items:center;gap:5px}.settings-actions input{accent-color:var(--brand)}
+.table-tools-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.table-tool-box{min-width:0;border:1px solid #e1e9f0;border-radius:9px;background:#fbfdff;padding:12px}.table-tool-box h3{font-size:13px;color:#204d76;margin:0 0 10px}.table-tool-box .field{margin:0 0 10px}.table-tool-box input[type=file],.table-tool-box input[type=text],.table-tool-box select{width:100%;min-height:38px;border:1px solid #cbd7e3;border-radius:8px;padding:7px 9px;background:#fff;color:var(--ink);font:inherit;font-size:12px}.table-tool-box input:focus,.table-tool-box select:focus{outline:2px solid rgba(14,79,138,.12);border-color:var(--brand)}.table-tool-box .small-muted{display:block;margin:7px 0 10px}.table-inline-form{display:flex;gap:7px}.table-inline-form input{min-width:0;flex:1}.table-inline-form button{white-space:nowrap}.excel-sheet-preview{border:1px solid #dbe5ed;border-radius:9px;margin:10px 0;padding:11px;background:#fbfdff}.excel-sheet-preview-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}.excel-sheet-preview h3{font-size:13px;margin:0;color:#173b60}.excel-sheet-preview select{max-width:360px;min-height:34px;border:1px solid #cbd7e3;border-radius:7px;padding:5px 8px;background:#fff}.excel-import-counts{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.excel-import-counts span{font-size:10.5px;border-radius:999px;padding:3px 8px;background:#eef2f7;color:#526b82}.excel-import-counts .update{background:#eaf4ff;color:#165786}.excel-import-counts .insert{background:#e7f6ef;color:#0f7b4f}.excel-import-counts .skip{background:#fff4e0;color:#8b5b00}.excel-sheet-preview .excel-headers{font-size:11px;color:#647b91;margin:5px 0;overflow-wrap:anywhere}.excel-sample-wrap{overflow:auto;max-height:180px}.excel-sample{border-collapse:collapse;font-size:10.5px;min-width:100%;background:#fff}.excel-sample th,.excel-sample td{border:1px solid #dfe7ee;padding:4px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}.excel-sample th{background:#eff5fa;color:#355a7a}.excel-clear-empty{display:flex;gap:7px;align-items:flex-start;margin-top:12px;line-height:1.45}.excel-clear-empty input{accent-color:var(--brand);margin-top:2px}
+.queue-section{padding:15px 16px 17px}.queue-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}.queue-head h2{font-size:16px;margin:0 0 3px;color:#173b60}.queue-head p{font-size:12px;color:var(--muted);margin:0;max-width:820px}.queue-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.queue-list{display:grid;gap:9px}.queue-empty{padding:28px 15px;text-align:center;color:var(--muted);border:1px dashed #cbd7e3;border-radius:9px;background:#fbfdff}
+.queue-item{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 14px;align-items:center}.queue-item:hover{border-color:#b4c8db}.queue-item-main{min-width:0}.queue-item-title{font-weight:750;color:#173b60;overflow-wrap:anywhere}.queue-item-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}.queue-item-address{font-size:11.5px;margin-top:5px;overflow-wrap:anywhere}.queue-item-error{color:var(--bad);font-size:11.5px;margin-top:4px}.queue-item-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}.status-label{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:10.5px;font-weight:750;background:#eef2f7;color:#586d82;white-space:nowrap}.status-label.queued{background:var(--warn-bg);color:#8b5b00}.status-label.sent{background:var(--ok-bg);color:var(--ok)}.status-label.failed,.status-label.sending{background:var(--bad-bg);color:var(--bad)}
+.queue-modal{width:min(1180px,100%)}.queue-review-main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);gap:12px 16px}.queue-preview-toolbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap}.pdf-preview-frame{grid-column:1;grid-row:2/4;width:100%;height:56vh;min-height:390px;border:1px solid var(--line);border-radius:8px;background:#eaf0f5}.queue-edit-grid{grid-column:2;grid-row:2;display:grid;grid-template-columns:1fr;gap:10px;align-content:start}.queue-edit-grid .span2{grid-column:1/-1}.queue-edit-grid textarea,.queue-edit-grid input{width:100%;border:1px solid #cbd7e3;border-radius:7px;padding:8px;font:inherit;font-size:12.5px}.review-confirm{grid-column:2;grid-row:3;border:1px solid #c9d9ea;border-radius:8px;background:#f8fbff;padding:10px;font-size:12px}.review-confirm label{display:flex;gap:7px;align-items:flex-start;font-weight:700;color:#284761}.review-confirm input{margin:2px 0 0;accent-color:var(--brand)}.review-confirm .small-muted{display:block;margin:5px 0 0 22px}
+.html-editor-modal{width:min(1280px,100%)}.html-editor-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px}.editor-label{display:block;font-size:12px;font-weight:750;color:#31516d;margin:0 0 6px}.editor-name{margin-bottom:12px}.html-code-editor{display:block;width:100%;height:50vh;min-height:340px;resize:vertical;border:1px solid #cbd7e3;border-radius:8px;padding:11px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#173b60;background:#fbfdff;tab-size:2}.html-code-editor:focus{outline:2px solid rgba(14,79,138,.13);border-color:var(--brand)}.preview-column{display:flex;flex-direction:column;min-height:390px}.preview-column iframe{flex:1;width:100%;min-height:340px;border:1px solid var(--line);border-radius:8px;background:#fff}
+[hidden]{display:none!important}
+@media(max-width:650px){
+  .modal-backdrop{padding:0}.modal{height:100vh;max-height:100vh;border-radius:0}
+  .modal-head,.modal-main,.modal-actions{padding-left:14px;padding-right:14px}
+  .modal-fields{grid-template-columns:1fr}.case-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.manager-check-detail .manager-check-values{grid-template-columns:1fr}
+  .inflection-head{display:block}.inflection-head .small-muted{text-align:left;max-width:none;margin-top:4px}
+  .modal-actions{align-items:stretch;flex-direction:column}.modal-actions .right{justify-content:flex-end}
+  .settings-grid,.html-editor-grid,.queue-review-main,.table-tools-grid{grid-template-columns:1fr}
+  .table-inline-form{flex-direction:column}.table-inline-form button{width:100%}
+  .settings-grid .span2,.queue-preview-toolbar,.pdf-preview-frame,.queue-edit-grid,.review-confirm{grid-column:1;grid-row:auto}
+  .pdf-preview-frame{height:44vh;min-height:280px}.html-code-editor{height:38vh;min-height:250px}.preview-column{min-height:270px}.preview-column iframe{min-height:250px}
+  .queue-head{display:block}.queue-tools{justify-content:flex-start;margin-top:9px}.queue-item{grid-template-columns:1fr}.queue-item-actions{justify-content:flex-start}
+}
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="header-inner">
+    <div>
+      <h1>Формирование документов по Единой книге ведомств</h1>
+      <div class="sub">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 3h7l5 5v13H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v6h6M9 13h7M9 17h7"/></svg>
+        Выберите адресатов и шаблон DOCX или HTML; письма формируются в PDF и отправляются по одному
+      </div>
+    </div>
+    <div class="header-actions"><div class="header-badge">ТЕСТ · XLSX · DOCX · PDF · SMTP</div><?php if (docgenAuthHash() !== ''): ?><form method="post" action="?action=logout"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(docgenCsrfToken(), ENT_QUOTES, 'UTF-8') ?>"><button class="logout-button" type="submit">Выйти</button></form><?php endif; ?></div>
+  </div>
+</header>
+<main>
+  <div class="notice"><span aria-hidden="true">🧭</span><div><strong>Как пользоваться тестовым приложением</strong><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. Коды полей берутся из колонок книги.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>Нажмите «Сформировать PDF и подготовить очередь»: для DOCX-шаблона сохраняются также DOCX-файлы. На каждую запись создаётся отдельная очередь с PDF.</li><li>В очереди откройте предпросмотр PDF, проверьте получателя, копию, тему и текст. Нажмите отправку только для проверенного письма; автоматической массовой отправки нет.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></div></div>
+
+  <section class="top-grid">
+    <div class="card">
+      <div class="card-head"><span class="step">1</span><h2>Выбор таблицы и фильтров</h2></div>
+      <div class="card-body">
+        <div class="help">Разные листы книги представлены как наборы в единой базе. Архивные организации — отдельный набор.</div>
+        <div class="control-grid">
+          <div class="field"><label for="sourceSelect">Набор данных</label><select id="sourceSelect"><option value="">Загрузка…</option></select></div>
+          <div class="field"><label for="regionSelect">Регион</label><select id="regionSelect"><option value="">Все регионы</option></select></div>
+        </div>
+        <div class="source-meta"><span class="pill ok" id="dbBadge">Чтение данных…</span><span id="sourceCount"></span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="step">2</span><h2>Шаблон DOCX или HTML</h2></div>
+      <div class="card-body">
+        <div class="field" style="margin-bottom:10px"><label for="templateSelect">Выбрать сохранённый шаблон</label><select id="templateSelect"><option value="sample-docx">Загрузка шаблонов…</option></select></div>
+        <div class="dz loaded" id="dropTemplate" tabindex="0" role="button" aria-label="Загрузить DOCX шаблон">
+          <div class="dz-icon"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
+          <div class="dz-title">Загрузить DOCX для текущей работы</div>
+          <div class="dz-hint">Перетащите сюда или нажмите для выбора · .docx до 20 МБ</div>
+          <div class="pill ok" id="templateStatus" role="status" aria-live="polite"><span class="file-name">Письмо-пример.docx</span></div>
+        </div>
+        <input type="file" id="templateInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+        <div class="file-actions">
+          <button type="button" class="btn-ghost btn-small" id="saveUploadedTemplate" disabled>Сохранить DOCX в библиотеку</button>
+          <button type="button" class="btn-ghost btn-small" id="createHtmlTemplate">Новый HTML-шаблон</button>
+          <button type="button" class="btn-ghost btn-small" id="editHtmlTemplate" disabled>Редактировать HTML</button>
+          <a class="link-button" href="?action=download_sample">Скачать DOCX-пример</a>
+        </div>
+        <div class="help" style="margin:9px 0 0">DOCX сохраняет исходный формат; HTML-шаблон формируется в PDF. Поля используют коды вида {Регион}, {ФИО ДП}.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card" id="tableToolsCard">
+    <details>
+      <summary><strong>Импорт, экспорт и структура таблиц</strong><span class="settings-state" id="tableToolsState">XLSX · ручное подтверждение</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>📊</span><div>Импорт только из `.xlsx`, с предварительным просмотром. Существующие записи ищутся по внутреннему ID либо по уникальной паре ИНН/КПП; неоднозначные совпадения пропускаются. По умолчанию пустые ячейки не стирают данные. Каждый лист сопоставляется с разделом по имени или может создать новый раздел; совпавшие записи остаются в исходном разделе. Новые колонки общие для всех разделов. Данные хранятся локально вне web-root.</div></div>
+        <div class="table-tools-grid">
+          <section class="table-tool-box">
+            <h3>Excel-файл</h3>
+            <div class="field"><label for="excelImportFile">Импорт книги .xlsx · до 20 МБ</label><input id="excelImportFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
+            <button type="button" class="btn-primary" id="previewExcelImportBtn">Загрузить и проверить</button>
+            <div class="small-muted" id="excelImportFeedback" aria-live="polite"></div>
+            <div class="field"><label for="excelExportScope">Выгрузить в Excel</label><select id="excelExportScope"><option value="all">Всю базу · отдельный лист на раздел</option><option value="filtered">Текущий фильтр и поиск</option><option value="selected">Только отмеченные строки</option></select></div>
+            <button type="button" class="btn-ghost" id="exportExcelBtn">Скачать книгу XLSX</button>
+          </section>
+          <section class="table-tool-box">
+            <h3>Структура таблицы</h3>
+            <div class="field"><label for="newTableColumn">Добавить общую колонку</label><div class="table-inline-form"><input id="newTableColumn" type="text" maxlength="120" placeholder="Например: Ответственный"><button type="button" class="btn-ghost" id="addTableColumnBtn">Добавить колонку</button></div></div>
+            <div class="field"><label for="newTableSection">Добавить раздел в список наборов</label><div class="table-inline-form"><input id="newTableSection" type="text" maxlength="100" placeholder="Например: Дополнительные адресаты"><button type="button" class="btn-ghost" id="addTableSectionBtn">Добавить раздел</button></div></div>
+            <div class="small-muted" id="tableStructureFeedback" aria-live="polite">Колонка будет доступна в карточках всех записей; раздел можно заполнить импортом XLSX-листа с таким именем.</div>
+          </section>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section class="mapping-card" id="mappingCard">
+    <div class="mapping-head"><span class="step">3</span><strong>Переменные шаблона и сопоставление с данными</strong><span class="small-muted" id="syntaxLabel"></span></div>
+    <div class="mapping-body" id="mappingBody"><span class="small-muted">Проверяем пример шаблона…</span></div>
+  </section>
+
+  <section class="toolbar">
+    <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
+    <button class="btn-ghost" id="checkManagersBtn" type="button" disabled>Сверить руководителей по ИНН</button>
+    <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
+    <button class="btn-ghost" id="clearSelectionBtn" type="button">Снять выбор</button>
+    <div class="search-box"><input type="search" id="searchInput" placeholder="Поиск по региону, ФИО, ИНН…" aria-label="Поиск по записям"></div>
+    <div class="stats" id="statsBar"><span>В выборке <b id="filteredCount">0</b></span><span class="green">Отмечено <b id="selectedCount">0</b></span></div>
+  </section>
+
+  <div class="progress-wrap" id="progressWrap"><span class="spinner"></span><span id="progressText">Формируем PDF и DOCX…</span></div>
+  <div class="progress-wrap" id="managerCheckProgress"><span class="spinner"></span><span id="managerCheckProgressText">Сверяем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelManagerCheckBtn">Остановить после текущего пакета</button></div>
+  <div class="download-result" id="downloadResult" hidden></div>
+  <section class="settings-card" id="smtpCard">
+    <details id="smtpDetails">
+      <summary><strong>Настройки SMTP</strong><span class="settings-state" id="smtpState">Не настроено</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>🔒</span><div>Пароль сохраняется вне web-root в приватном каталоге приложения. После сохранения он не отображается; пустое поле пароля оставляет прежний секрет без изменений.</div></div>
+        <div class="settings-grid">
+          <div class="field"><label for="smtpHost">SMTP-сервер</label><input id="smtpHost" type="text" placeholder="smtp.example.org" autocomplete="off"></div>
+          <div class="field"><label for="smtpPort">Порт</label><input id="smtpPort" type="number" min="1" max="65535" value="587"></div>
+          <div class="field"><label for="smtpEncryption">Шифрование</label><select id="smtpEncryption"><option value="tls">STARTTLS</option><option value="ssl">SSL/TLS</option><option value="none">Без шифрования</option></select></div>
+          <div class="field"><label for="smtpUsername">Логин</label><input id="smtpUsername" type="text" autocomplete="username"></div>
+          <div class="field"><label for="smtpPassword">Пароль SMTP <span id="smtpPasswordSaved" class="small-muted"></span></label><input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять"></div>
+          <div class="field"><label for="smtpFromEmail">Email отправителя</label><input id="smtpFromEmail" type="email" autocomplete="email"></div>
+          <div class="field"><label for="smtpFromName">Имя отправителя</label><input id="smtpFromName" type="text" autocomplete="organization"></div>
+          <div class="field"><label for="smtpReplyTo">Reply-To (необязательно)</label><input id="smtpReplyTo" type="email"></div>
+          <div class="field"><label for="smtpSubject">Тема письма · поддерживаются {коды полей}</label><input id="smtpSubject" type="text" value="Документ"></div>
+          <div class="field span2"><label for="smtpBody">Текст письма · поддерживаются {коды полей}</label><textarea id="smtpBody" rows="4">Добрый день.&#10;&#10;Направляем документ во вложении.</textarea></div>
+        </div>
+        <div class="settings-actions"><button class="btn-primary" id="saveSmtpBtn" type="button">Сохранить настройки</button><button class="btn-ghost" id="testSmtpBtn" type="button">Проверить SMTP</button><label class="small-muted"><input id="clearSmtpPassword" type="checkbox"> Удалить сохранённый пароль</label><span class="small-muted" id="smtpFeedback"></span></div>
+      </div>
+    </details>
+  </section>
+  <section class="settings-card" id="dadataCard">
+    <details id="dadataDetails">
+      <summary><strong>Сверка руководителей · DaData</strong><span class="settings-state bad" id="dadataState">API-ключ не задан</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>🔐</span><div>Вставьте API-ключ DaData. Он хранится только в приватном каталоге вне web-root, маскируется в интерфейсе и не отправляется браузеру при проверке. Запросы выполняются только после ручного запуска для отмеченных записей; используются ИНН и, если есть, КПП. Если по ИНН найдено несколько филиалов, без КПП приложение не выберет первый наугад и пометит результат неоднозначным. Результат сравнивается, но данные карточки автоматически не заменяются. Сравнение игнорирует регистр, пробелы и знаки препинания; инициалы и сокращения требуют ручной проверки. <a href="https://dadata.ru/api/find-party/" target="_blank" rel="noopener">Документация API «Организация по ИНН»</a>.</div></div>
+        <div class="settings-grid">
+          <div class="field span2"><label for="dadataToken">API-ключ / Token DaData <span id="dadataTokenSaved" class="small-muted"></span></label><input id="dadataToken" type="password" autocomplete="new-password" placeholder="Вставьте API-ключ; после сохранения значение будет скрыто"></div>
+        </div>
+        <div class="settings-actions"><button class="btn-primary" id="saveDadataBtn" type="button">Сохранить API-ключ</button><label class="small-muted"><input id="clearDadataToken" type="checkbox"> Удалить сохранённый ключ</label><span class="small-muted" id="dadataFeedback"></span></div>
+      </div>
+    </details>
+  </section>
+  <div class="legend"><span class="badge active">Действует</span><span class="badge inactive">Не действует</span><span class="badge archive">Архивная запись</span><span class="manager-check-badge match">ФИО совпало</span><span class="manager-check-badge mismatch">ФИО отличается</span><span>Результаты DaData подсвечиваются в таблице; переданные сведения проверяйте вручную.</span></div>
+
+  <section class="table-section">
+    <div class="table-wrap" id="tableWrap" hidden>
+      <table id="recordsTable">
+        <thead id="tableHead"></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="emptyState"><div class="big">Загружаем адресатов…</div><div>Записи будут показаны после чтения демо-данных.</div></div>
+    <div class="table-foot" id="tableFoot" hidden>
+      <span id="footShown"></span>
+      <span class="pager"><button type="button" class="btn-ghost btn-small" id="prevPage">← Назад</button><span id="pageLabel"></span><button type="button" class="btn-ghost btn-small" id="nextPage">Далее →</button></span>
+      <span>Можно отметить строки вручную или выбрать все записи, подходящие под фильтр.</span>
+    </div>
+  </section>
+  <section class="queue-section" id="emailQueue">
+    <div class="queue-head"><div><h2>Очередь писем</h2><p>Каждая запись — отдельное письмо с PDF-вложением. Дополнительные/старые адреса из базы добавлены в CC; проверьте адреса перед отправкой.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
+    <div id="queueList" class="queue-list"><div class="empty-state">Загружаем очередь…</div></div>
+  </section>
+</main>
+<div class="modal-backdrop" id="recordModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <div><h2 id="modalTitle">Карточка адресата</h2><div class="modal-subtitle" id="modalRecordLabel"></div></div>
+      <button type="button" class="modal-close" id="modalCloseBtn" aria-label="Закрыть карточку">×</button>
+    </div>
+    <div class="modal-main">
+      <div class="modal-hint">Проверьте исходные сведения. Формы ФИО и должности ниже рассчитаны автоматически; они являются предложением, а не юридической проверкой. Дательный падеж для шаблона можно отредактировать вручную или применить кнопку «Подставить».</div>
+      <div id="modalCoreFields"></div>
+      <section class="modal-section">
+        <h3>Результат ручной сверки DaData</h3>
+        <div id="managerCheckDetail" class="manager-check-detail"><span class="small-muted">Сверка ещё не запускалась. Автоматических запросов к DaData нет.</span></div>
+      </section>
+      <section class="modal-section">
+        <h3>Автоматическое склонение для проверки</h3>
+        <div class="inflection-card">
+          <div class="inflection-head"><strong>ФИО</strong><span class="small-muted">Дательный падеж подставляется в поле «ФИО ДП».</span></div>
+          <div class="case-grid" id="nameForms"><span class="small-muted">Введите ФИО для расчёта форм.</span></div>
+          <div class="inflection-actions"><button type="button" class="auto-button" id="applyNameDative">Подставить дательный в «ФИО ДП»</button><span class="small-muted" id="nameInflectNote"></span></div>
+        </div>
+        <div class="inflection-card">
+          <div class="inflection-head"><strong>Должность для обращения</strong><span class="small-muted">Составные наименования и сокращения перепроверьте вручную.</span></div>
+          <div class="case-grid" id="jobForms"><span class="small-muted">Введите должность для расчёта форм.</span></div>
+          <div class="inflection-actions"><button type="button" class="auto-button" id="applyJobDative">Подставить дательный в поле должности</button><span class="small-muted" id="jobInflectNote"></span></div>
+        </div>
+      </section>
+      <details class="modal-details" id="modalMoreDetails">
+        <summary>Дополнительные поля книги и переменные шаблона</summary>
+        <div id="modalExtraFields"></div>
+      </details>
+    </div>
+    <div class="modal-actions">
+      <span class="small-muted">Правки сохраняются в демо-копии и используются при формировании документов.</span>
+      <div class="right"><button type="button" class="btn-ghost" id="modalCancelBtn">Отмена</button><button type="button" class="btn-primary" id="saveCardBtn">Сохранить карточку</button></div>
+    </div>
+  </section>
+</div>
+<div class="modal-backdrop" id="htmlTemplateModal" hidden>
+  <section class="modal html-editor-modal" role="dialog" aria-modal="true" aria-labelledby="htmlEditorTitle">
+    <div class="modal-head"><div><h2 id="htmlEditorTitle">HTML-редактор шаблона</h2><div class="modal-subtitle">Коды полей пишите в фигурных скобках, например {Регион} или {ФИО ДП}. Итог будет сформирован в PDF.</div></div><button type="button" class="modal-close" id="htmlEditorClose" aria-label="Закрыть редактор">×</button></div>
+    <div class="modal-main html-editor-grid">
+      <div><label class="editor-label" for="htmlTemplateName">Название шаблона</label><input id="htmlTemplateName" class="editor-name" type="text" maxlength="180" placeholder="Например: Письмо-уведомление"><label class="editor-label" for="htmlTemplateContent">HTML + CSS</label><textarea id="htmlTemplateContent" spellcheck="false" class="html-code-editor" aria-label="Код HTML-шаблона"></textarea><div class="small-muted">Для печати используйте CSS @page и обычные HTML-стили. Внешние скрипты и сетевые ресурсы удаляются перед PDF-конвертацией.</div></div>
+      <div class="preview-column"><div class="editor-label">Предпросмотр разметки (без данных адресата)</div><iframe id="htmlPreviewFrame" title="Предпросмотр HTML-шаблона" sandbox></iframe></div>
+    </div>
+    <div class="modal-actions"><span id="htmlTemplateFeedback" class="small-muted"></span><div class="right"><button type="button" class="btn-ghost" id="htmlEditorCancel">Отмена</button><button type="button" class="btn-primary" id="saveHtmlTemplateBtn">Сохранить шаблон</button></div></div>
+  </section>
+</div>
+<div class="modal-backdrop" id="excelImportModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="excelImportTitle">
+    <div class="modal-head"><div><h2 id="excelImportTitle">Предварительный просмотр импорта</h2><div class="modal-subtitle" id="excelImportSubtitle"></div></div><button type="button" class="modal-close" id="excelImportClose" aria-label="Закрыть предварительный просмотр">×</button></div>
+    <div class="modal-main">
+      <div class="notice"><span>⚠️</span><div>Существующие записи обновляются только при единственном совпадении по ID записи или точной паре ИНН/КПП. Неоднозначные строки будут пропущены. Формулы берутся из сохранённого значения файла; Excel-формулы на сервере не пересчитываются.</div></div>
+      <div id="excelImportPreviewContent"></div>
+      <label class="small-muted excel-clear-empty"><input id="excelClearEmpty" type="checkbox"> Разрешить очистку существующих значений пустыми ячейками (по умолчанию выключено)</label>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="excelImportModalFeedback">До подтверждения таблицы не изменяются; перед записью создаётся приватная резервная копия.</span><div class="right"><button type="button" class="btn-ghost" id="excelImportCancel">Отмена</button><button type="button" class="btn-primary" id="confirmExcelImportBtn">Подтвердить импорт</button></div></div>
+  </section>
+</div>
+<div class="modal-backdrop" id="queueModal" hidden>
+  <section class="modal queue-modal" role="dialog" aria-modal="true" aria-labelledby="queueModalTitle">
+    <div class="modal-head"><div><h2 id="queueModalTitle">Проверка письма</h2><div class="modal-subtitle" id="queueItemLabel"></div></div><button type="button" class="modal-close" id="queueModalClose" aria-label="Закрыть предпросмотр">×</button></div>
+    <div class="modal-main queue-review-main">
+      <div class="queue-preview-toolbar"><a id="queuePdfDownload" class="link-button" href="#" target="_blank" rel="noopener">Открыть PDF отдельно</a><a id="queueDocxDownload" class="link-button" href="#" target="_blank" rel="noopener" hidden>Скачать DOCX</a><span class="small-muted" id="queueItemStatus"></span></div>
+      <iframe id="queuePdfFrame" title="Предпросмотр PDF" class="pdf-preview-frame"></iframe>
+      <div class="queue-edit-grid">
+        <div class="modal-field"><label for="queueTo">Кому (основной адрес)</label><textarea id="queueTo" rows="2" placeholder="name@example.org"></textarea></div>
+        <div class="modal-field"><label for="queueCc">Копия (дополнительные/старые email)</label><textarea id="queueCc" rows="2" placeholder="copy@example.org"></textarea><span id="queueEmailSource" class="small-muted"></span></div>
+        <div class="modal-field span2"><label for="queueSubject">Тема</label><input id="queueSubject" type="text"></div>
+        <div class="modal-field span2"><label for="queueBody">Текст письма</label><textarea id="queueBody" rows="5"></textarea></div>
+      </div>
+      <div class="review-confirm"><label><input id="queueReviewedCheck" type="checkbox"> Я проверил(а) PDF, адресата, CC, тему и текст этого письма.</label><span class="small-muted">Отправка выполнится только для этого одного письма.</span></div>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="queueActionFeedback">Письмо ещё не отправлено.</span><div class="right"><button type="button" class="btn-ghost" id="queueModalCancel">Закрыть</button><button type="button" class="btn-ghost" id="saveQueueItemBtn">Сохранить правки</button><button type="button" class="btn-primary" id="sendQueueItemBtn" disabled>Отправить это письмо</button></div></div>
+  </section>
+</div>
+<footer class="footer">Локальное тестовое приложение · XLSX, PHPWord, Morphos, PHPMailer и LibreOffice · письма формируются в очередь и отправляются вручную по одному.</footer>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+'use strict';
+const SAMPLE_TEMPLATE_INFO = <?= json_encode($sampleInfo, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+const CSRF_TOKEN = <?= json_encode(docgenCsrfToken(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+const PAGE_SIZE = 30;
+let dataset = {records: [], sheets: [], demoOverrides: {}, managerChecks: {}};
+let templateInfo = SAMPLE_TEMPLATE_INFO;
+let templateMode = 'saved';
+let templateId = 'sample-docx';
+let templateFile = null;
+let templateLibrary = [];
+let editingHtmlTemplateId = '';
+let queueItems = [];
+let activeQueueItemId = '';
+let smtpPasswordConfigured = false;
+let dadataConfigured = false;
+let managerChecks = {};
+let managerCheckRunning = false;
+let managerCheckCancelRequested = false;
+let pendingExcelImportId = '';
+let selectedIds = new Set();
+let overrides = {};
+let pageNumber = 1;
+let toastTimer = null;
+let activeModalRecordId = '';
+let latestInflections = null;
+let inflectTimer = null;
+let inflectRequestId = 0;
+let derivedManual = {nameDative:false, jobDative:false, initials:false, nameParts:false};
+let modalSourceEdited = {name:false,job:false};
+const MODAL_CORE_GROUPS = [
+  {title:'Адресат и обращение', fields:['Регион','Наименование (ЕГРЮЛ/лист)','Полное наименование','ФИО','ФИО ДП','Фамилия И.О.','Имя Отчество','Обращение']},
+  {title:'Должность', fields:['Должность','Должность руководителя','Должность руководителя дательный']},
+  {title:'Реквизиты и связь', fields:['ИНН','КПП','ОГРН','Юридический адрес','Основной email','Доп./старые email','Официальный сайт']},
+];
+const CASE_LABELS = [
+  ['nominative','Именительный'],['genitive','Родительный'],['dative','Дательный'],
+  ['accusative','Винительный'],['ablative','Творительный'],['prepositional','Предложный']
+];
+const $ = (id) => document.getElementById(id);
+const sourceSelect = $('sourceSelect');
+const regionSelect = $('regionSelect');
+const tableBody = $('tableBody');
+const templateInput = $('templateInput');
+const templateSelect = $('templateSelect');
+function csrfHeaders() { return {'X-CSRF-Token': CSRF_TOKEN}; }
+async function requestJson(url, options, timeoutMs) {
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try {
+    const response=await fetch(url,{...options,signal:controller.signal});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось выполнить запрос.');
+    return payload;
+  } catch(e) {
+    if(e.name==='AbortError')throw new Error(`Сервер не ответил за ${Math.round(timeoutMs/1000)} с. Проверьте доступность приложения и SMTP-сервера.`);
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function showToast(text, kind='') {
+  const el=$('toast'); el.textContent=text; el.className='toast show '+kind;
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className='toast',5500);
+}
+function renderExcelImportPreview(payload) {
+  const target=$('excelImportPreviewContent');
+  $('excelImportSubtitle').textContent=`${payload.filename||'Книга Excel'} · ${Number(payload.totalRows||0)} строк данных · ${payload.sheets.length} листов`;
+  const sectionOptions=payload.sections.map(section=>`<option value="${esc(section.key)}">В существующий раздел: ${esc(section.label)}</option>`).join('');
+  target.innerHTML=payload.sheets.map(sheet=>{
+    const headers=sheet.headers||[];const sampleHeaders=headers.slice(0,8);
+    const sampleRows=(sheet.sample||[]).map(row=>`<tr>${sampleHeaders.map(header=>`<td title="${esc(row[header]||'')}">${esc(row[header]||'')}</td>`).join('')}</tr>`).join('');
+    const plan=sheet.plan||{};
+    const options=`<option value="new">Создать новый раздел «${esc(sheet.name)}»</option>${sectionOptions}`;
+    return `<article class="excel-sheet-preview"><div class="excel-sheet-preview-head"><div><h3>Лист: ${esc(sheet.name)}</h3><div class="excel-headers">Колонки: ${headers.length?headers.map(esc).join(' · '):'не найдены'}</div></div><select data-excel-target="${esc(sheet.name)}" aria-label="Раздел для листа ${esc(sheet.name)}">${options}</select></div><div class="excel-import-counts"><span>${Number(sheet.rowCount||0)} строк</span><span class="update">Обновить: ${Number(plan.update||0)}</span><span class="insert">Добавить: ${Number(plan.insert||0)}</span><span class="skip">Неоднозначно: ${Number(plan.ambiguous||0)}</span><span class="skip">Дубликаты: ${Number(plan.duplicate||0)}</span><span>Пустые: ${Number(plan.empty||0)}</span>${sheet.formulaCount?`<span>Формулы: ${Number(sheet.formulaCount)} · импортируются сохранённые значения</span>`:''}</div>${sampleHeaders.length&&sampleRows?`<div class="excel-sample-wrap"><table class="excel-sample"><thead><tr>${sampleHeaders.map(header=>`<th>${esc(header)}</th>`).join('')}</tr></thead><tbody>${sampleRows}</tbody></table></div>`:''}</article>`;
+  }).join('');
+  target.querySelectorAll('[data-excel-target]').forEach(select=>{
+    const sheet=payload.sheets.find(item=>item.name===select.dataset.excelTarget);
+    select.value=sheet?.suggestedTarget||'new';
+  });
+  $('excelImportModal').hidden=false;document.body.classList.add('modal-open');
+}
+function closeExcelImportModal() {
+  $('excelImportModal').hidden=true;document.body.classList.remove('modal-open');pendingExcelImportId='';
+}
+async function previewExcelImport() {
+  const file=$('excelImportFile').files?.[0];
+  if(!file){showToast('Выберите книгу Excel в формате .xlsx.','error');return;}
+  const button=$('previewExcelImportBtn');button.disabled=true;button.textContent='Проверяем книгу…';
+  $('excelImportFeedback').textContent='Файл передаётся в приватное хранилище для предварительной проверки.';
+  const form=new FormData();form.append('excel_file',file);
+  try{
+    const response=await fetch('?action=preview_excel_import',{method:'POST',headers:csrfHeaders(),body:form});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать книгу Excel.');
+    pendingExcelImportId=payload.importId;renderExcelImportPreview(payload);
+    $('excelImportFeedback').textContent='Предварительный просмотр готов. Ничего не сохранено до подтверждения.';
+  }catch(error){$('excelImportFeedback').textContent=error.message||'Ошибка проверки книги.';showToast(error.message||'Ошибка проверки книги.','error');}
+  finally{button.disabled=false;button.textContent='Загрузить и проверить';}
+}
+async function confirmExcelImport() {
+  if(!pendingExcelImportId)return;
+  const targetMap={};document.querySelectorAll('[data-excel-target]').forEach(select=>{targetMap[select.dataset.excelTarget]=select.value;});
+  const clearEmpty=$('excelClearEmpty').checked;
+  if(!window.confirm(`Подтвердить импорт? Совпавшие записи будут обновлены, новые строки добавлены. Пустые ячейки ${clearEmpty?'очистят':'не изменят'} существующие значения. Неоднозначные строки будут пропущены.`))return;
+  const button=$('confirmExcelImportBtn');button.disabled=true;button.textContent='Импортируем…';
+  const form=new FormData();form.append('import_id',pendingExcelImportId);form.append('target_map',JSON.stringify(targetMap));form.append('clear_empty',clearEmpty?'1':'0');
+  try{
+    const response=await fetch('?action=commit_excel_import',{method:'POST',headers:csrfHeaders(),body:form});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Импорт Excel не выполнен.');
+    closeExcelImportModal();$('excelImportFile').value='';$('excelClearEmpty').checked=false;
+    const skipped=Object.values(payload.skipped||{}).reduce((sum,value)=>sum+Number(value||0),0);
+    $('excelImportFeedback').textContent=`Добавлено ${payload.created}, обновлено ${payload.updated}, пропущено ${skipped}. Резервная копия: ${payload.backupId||'не требовалась'}.`;
+    const preferred=sourceSelect.value;
+    await reloadDatasetAfterTableChange(preferred);
+    showToast(`Excel импортирован: добавлено ${payload.created}, обновлено ${payload.updated}, пропущено ${skipped}.`,'success');
+    $('tableStructureFeedback').textContent=payload.message||'Импорт завершён.';
+  }catch(error){$('excelImportModalFeedback').textContent=error.message||'Ошибка импорта.';showToast(error.message||'Ошибка импорта Excel.','error');}
+  finally{button.disabled=false;button.textContent='Подтвердить импорт';}
+}
+async function exportExcel() {
+  const scope=$('excelExportScope').value;
+  const ids=scope==='all'?[]:(scope==='filtered'?getFilteredRecords().map(record=>record.id):[...selectedIds]);
+  if(scope!=='all'&&!ids.length){showToast(scope==='selected'?'Отметьте строки для экспорта.':'По текущему фильтру нет записей.','error');return;}
+  const button=$('exportExcelBtn');button.disabled=true;button.textContent='Готовим XLSX…';
+  const form=new FormData();form.append('scope',scope==='all'?'all':'subset');if(scope!=='all')form.append('record_ids',JSON.stringify(ids));
+  try{
+    const response=await fetch('?action=export_excel',{method:'POST',headers:csrfHeaders(),body:form});
+    if(!response.ok){let message='Не удалось сформировать Excel.';try{const body=await response.json();message=body.error||message;}catch{}throw new Error(message);}
+    const blob=await response.blob();const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='Выгрузка_таблиц.xlsx';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    showToast(`Книга XLSX сформирована: ${ids.length||dataset.records.length} записей.`,'success');
+  }catch(error){showToast(error.message||'Ошибка экспорта Excel.','error');}
+  finally{button.disabled=false;button.textContent='Скачать книгу XLSX';}
+}
+async function tableToolPost(action,values) {
+  const form=new FormData();Object.entries(values).forEach(([key,value])=>form.append(key,String(value)));
+  const response=await fetch(`?action=${action}`,{method:'POST',headers:csrfHeaders(),body:form});
+  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Действие не выполнено.');return payload;
+}
+async function reloadDatasetAfterTableChange(preferredSource='all') {
+  const response=await fetch('?action=data',{cache:'no-store'});if(!response.ok)throw new Error('Не удалось обновить таблицу после изменения структуры.');
+  dataset=await response.json();managerChecks=dataset.managerChecks||{};selectedIds.clear();overrides={};populateSources();
+  if(preferredSource&&[...sourceSelect.options].some(option=>option.value===preferredSource))sourceSelect.value=preferredSource;
+  updateRegionOptions(false);updateMapping();renderTable();
+  $('dbBadge').textContent=`${dataset.records.length.toLocaleString('ru-RU')} записей · демо-копия`;
+}
+async function addTableColumn() {
+  const input=$('newTableColumn'),name=input.value.trim();if(!name){input.focus();showToast('Введите название новой колонки.','error');return;}
+  try{const payload=await tableToolPost('add_table_column',{name});input.value='';await reloadDatasetAfterTableChange(sourceSelect.value);$('tableStructureFeedback').textContent=payload.message;showToast(`Добавлена общая колонка «${payload.column}».`,'success');}
+  catch(error){showToast(error.message||'Не удалось добавить колонку.','error');}
+}
+async function addTableSection() {
+  const input=$('newTableSection'),name=input.value.trim();if(!name){input.focus();showToast('Введите название нового раздела.','error');return;}
+  try{const payload=await tableToolPost('add_table_section',{name});input.value='';await reloadDatasetAfterTableChange(payload.section.key);$('tableStructureFeedback').textContent=payload.message;showToast(`Добавлен раздел «${payload.section.label}».`,'success');}
+  catch(error){showToast(error.message||'Не удалось добавить раздел.','error');}
+}
+function fieldValue(record, name) {
+  return record && record.fields && record.fields[name] !== undefined ? String(record.fields[name] ?? '') : '';
+}
+function normalizeManagerValue(value) {
+  return String(value??'').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim().replace(/\s+/g,' ');
+}
+function localManagerValues(record) {
+  const name=fieldValue(record,'Руководитель').trim()||fieldValue(record,'ФИО').trim();
+  const position=fieldValue(record,'Должность руководителя').trim()||fieldValue(record,'Должность').trim();
+  const rawKpp=fieldValue(record,'КПП').replace(/\D/g,'');
+  return {name,position,inn:fieldValue(record,'ИНН').replace(/\D/g,''),kpp:/^\d{9}$/.test(rawKpp)?rawKpp:''};
+}
+function getManagerCheck(record) {
+  const saved=managerChecks?.[record?.id];
+  if(!saved)return null;
+  const current=localManagerValues(record);
+  const savedKpp=String(saved.kpp||'');
+  if(current.inn!==String(saved.inn||'') || current.kpp!==savedKpp || normalizeManagerValue(current.name)!==normalizeManagerValue(saved.localName||'') || normalizeManagerValue(current.position)!==normalizeManagerValue(saved.localPosition||'')) {
+    return {...saved,status:'stale',message:'Карточка изменилась после последней сверки. Запустите её повторно.'};
+  }
+  return saved;
+}
+function managerCheckMeta(check) {
+  const states={
+    match:['ФИО совпадает','match'],name_mismatch:['ФИО отличается','mismatch'],both_mismatch:['ФИО и должность отличаются','mismatch'],
+    position_mismatch:['Должность отличается','position'],local_missing:['Нет ФИО в базе','neutral'],no_manager:['DaData без руководителя','neutral'],
+    not_found:['ИНН/КПП не найдено','neutral'],ambiguous:['Неоднозначно · нужен КПП','neutral'],invalid_inn:['Некорректный ИНН','neutral'],error:['Ошибка DaData','neutral'],stale:['Нужна повторная сверка','stale']
+  };
+  return check ? (states[check.status]||['Неизвестный статус','neutral']) : ['Не проверялось','neutral'];
+}
+function managerCheckBadgeMarkup(check) {
+  const [label,kind]=managerCheckMeta(check);
+  const title=check?.message||'Сверка DaData ещё не запускалась.';
+  return `<span class="manager-check-badge ${kind}" title="${esc(title)}">${esc(label)}</span>`;
+}
+function renderManagerCheckDetail(record) {
+  const target=$('managerCheckDetail');
+  const check=getManagerCheck(record);
+  if(!check){
+    target.className='manager-check-detail';
+    target.innerHTML='<span class="small-muted">Сверка ещё не запускалась. Автоматических запросов к DaData нет.</span>';
+    return;
+  }
+  const statusClass=['match','name_mismatch','both_mismatch','position_mismatch'].includes(check.status)?check.status:'';
+  let checkedAt=String(check.checkedAt||'');
+  if(checkedAt){const date=new Date(checkedAt);if(!Number.isNaN(date.getTime()))checkedAt=date.toLocaleString('ru-RU');}
+  target.className=`manager-check-detail ${statusClass}`;
+  target.innerHTML=`<div>${managerCheckBadgeMarkup(check)} <span class="small-muted">Проверено: ${esc(checkedAt||'—')}</span></div><div class="manager-check-values"><div class="manager-check-value"><b>ФИО руководителя · в книге</b>${esc(check.localName||'—')}</div><div class="manager-check-value"><b>ФИО руководителя · DaData</b>${esc(check.managerName||'—')}</div><div class="manager-check-value"><b>Должность · в книге</b>${esc(check.localPosition||'—')}</div><div class="manager-check-value"><b>Должность · DaData</b>${esc(check.managerPost||'—')}</div><div class="manager-check-value"><b>Организация DaData · ИНН/КПП</b>${esc(check.organizationName||'—')} · ${esc(check.inn||'—')}${check.kpp?` / ${esc(check.kpp)}`:''}</div></div><div class="small-muted" style="display:block;margin-top:8px">${esc(check.message||'')}</div>`;
+}
+function modalFieldLabel(name) {
+  const labels={
+    'Регион':'Регион',
+    'Наименование (ЕГРЮЛ/лист)':'Наименование по книге / ЕГРЮЛ',
+    'Полное наименование':'Полное наименование для письма',
+    'ФИО':'ФИО адресата — именительный падеж',
+    'ФИО ДП':'ФИО адресата — дательный падеж (ФИО ДП)',
+    'Фамилия И.О.':'Фамилия и инициалы',
+    'Имя Отчество':'Имя и отчество для обращения',
+    'Обращение':'Обращение',
+    'Должность':'Должность для обращения',
+    'Должность руководителя':'Полная должность руководителя из книги',
+    'Должность руководителя дательный':'Должность для письма — дательный падеж',
+    'Юридический адрес':'Юридический адрес',
+    'Основной email':'Основной email (получатель)',
+    'Доп./старые email':'Дополнительные/старые email (копия CC)',
+    'Официальный сайт':'Официальный сайт'
+  };
+  return labels[name]||name;
+}
+function modalFieldMarkup(name, value) {
+  const longField=['Должность руководителя','Юридический адрес','Источник и примечания','Доп./старые email'].includes(name) || String(value??'').length>110;
+  const field=longField
+    ? `<textarea data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}">${esc(value)}</textarea>`
+    : `<input type="text" data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}" value="${esc(value)}" placeholder="Введите значение">`;
+  return `<div class="modal-field"><label>${esc(modalFieldLabel(name))}</label>${field}</div>`;
+}
+function renderRecordFields(values) {
+  const coreNames=new Set(MODAL_CORE_GROUPS.flatMap(group=>group.fields));
+  $('modalCoreFields').innerHTML=MODAL_CORE_GROUPS.map(group=>`<section class="modal-section"><h3>${esc(group.title)}</h3><div class="modal-fields">${group.fields.map(name=>modalFieldMarkup(name,values[name]??'')).join('')}</div></section>`).join('');
+  const extraNames=[...new Set([...(templateInfo.fields||[]),...Object.keys(values)])].filter(name=>!coreNames.has(name));
+  $('modalExtraFields').innerHTML=extraNames.length
+    ? `<div class="modal-fields">${extraNames.map(name=>modalFieldMarkup(name,values[name]??'')).join('')}</div>`
+    : '<span class="small-muted">Дополнительных полей нет.</span>';
+}
+function modalInput(name) {
+  return [...document.querySelectorAll('[data-modal-field]')].find(input=>input.dataset.modalField===name)||null;
+}
+function readModalFields() {
+  const values={};
+  document.querySelectorAll('[data-modal-field]').forEach(input=>{values[input.dataset.modalField]=input.value;});
+  return values;
+}
+function setModalField(name, value) {
+  const input=modalInput(name);
+  if (input) input.value=String(value??'');
+}
+function renderCaseGrid(targetId, forms, emptyText) {
+  const target=$(targetId);
+  if (!forms || !Object.keys(forms).length) {
+    target.innerHTML=`<span class="small-muted">${esc(emptyText)}</span>`;
+    return;
+  }
+  target.innerHTML=CASE_LABELS.map(([key,label])=>`<div class="case-item"><b>${esc(label)}</b><span>${esc(forms[key]||'—')}</span></div>`).join('');
+}
+function initialsFromDative(fullName, dativeName) {
+  const source=String(fullName||'').trim().split(/\s+/u).filter(Boolean);
+  const dative=String(dativeName||'').trim().split(/\s+/u).filter(Boolean);
+  if (!dative.length) return '';
+  const initials=source.slice(1).map(part=>`${Array.from(part)[0]||''}.`).join('');
+  return dative[0]+(initials?' '+initials:'');
+}
+function renderRecipientInflections(result, applyChangedFields=false) {
+  latestInflections=result;
+  renderCaseGrid('nameForms',result.nameCases,'Введите ФИО (именительный падеж), чтобы увидеть формы.');
+  renderCaseGrid('jobForms',result.jobCases,'Введите должность, чтобы увидеть формы.');
+  $('nameInflectNote').textContent=result.nameError|| (result.nameCases?.dative?'Формы предложены автоматически.':'');
+  $('jobInflectNote').textContent=result.jobRecognized?'Форма должности предложена автоматически; проверьте сложное наименование.':'Автоматически распознать должность не удалось — заполните дательный падеж вручную.';
+  $('applyNameDative').disabled=!result.nameCases?.dative;
+  $('applyJobDative').disabled=!result.jobRecognized||!result.jobCases?.dative;
+  if (!derivedManual.nameDative && result.nameCases?.dative && !modalInput('ФИО ДП')?.value.trim()) setModalField('ФИО ДП',result.nameCases.dative);
+  if (!derivedManual.jobDative && result.jobRecognized && !modalInput('Должность руководителя дательный')?.value.trim()) setModalField('Должность руководителя дательный',result.jobCases.dative);
+  if (!derivedManual.initials && result.nameCases?.dative && !modalInput('Фамилия И.О.')?.value.trim()) {
+    const fullName=modalInput('ФИО')?.value.trim()||modalInput('Руководитель')?.value.trim()||'';
+    setModalField('Фамилия И.О.',initialsFromDative(fullName,result.nameCases.dative));
+  }
+  if (!derivedManual.nameParts && !modalInput('Имя Отчество')?.value.trim()) {
+    const fullName=modalInput('ФИО')?.value.trim()||modalInput('Руководитель')?.value.trim()||'';
+    const parts=fullName.split(/\s+/u).filter(Boolean);
+    if(parts.length>=2) setModalField('Имя Отчество',parts.slice(1).join(' '));
+  }
+  if (applyChangedFields) {
+    const fullName=modalInput('ФИО')?.value.trim()||modalInput('Руководитель')?.value.trim()||'';
+    if (modalSourceEdited.name && !derivedManual.nameDative && result.nameCases?.dative) setModalField('ФИО ДП',result.nameCases.dative);
+    if (modalSourceEdited.name && !derivedManual.initials && result.nameCases?.dative) setModalField('Фамилия И.О.',initialsFromDative(fullName,result.nameCases.dative));
+    if (modalSourceEdited.name && !derivedManual.nameParts) {
+      const parts=fullName.split(/\s+/u).filter(Boolean);
+      if (parts.length>=2) setModalField('Имя Отчество',parts.slice(1).join(' '));
+    }
+    if (modalSourceEdited.job && !derivedManual.jobDative && result.jobRecognized) setModalField('Должность руководителя дательный',result.jobCases.dative);
+  }
+}
+function updateInflections(sourceKind='') {
+  if (!activeModalRecordId) return;
+  if (sourceKind) modalSourceEdited[sourceKind]=true;
+  clearTimeout(inflectTimer);
+  const requestId=++inflectRequestId;
+  const fullName=modalInput('ФИО')?.value.trim()||modalInput('Руководитель')?.value.trim()||'';
+  const jobTitle=modalInput('Должность')?.value.trim()||modalInput('Должность руководителя')?.value.trim()||'';
+  if (!fullName && !jobTitle) {
+    latestInflections=null;
+    renderCaseGrid('nameForms',null,'Введите ФИО (именительный падеж), чтобы увидеть формы.');
+    renderCaseGrid('jobForms',null,'Введите должность, чтобы увидеть формы.');
+    $('nameInflectNote').textContent=''; $('jobInflectNote').textContent='';
+    $('applyNameDative').disabled=true; $('applyJobDative').disabled=true;
+    return;
+  }
+  inflectTimer=setTimeout(async()=>{
+    const fd=new FormData(); fd.append('full_name',fullName); fd.append('job_title',jobTitle);
+    try {
+      const response=await fetch('?action=inflect',{method:'POST',headers:csrfHeaders(),body:fd});
+      const result=await response.json();
+      if (!response.ok||!result.ok||requestId!==inflectRequestId) return;
+      renderRecipientInflections(result,Boolean(sourceKind||modalSourceEdited.name||modalSourceEdited.job));
+    } catch(e) {
+      if(requestId===inflectRequestId){$('nameInflectNote').textContent='Не удалось получить автоматические формы.';$('jobInflectNote').textContent='Проверьте поля вручную.';}
+    }
+  },sourceKind?220:0);
+}
+function openRecordCard(id) {
+  const record=dataset.records.find(item=>item.id===id);
+  if(!record) return;
+  activeModalRecordId=id;
+  const values={...(record.fields||{}),...(overrides[id]||{})};
+  for(const group of MODAL_CORE_GROUPS) for(const name of group.fields) if(values[name]===undefined) values[name]='';
+  for(const name of (templateInfo.fields||[])) if(values[name]===undefined) values[name]=(dataset.demoOverrides?.[id]||{})[name]||'';
+  renderRecordFields(values);
+  renderManagerCheckDetail(record);
+  $('modalTitle').textContent='Карточка адресата';
+  $('modalRecordLabel').textContent=[fieldValue(record,'Регион'),fieldValue(record,'ФИО')||fieldValue(record,'Руководитель'),record.source].filter(Boolean).join(' · ');
+  $('modalMoreDetails').open=false;
+  derivedManual={nameDative:false,jobDative:false,initials:false,nameParts:false};
+  modalSourceEdited={name:false,job:false};
+  latestInflections=null;
+  $('recordModal').hidden=false;
+  document.body.classList.add('modal-open');
+  $('modalCloseBtn').focus();
+  document.querySelectorAll('[data-modal-field]').forEach(input=>input.addEventListener('input',()=>{
+    const name=input.dataset.modalField;
+    if(name==='ФИО' || (name==='Руководитель'&&!modalInput('ФИО')?.value.trim())) updateInflections('name');
+    else if(name==='Должность' || (name==='Должность руководителя'&&!modalInput('Должность')?.value.trim())) updateInflections('job');
+    else if(name==='ФИО ДП') derivedManual.nameDative=true;
+    else if(name==='Должность руководителя дательный') derivedManual.jobDative=true;
+    else if(name==='Фамилия И.О.') derivedManual.initials=true;
+    else if(name==='Имя Отчество') derivedManual.nameParts=true;
+  }));
+  updateInflections();
+}
+function closeRecordCard() {
+  $('recordModal').hidden=true;
+  document.body.classList.remove('modal-open');
+  activeModalRecordId='';
+  inflectRequestId++; clearTimeout(inflectTimer);
+}
+async function saveRecordCard() {
+  if(!activeModalRecordId) return;
+  const id=activeModalRecordId;
+  const values=readModalFields();
+  const button=$('saveCardBtn'),old=button.textContent;
+  button.disabled=true;button.textContent='Сохраняем…';
+  const fd=new FormData();fd.append('id',id);fd.append('fields',JSON.stringify(values));
+  try {
+    const response=await fetch('?action=save_record',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить карточку.');
+    const index=dataset.records.findIndex(item=>item.id===id);
+    if(index>=0) dataset.records[index]=payload.record;
+    delete overrides[id];
+    closeRecordCard();updateMapping();renderTable();
+    showToast('Карточка сохранена. Эти данные будут использованы при формировании PDF и DOCX.','success');
+  } catch(e) {
+    showToast(e.message||'Ошибка сохранения карточки.','error');
+  } finally {
+    button.disabled=false;button.textContent=old;
+  }
+}
+function activeSourceRecords() {
+  const key=sourceSelect.value;
+  return dataset.records.filter(r => key === 'all' || r.source_key === key);
+}
+function updateRegionOptions(keepCurrent=true) {
+  const old=keepCurrent ? regionSelect.value : '';
+  const records=activeSourceRecords();
+  const regions=[...new Set(records.map(r=>fieldValue(r,'Регион')).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ru'));
+  regionSelect.innerHTML='<option value="all">Все регионы</option>'+regions.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('');
+  if (regions.includes(old)) regionSelect.value=old;
+  else if (sourceSelect.value==='guber' && regions.includes('Астраханская область')) regionSelect.value='Астраханская область';
+  else regionSelect.value='all';
+}
+function getFilteredRecords() {
+  const source=sourceSelect.value;
+  const region=regionSelect.value;
+  const query=$('searchInput').value.trim().toLocaleLowerCase('ru');
+  return dataset.records.filter(r=>{
+    if (source!=='all' && r.source_key!==source) return false;
+    if (region!=='all' && fieldValue(r,'Регион')!==region) return false;
+    if (query) {
+      const f=r.fields||{};
+      const hay=[r.source, ...Object.values(f)].join(' ').toLocaleLowerCase('ru');
+      if (!hay.includes(query)) return false;
+    }
+    return true;
+  });
+}
+function getUnmappedFields() {
+  const records=activeSourceRecords();
+  if (!records.length) return [];
+  return (templateInfo.fields||[]).filter(name=>records.some(record=>!fieldValue(record,name).trim()));
+}
+function updateMapping() {
+  const fields=templateInfo.fields||[];
+  $('syntaxLabel').textContent=templateInfo.syntaxLabel ? '· '+templateInfo.syntaxLabel : '';
+  if (!fields.length) {
+    $('mappingBody').innerHTML='<span class="pill bad">Переменные в шаблоне не найдены</span>';
+    return;
+  }
+  const records=activeSourceRecords();
+  const counts=fields.map(name=>records.filter(record=>fieldValue(record,name).trim()).length);
+  $('mappingBody').innerHTML=fields.map((name,index)=>{
+    const count=counts[index], complete=records.length>0&&count===records.length;
+    const state=complete?'колонка книги':(count?`частично · ${count}/${records.length}`:'ручное поле');
+    return `<span class="map-chip ${complete?'':'manual'}"><b>${esc(name)}</b><span class="state">${state}</span></span>`;
+  }).join('')+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`;
+  if (counts.some(count=>count<records.length)) {
+    $('mappingBody').insertAdjacentHTML('beforeend','<span class="small-muted" style="width:100%;color:#8b5b00">Незаполненные значения нужно проверить в карточке записи или задать в янтарных ячейках. Неизвестные данные автоматически не угадываются.</span>');
+  }
+}
+function statusBadge(record) {
+  if (record.kind==='Архив') return '<span class="badge archive">Архив</span>';
+  if (String(record.kind||'').toLocaleLowerCase('ru').includes('пользовательский')) return '<span class="badge custom-record">Добавлена вручную</span>';
+  const s=fieldValue(record,'Статус ЕГРЮЛ').toLocaleLowerCase('ru');
+  if (s.includes('не действ')) return '<span class="badge inactive">Не действует</span>';
+  return '<span class="badge active">Действует</span>';
+}
+function updateManagerCheckButton() {
+  const button=$('checkManagersBtn');
+  if(!button)return;
+  button.disabled=selectedIds.size===0||!dadataConfigured||managerCheckRunning;
+  button.textContent=managerCheckRunning?'Сверка DaData…':`Сверить руководителей по ИНН${selectedIds.size?` (${selectedIds.size})`:''}`;
+  button.title=!dadataConfigured?'Сначала сохраните API-ключ DaData в настройках.':'Проверка выполняется только вручную для отмеченных записей.';
+}
+function renderTable() {
+  if (!dataset.records.length) return;
+  const filtered=getFilteredRecords();
+  const pageCount=Math.max(1,Math.ceil(filtered.length/PAGE_SIZE));
+  pageNumber=Math.min(pageNumber,pageCount);
+  const start=(pageNumber-1)*PAGE_SIZE;
+  const pageRows=filtered.slice(start,start+PAGE_SIZE);
+  const unknownFields=getUnmappedFields();
+  const customColumns=(dataset.customColumns||[]).filter(name=>!unknownFields.includes(name));
+  const headers=`<tr><th><input class="check" type="checkbox" id="checkPage" title="Выбрать записи на этой странице"></th><th>Регион</th><th>Адресат / ФИО руководителя</th><th>Должность</th><th>ИНН</th><th>Сверка DaData</th><th>Статус</th><th>Карточка</th>${customColumns.map(name=>`<th>${esc(name)}</th>`).join('')}${unknownFields.map(f=>`<th>Ручное поле: ${esc(f)}</th>`).join('')}</tr>`;
+  $('tableHead').innerHTML=headers;
+  tableBody.innerHTML=pageRows.map(r=>{
+    const f=r.fields||{}; const id=r.id;
+    const person=fieldValue(r,'Руководитель')||fieldValue(r,'ФИО')||'—';
+    const position=fieldValue(r,'Должность руководителя')||fieldValue(r,'Должность')||'—';
+    const region=fieldValue(r,'Регион')||'—';
+    const inn=fieldValue(r,'ИНН')||'—';
+    const managerCheck=getManagerCheck(r);
+    const nameMismatch=['name_mismatch','both_mismatch'].includes(managerCheck?.status);
+    const positionMismatch=['position_mismatch','both_mismatch'].includes(managerCheck?.status);
+    const rowClasses=[selectedIds.has(id)?'selected':'',nameMismatch?'manager-name-mismatch':'',positionMismatch?'manager-position-mismatch':''].filter(Boolean).join(' ');
+    const check=selectedIds.has(id)?'checked':'';
+    const nameTitle=nameMismatch?`DaData: ${managerCheck.managerName||'ФИО не получено'}`:'';
+    const nameNote=nameMismatch?`<span class="manager-name-note">DaData: ${esc(managerCheck.managerName||'не указано')}</span>`:'';
+    const positionNote=positionMismatch?`<span class="manager-position-note">DaData: ${esc(managerCheck.managerPost||'не указана')}</span>`:'';
+    const extraColumns=customColumns.map(name=>`<td title="${esc(fieldValue(r,name))}">${esc(fieldValue(r,name)||'—')}</td>`).join('');
+    const manual=unknownFields.map(name=>{
+      const preset=(dataset.demoOverrides?.[id]||{})[name]??'';
+      const current=(overrides[id]||{})[name]??(fieldValue(r,name)||preset);
+      const sourceNote=id==='guber-0037' && name==='Полное наименование' ? ' · из PDF-примера' : '';
+      return `<td><input class="manual-input" type="text" data-record-id="${esc(id)}" data-manual-field="${esc(name)}" value="${esc(current)}" placeholder="Введите значение" title="Нет одноимённой колонки; задайте значение явно${esc(sourceNote)}"></td>`;
+    }).join('');
+    return `<tr class="${rowClasses}" data-id="${esc(id)}"><td><input class="check row-check" type="checkbox" data-id="${esc(id)}" ${check} aria-label="Выбрать ${esc(person)}"></td><td><div class="cell-main">${esc(region)}</div><div class="cell-sub">${esc(r.source)}</div></td><td><div class="cell-main"${nameTitle?` title="${esc(nameTitle)}"`:''}>${esc(person)}</div>${nameNote}<div class="cell-sub">${esc(fieldValue(r,'Фамилия И.О.'))}</div></td><td>${esc(position)}${positionNote}</td><td>${esc(inn)}</td><td>${managerCheckBadgeMarkup(managerCheck)}</td><td>${statusBadge(r)}</td><td><button type="button" class="btn-ghost btn-small edit-record" data-edit-id="${esc(id)}">Карточка</button></td>${extraColumns}${manual}</tr>`;
+  }).join('');
+  $('tableWrap').hidden=pageRows.length===0;
+  $('emptyState').hidden=pageRows.length>0;
+  $('tableFoot').hidden=pageRows.length===0;
+  if (pageRows.length===0) $('emptyState').innerHTML='<div class="big">По заданным условиям ничего не найдено</div><div>Измените источник, регион или поисковую строку.</div>';
+  const shownStart=filtered.length?start+1:0;
+  const shownEnd=Math.min(start+PAGE_SIZE,filtered.length);
+  $('footShown').textContent=`Показано ${shownStart}–${shownEnd} из ${filtered.length}`;
+  $('pageLabel').textContent=`Страница ${pageNumber} из ${pageCount}`;
+  $('prevPage').disabled=pageNumber<=1;
+  $('nextPage').disabled=pageNumber>=pageCount;
+  $('filteredCount').textContent=String(filtered.length);
+  $('selectedCount').textContent=String(selectedIds.size);
+  $('sourceCount').textContent=`${activeSourceRecords().length.toLocaleString('ru-RU')} записей в текущем наборе`;
+  $('generateBtn').disabled=selectedIds.size===0 || (templateInfo.fields||[]).length===0;
+  $('generateBtn').textContent=selectedIds.size===1?'Сформировать PDF и поставить письмо в очередь':`Сформировать PDF для ${selectedIds.size} и поставить в очередь`;
+  updateManagerCheckButton();
+  const pageAll=pageRows.length>0 && pageRows.every(r=>selectedIds.has(r.id));
+  const checkPage=$('checkPage'); if(checkPage) checkPage.checked=pageAll;
+  $('tableBody').querySelectorAll('.row-check').forEach(box=>box.addEventListener('change',()=>{
+    const id=box.dataset.id;
+    if(box.checked) selectedIds.add(id); else selectedIds.delete(id);
+    renderTable();
+  }));
+  $('tableBody').querySelectorAll('.edit-record').forEach(button=>button.addEventListener('click',()=>openRecordCard(button.dataset.editId)));
+  $('tableBody').querySelectorAll('.manual-input').forEach(input=>input.addEventListener('input',()=>{
+    const id=input.dataset.recordId, field=input.dataset.manualField;
+    if(!overrides[id]) overrides[id]={};
+    overrides[id][field]=input.value;
+    input.closest('tr')?.classList.toggle('selected',selectedIds.has(id));
+  }));
+  if(checkPage) checkPage.addEventListener('change',()=>{
+    pageRows.forEach(r=>checkPage.checked?selectedIds.add(r.id):selectedIds.delete(r.id));
+    renderTable();
+  });
+}
+function populateSources() {
+  const options=['<option value="all">Все наборы</option>'];
+  for (const sheet of dataset.sheets) {
+    const archive=sheet.kind==='Архив'?' · архив':'';
+    options.push(`<option value="${esc(sheet.key)}">${esc(sheet.label+archive)} (${sheet.count})</option>`);
+  }
+  sourceSelect.innerHTML=options.join('');
+  sourceSelect.value='all';
+  updateRegionOptions(false);
+}
+function renderTemplateOptions() {
+  templateSelect.innerHTML=templateLibrary.map(item=>`<option value="${esc(item.id)}">${esc(item.name)} · ${item.type==='html'?'HTML → PDF':'DOCX → PDF'}</option>`).join('');
+}
+function setTemplateInfo(info, mode='saved', file=null, id='') {
+  templateInfo=info; templateMode=mode; templateFile=file;
+  if (mode==='upload') {
+    templateId='__upload__';
+    let option=templateSelect.querySelector('option[value="__upload__"]');
+    if(!option){option=document.createElement('option');option.value='__upload__';templateSelect.appendChild(option);}
+    option.textContent=`Загружен на этот запуск · ${file?.name||'DOCX'}`;
+    templateSelect.value='__upload__';
+    $('templateStatus').className='pill ok';
+    $('templateStatus').innerHTML=`<span class="file-name">${esc(file?.name||'Загруженный DOCX')}</span>`;
+  } else {
+    templateId=id||info.templateId||'sample-docx';
+    templateSelect.querySelector('option[value="__upload__"]')?.remove();
+    templateSelect.value=templateId;
+    const selected=templateLibrary.find(item=>item.id===templateId);
+    $('templateStatus').className='pill ok';
+    $('templateStatus').innerHTML=`<span class="file-name">${esc(selected?.name||info.templateName||'Письмо-пример.docx')}</span>`;
+  }
+  $('dropTemplate').classList.add('loaded'); $('dropTemplate').classList.remove('error');
+  $('saveUploadedTemplate').disabled=mode!=='upload';
+  $('editHtmlTemplate').disabled=info.type!=='html' || mode==='upload';
+  $('createHtmlTemplate').disabled=false;
+  updateMapping(); renderTable();
+}
+async function loadTemplates() {
+  const response=await fetch('?action=templates',{cache:'no-store'});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось загрузить библиотеку шаблонов.');
+  templateLibrary=payload.templates||[];
+  if(!templateLibrary.some(item=>item.id==='sample-docx')) templateLibrary.unshift({id:'sample-docx',name:'Письмо-пример.docx',type:'docx'});
+  renderTemplateOptions();
+  setTemplateInfo(SAMPLE_TEMPLATE_INFO,'saved',null,'sample-docx');
+}
+async function selectTemplate(id) {
+  if(id==='__upload__') return;
+  if(id==='sample-docx') {
+    templateInput.value='';
+    setTemplateInfo(SAMPLE_TEMPLATE_INFO,'saved',null,'sample-docx');
+    return;
+  }
+  const fd=new FormData();fd.append('template_id',id);fd.append('source_key',sourceSelect.value==='all'?'':sourceSelect.value);
+  try {
+    const response=await fetch('?action=analyze',{method:'POST',headers:csrfHeaders(),body:fd});
+    const info=await response.json();
+    if(!response.ok||!info.ok) throw new Error(info.error||'Не удалось открыть шаблон.');
+    templateInput.value='';
+    setTemplateInfo(info,'saved',null,id);
+  } catch(e) {
+    showToast(e.message||'Ошибка чтения шаблона.','error');
+    templateSelect.value=templateId;
+  }
+}
+async function analyzeUpload(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.docx')) { showToast('Выберите файл с расширением .docx.','error'); return; }
+  $('templateStatus').className='pill'; $('templateStatus').textContent='Проверяем шаблон…';
+  $('dropTemplate').classList.remove('loaded','error');
+  const fd=new FormData(); fd.append('template',file); fd.append('source_key',sourceSelect.value==='all'?'':sourceSelect.value);
+  try {
+    const response=await fetch('?action=analyze',{method:'POST',headers:csrfHeaders(),body:fd});
+    const info=await response.json();
+    if (!response.ok || !info.ok) throw new Error(info.error||'Не удалось разобрать DOCX.');
+    setTemplateInfo(info,'upload',file);
+    if (!info.fields.length) showToast('В DOCX не найдены переменные для подстановки.','error');
+    else showToast(`Шаблон проверен: найдено переменных ${info.fields.length}.`,'success');
+  } catch(e) {
+    $('templateStatus').className='pill err'; $('templateStatus').textContent='Ошибка шаблона';
+    $('dropTemplate').classList.add('error');
+    $('saveUploadedTemplate').disabled=true;
+    showToast(e.message||'Ошибка анализа DOCX.','error');
+  }
+}
+function resetToSample() {
+  templateInput.value='';
+  setTemplateInfo(SAMPLE_TEMPLATE_INFO,'saved',null,'sample-docx');
+  showToast('Выбран шаблон-пример DOCX.');
+}
+async function saveUploadedTemplate() {
+  if(templateMode!=='upload'||!templateFile) return;
+  const fd=new FormData();fd.append('type','docx');fd.append('name',templateFile.name.replace(/\.docx$/i,'')||'Шаблон DOCX');fd.append('template',templateFile);
+  const button=$('saveUploadedTemplate');button.disabled=true;button.textContent='Сохраняем…';
+  try {
+    const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить шаблон.');
+    templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);
+    templateInput.value='';showToast('DOCX-шаблон сохранён в библиотеку приложения.','success');
+  } catch(e) { showToast(e.message||'Ошибка сохранения шаблона.','error'); }
+  finally {button.textContent='Сохранить DOCX в библиотеку';button.disabled=templateMode!=='upload';}
+}
+const HTML_STARTER=`<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 22mm 20mm; }
+body { font-family: "Liberation Serif", "Times New Roman", serif; font-size: 12pt; line-height: 1.45; color: #111; }
+.recipient { text-align: right; margin-bottom: 28mm; }
+.sign { margin-top: 28mm; }
+</style>
+</head>
+<body>
+<div class="recipient">{Регион}</div>
+<p>{Обращение} {Имя Отчество}!</p>
+<p>Текст письма. Замените этот текст и настройте оформление под свой документ.</p>
+<p class="sign">{Должность руководителя дательный}<br>{ФИО ДП}</p>
+</body>
+</html>`;
+function previewHtml(html) {
+  return String(html||'').replace(/<\s*(script|iframe|object|embed|form)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi,'').replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi,'').replace(/(src|href)\s*=\s*("|')\s*(https?:|file:|javascript:|data:|\/\/)[^"']*\2/gi,'');
+}
+function updateHtmlPreview() { $('htmlPreviewFrame').srcdoc=previewHtml($('htmlTemplateContent').value); }
+function openHtmlEditor(name='',content=HTML_STARTER,id='') {
+  editingHtmlTemplateId=id;
+  $('htmlEditorTitle').textContent=id?'Редактирование HTML-шаблона':'Новый HTML-шаблон';
+  $('htmlTemplateName').value=name;
+  $('htmlTemplateContent').value=content;
+  $('htmlTemplateFeedback').textContent='';
+  $('saveHtmlTemplateBtn').textContent=id?'Сохранить изменения':'Сохранить шаблон';
+  $('htmlTemplateModal').hidden=false;document.body.classList.add('modal-open');updateHtmlPreview();$('htmlTemplateName').focus();
+}
+async function editHtmlTemplate() {
+  if(templateInfo.type!=='html'||templateMode==='upload') return;
+  try {
+    const response=await fetch(`?action=template_content&id=${encodeURIComponent(templateId)}`,{cache:'no-store'});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось загрузить HTML-шаблон.');
+    openHtmlEditor(payload.name,payload.content,payload.id);
+  } catch(e) { showToast(e.message||'Ошибка загрузки HTML-шаблона.','error'); }
+}
+function closeHtmlEditor() { $('htmlTemplateModal').hidden=true;document.body.classList.remove('modal-open'); }
+async function saveHtmlTemplate() {
+  const name=$('htmlTemplateName').value.trim(),content=$('htmlTemplateContent').value;
+  if(!name||!content.trim()){showToast('Введите название и HTML-код шаблона.','error');return;}
+  const fd=new FormData();fd.append('type','html');fd.append('name',name);fd.append('content',content);if(editingHtmlTemplateId)fd.append('id',editingHtmlTemplateId);
+  const button=$('saveHtmlTemplateBtn');button.disabled=true;button.textContent='Сохраняем…';
+  try {
+    const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить HTML-шаблон.');
+    templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);closeHtmlEditor();showToast('HTML-шаблон сохранён.','success');
+  } catch(e) { $('htmlTemplateFeedback').textContent=e.message||'Ошибка сохранения.';showToast(e.message||'Ошибка сохранения шаблона.','error'); }
+  finally {button.disabled=false;button.textContent=editingHtmlTemplateId?'Сохранить изменения':'Сохранить шаблон';}
+}
+function showDownloadResult(result) {
+  const box=$('downloadResult');box.replaceChildren();
+  const message=document.createElement('span');
+  message.textContent=`Подготовлены PDF и очередь (${result.created||0} писем). `;
+  box.append(message);
+  if(result.downloadUrl){
+    const link=document.createElement('a');link.href=result.downloadUrl;link.download=result.filename||'Пакет_документов.zip';link.textContent='Скачать ZIP с PDF и DOCX';link.title='Ссылка действует 24 часа';box.append(link);
+  }
+  const queueLink=document.createElement('a');queueLink.href='#emailQueue';queueLink.textContent='Перейти к очереди';box.append(queueLink);
+  box.hidden=false;
+}
+async function generate() {
+  if (!selectedIds.size) { showToast('Отметьте хотя бы одну запись.','error'); return; }
+  const ids=[...selectedIds];
+  const fd=new FormData();
+  fd.append('selected_ids',JSON.stringify(ids));
+  fd.append('overrides',JSON.stringify(overrides));
+  if (templateMode==='upload' && templateFile) fd.append('template',templateFile);
+  else fd.append('template_id',templateId);
+  const btn=$('generateBtn'), oldText=btn.textContent;
+  btn.disabled=true; btn.textContent='Формируем PDF…'; $('progressWrap').classList.add('show'); $('downloadResult').hidden=true;
+  $('progressText').textContent=`Готовим PDF${templateInfo.type==='docx'?' и DOCX':''} для ${ids.length.toLocaleString('ru-RU')} выбранных записей…`;
+  try {
+    const response=await fetch('?action=generate',{method:'POST',headers:csrfHeaders(),body:fd});
+    let payload={};try{payload=await response.json();}catch{}
+    if (!response.ok || !payload.ok) {
+      const details=Array.isArray(payload.details)?'\n'+payload.details.slice(0,8).join('\n'):'';
+      throw new Error((payload.error||'Не удалось сформировать документы.')+details);
+    }
+    showDownloadResult(payload);
+    await refreshQueue();
+    const skipped=Number(payload.skipped||0);
+    showToast(`Готово: ${payload.created||0} PDF добавлено в очередь${skipped?`; ошибок/пропусков — ${skipped}`:''}. Отправки не было.`,'success');
+    $('emailQueue').scrollIntoView({behavior:'smooth',block:'start'});
+  } catch(e) {
+    showToast(e.message||'Ошибка формирования.','error');
+  } finally {
+    $('progressWrap').classList.remove('show'); btn.textContent=oldText; renderTable();
+  }
+}
+function queueStatus(status) {
+  const map={queued:['В очереди','queued'],sent:['Отправлено','sent'],failed:['Ошибка / не отправлено','failed'],sending:['Отправка прервана или неясна','sending']};
+  return map[status]||['Статус неизвестен',''];
+}
+function renderQueue() {
+  const list=$('queueList');
+  if(!queueItems.length){list.innerHTML='<div class="queue-empty">Очередь пуста. Сформируйте документы для выбранных адресатов, чтобы добавить PDF к проверке.</div>';return;}
+  list.innerHTML=queueItems.map(item=>{
+    const [label,css]=queueStatus(item.status);
+    const error=item.lastError?`<div class="queue-item-error">${esc(item.lastError)}</div>`:'';
+    const cc=item.cc?`<div class="queue-item-address"><b>CC:</b> ${esc(item.cc)}</div>`:'';
+    return `<article class="queue-item"><div class="queue-item-main"><div class="queue-item-title">${esc(item.region||'Без региона')} · ${esc(item.recipientName||item.recordId||'Адресат')} <span class="status-label ${css}">${label}</span></div><div class="queue-item-sub">Шаблон: ${esc(item.templateName||'—')} · создано: ${esc(item.createdAt||'')}</div><div class="queue-item-address"><b>Кому:</b> ${esc(item.to||'не указан')}</div>${cc}${error}</div><div class="queue-item-actions"><button type="button" class="btn-primary btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div></article>`;
+  }).join('');
+  list.querySelectorAll('[data-queue-open]').forEach(button=>button.addEventListener('click',()=>openQueueItem(button.dataset.queueOpen)));
+}
+async function refreshQueue() {
+  const response=await fetch('?action=queue',{cache:'no-store'});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось загрузить очередь.');
+  queueItems=payload.items||[];
+  const pending=queueItems.filter(item=>item.status!=='sent').length;
+  $('queueCount').textContent=`${queueItems.length} писем · ${pending} не отправлено`;
+  $('queueCount').className='pill '+(pending?'warn':'ok');
+  renderQueue();
+}
+function currentQueueItem() { return queueItems.find(item=>item.id===activeQueueItemId)||null; }
+function syncQueueReviewControls() {
+  const item=currentQueueItem();
+  if(!item)return;
+  const blocked=['sent','sending'].includes(item.status);
+  $('sendQueueItemBtn').disabled=!$('queueReviewedCheck').checked||blocked;
+  $('saveQueueItemBtn').disabled=blocked;
+  $('sendQueueItemBtn').textContent=item.status==='failed'?'Повторить отправку':'Отправить это письмо';
+}
+function openQueueItem(id) {
+  const item=queueItems.find(row=>row.id===id);if(!item)return;
+  activeQueueItemId=id;
+  $('queueItemLabel').textContent=[item.region,item.recipientName,item.recordId].filter(Boolean).join(' · ');
+  $('queueTo').value=item.to||'';$('queueCc').value=item.cc||'';$('queueSubject').value=item.subject||'';$('queueBody').value=item.body||'';
+  $('queueEmailSource').textContent=`Исходные поля книги — основной: ${item.sourcePrimaryEmail||'пусто'}; доп./старые: ${item.sourceAdditionalEmails||'пусто'}. Проверьте пометки об устаревших адресах.`;
+  $('queuePdfFrame').src=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf&inline=1`;
+  $('queuePdfDownload').href=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf`;
+  $('queueDocxDownload').hidden=!item.hasDocx;
+  $('queueDocxDownload').href=`?action=queue_file&id=${encodeURIComponent(id)}&format=docx`;
+  const [statusText]=queueStatus(item.status);
+  $('queueItemStatus').textContent=`${statusText}${item.lastError?' · '+item.lastError:''}`;
+  $('queueActionFeedback').textContent=item.status==='failed'?'Перед повтором проверьте, не было ли письмо принято SMTP-сервером.':(item.status==='sent'?'Письмо уже отправлено.':'Сначала проверьте PDF, адреса и текст; отправка доступна только этому письму.');
+  $('queueReviewedCheck').checked=false;
+  $('queueModal').hidden=false;document.body.classList.add('modal-open');syncQueueReviewControls();$('queueModalClose').focus();
+}
+function closeQueueModal() {
+  $('queueModal').hidden=true;$('queuePdfFrame').src='about:blank';document.body.classList.remove('modal-open');activeQueueItemId='';
+}
+async function saveQueueItem(showMessage=true) {
+  if(!activeQueueItemId)return false;
+  const fd=new FormData();fd.append('id',activeQueueItemId);fd.append('to',$('queueTo').value);fd.append('cc',$('queueCc').value);fd.append('subject',$('queueSubject').value);fd.append('body',$('queueBody').value);
+  const response=await fetch('?action=update_queue_item',{method:'POST',headers:csrfHeaders(),body:fd});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить правки письма.');
+  const index=queueItems.findIndex(item=>item.id===activeQueueItemId);if(index>=0)queueItems[index]=payload.item;
+  renderQueue();syncQueueReviewControls();
+  if(showMessage)$('queueActionFeedback').textContent='Правки сохранены; отправки не было.';
+  return true;
+}
+async function sendQueueItem() {
+  const item=currentQueueItem();if(!item)return;
+  if(!$('queueReviewedCheck').checked){showToast('Подтвердите проверку PDF, получателей и текста.','error');return;}
+  if(item.status==='failed'&&!window.confirm('Предыдущая попытка завершилась ошибкой. Возможно, SMTP-сервер уже принял письмо, но ответ не дошёл. Повтор может создать дубль. Продолжить?'))return;
+  const button=$('sendQueueItemBtn'),old=button.textContent;button.disabled=true;button.textContent='Отправляем…';
+  try {
+    await saveQueueItem(false);
+    const fd=new FormData();fd.append('id',activeQueueItemId);fd.append('confirmed','1');
+    const response=await fetch('?action=send_queue_item',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось отправить письмо.');
+    closeQueueModal();await refreshQueue();showToast('Одно письмо отправлено. Остальные элементы очереди не затронуты.','success');
+  } catch(e) {
+    $('queueActionFeedback').textContent=e.message||'Ошибка отправки.';
+    showToast(e.message||'Ошибка отправки письма.','error');
+    try{await refreshQueue();}catch{}
+  } finally {button.textContent=old;syncQueueReviewControls();}
+}
+function updateSmtpState() {
+  const ready=$('smtpHost').value.trim()!==''&&$('smtpFromEmail').value.trim()!=='';
+  $('smtpState').textContent=ready?'Параметры заполнены':'Не настроено';
+  $('smtpState').className='settings-state '+(ready?'ok':'bad');
+}
+async function loadSmtpSettings() {
+  const response=await fetch('?action=smtp_settings',{cache:'no-store'});
+  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать SMTP-настройки.');
+  const s=payload.settings||{};
+  $('smtpHost').value=s.host||'';$('smtpPort').value=s.port||587;$('smtpEncryption').value=s.encryption||'tls';$('smtpUsername').value=s.username||'';
+  $('smtpFromEmail').value=s.fromEmail||'';$('smtpFromName').value=s.fromName||'';$('smtpReplyTo').value=s.replyTo||'';
+  $('smtpSubject').value=s.subjectTemplate||'Документ';$('smtpBody').value=s.bodyTemplate??'Добрый день.\n\nНаправляем документ во вложении.';
+  smtpPasswordConfigured=Boolean(payload.passwordConfigured);
+  $('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
+  updateSmtpState();
+}
+function smtpFormData(includeTemplates) {
+  const fd=new FormData();
+  const fields={host:'smtpHost',port:'smtpPort',encryption:'smtpEncryption',username:'smtpUsername',fromEmail:'smtpFromEmail',fromName:'smtpFromName',replyTo:'smtpReplyTo'};
+  if(includeTemplates){fields.subjectTemplate='smtpSubject';fields.bodyTemplate='smtpBody';}
+  for(const [key,id] of Object.entries(fields))fd.append(key,$(id).value);
+  if($('smtpPassword').value)fd.append('password',$('smtpPassword').value);
+  if($('clearSmtpPassword').checked)fd.append('clear_password','1');
+  return fd;
+}
+async function saveSmtpSettings() {
+  const button=$('saveSmtpBtn');
+  if(button.disabled)return;
+  button.disabled=true;button.textContent='Сохраняем…';
+  $('smtpFeedback').textContent='Сохраняем настройки…';
+  try {
+    const payload=await requestJson('?action=save_smtp_settings',{method:'POST',headers:csrfHeaders(),body:smtpFormData(true)},15000);
+    smtpPasswordConfigured=Boolean(payload.passwordConfigured);$('smtpPasswordSaved').textContent=smtpPasswordConfigured?'· сохранён, скрыт':'';$('smtpPassword').value='';$('clearSmtpPassword').checked=false;
+    $('smtpFeedback').textContent='Настройки сохранены в приватном хранилище.';updateSmtpState();showToast('SMTP-настройки сохранены. Пароль скрыт.','success');
+  } catch(e) {$('smtpFeedback').textContent=e.message||'Ошибка сохранения.';showToast(e.message||'Ошибка сохранения SMTP-настроек.','error');}
+  finally {button.disabled=false;button.textContent='Сохранить настройки';}
+}
+async function testSmtp() {
+  const button=$('testSmtpBtn');
+  if(button.disabled)return;
+  if(!$('smtpHost').value.trim()||!$('smtpFromEmail').value.trim()){
+    $('smtpFeedback').textContent='Сначала заполните SMTP-сервер и email отправителя. Проверка использует значения из формы и ничего не сохраняет.';
+    showToast('Заполните SMTP-сервер и email отправителя.','error');return;
+  }
+  button.disabled=true;button.textContent='Проверяем…';
+  $('smtpFeedback').textContent='Подключаемся к SMTP-серверу…';
+  try {
+    const payload=await requestJson('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false)},20000);
+    $('smtpFeedback').textContent=payload.message||'Соединение проверено.';showToast(payload.message||'SMTP доступен.','success');
+  } catch(e) {$('smtpFeedback').textContent=e.message||'Ошибка SMTP.';showToast(e.message||'Ошибка SMTP.','error');}
+  finally {button.disabled=false;button.textContent='Проверить SMTP';}
+}
+function updateDadataState() {
+  const count=Object.keys(managerChecks||{}).length;
+  $('dadataState').textContent=dadataConfigured?`API-ключ сохранён${count?` · сверено ${count}`:''}`:'API-ключ не задан';
+  $('dadataState').className='settings-state '+(dadataConfigured?'ok':'bad');
+  $('dadataTokenSaved').textContent=dadataConfigured?'· сохранён, скрыт':'';
+  updateManagerCheckButton();
+}
+async function loadDadataSettings() {
+  const response=await fetch('?action=dadata_settings',{cache:'no-store'});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать настройки DaData.');
+  dadataConfigured=Boolean(payload.configured);
+  $('dadataToken').value='';
+  $('clearDadataToken').checked=false;
+  updateDadataState();
+}
+async function saveDadataSettings() {
+  const token=$('dadataToken').value.trim();
+  const clear=$('clearDadataToken').checked;
+  if(!token&&!clear){$('dadataFeedback').textContent='Введите новый API-ключ или отметьте удаление сохранённого ключа.';return;}
+  const fd=new FormData();
+  if(token&&!clear)fd.append('token',token);
+  if(clear)fd.append('clear_token','1');
+  const button=$('saveDadataBtn');button.disabled=true;button.textContent='Сохраняем…';
+  try {
+    const response=await fetch('?action=save_dadata_settings',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось сохранить API-ключ DaData.');
+    dadataConfigured=Boolean(payload.configured);
+    $('dadataToken').value='';$('clearDadataToken').checked=false;
+    $('dadataFeedback').textContent=dadataConfigured?'Ключ сохранён в приватном хранилище и скрыт.':'Сохранённый ключ удалён.';
+    updateDadataState();
+    showToast(dadataConfigured?'API-ключ DaData сохранён и скрыт.':'API-ключ DaData удалён.','success');
+  } catch(e) {$('dadataFeedback').textContent=e.message||'Ошибка сохранения ключа.';showToast(e.message||'Ошибка настроек DaData.','error');}
+  finally {button.disabled=false;button.textContent='Сохранить API-ключ';}
+}
+async function runManagerCheckIds(ids, askConfirmation=true) {
+  const unique=[...new Set(ids.map(String).filter(Boolean))];
+  if(!unique.length){showToast('Отметьте одну или несколько записей для сверки.','error');return;}
+  if(!dadataConfigured){$('dadataDetails').open=true;$('dadataToken').focus();showToast('Сначала сохраните API-ключ DaData в настройках.','error');return;}
+  if(askConfirmation&&!window.confirm(`Будет выполнен ручной запрос DaData для ${unique.length} отмеченных записей (по одному запросу на корректный ИНН). Это может расходовать лимит или оплату вашего тарифа. Продолжить?`))return;
+  managerCheckRunning=true;managerCheckCancelRequested=false;updateManagerCheckButton();
+  $('managerCheckProgress').classList.add('show');
+  $('managerCheckProgressText').textContent=`DaData: проверено 0 из ${unique.length}…`;
+  const updatedIds=new Set();let completed=0;let stopReason='';let cancelled=false;
+  try {
+    for(let offset=0;offset<unique.length;offset+=20){
+      if(managerCheckCancelRequested){cancelled=true;break;}
+      const batch=unique.slice(offset,offset+20);
+      const fd=new FormData();fd.append('selected_ids',JSON.stringify(batch));
+      const response=await fetch('?action=check_managers',{method:'POST',headers:csrfHeaders(),body:fd});
+      const payload=await response.json();
+      if(!response.ok||!payload.ok)throw new Error(payload.error||'Сверка DaData не выполнена.');
+      Object.assign(managerChecks,payload.checks||{});dataset.managerChecks=managerChecks;
+      (payload.updatedIds||[]).forEach(id=>updatedIds.add(String(id)));
+      completed+=Number(payload.processed||0);
+      $('managerCheckProgressText').textContent=`DaData: обработано ${completed} из ${unique.length}. Запросы выполняются вручную, по пакетам.`;
+      renderTable();
+      if(activeModalRecordId){const activeRecord=dataset.records.find(row=>row.id===activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
+      if(payload.stop){stopReason=String(payload.stopReason||'DaData остановила пакет.');break;}
+    }
+    const checked=[...updatedIds].map(id=>managerChecks[id]).filter(Boolean);
+    const nameDiff=checked.filter(item=>['name_mismatch','both_mismatch'].includes(item.status)).length;
+    const positionDiff=checked.filter(item=>['position_mismatch','both_mismatch'].includes(item.status)).length;
+    const match=checked.filter(item=>item.status==='match').length;
+    const summary=`Готово: обработано ${checked.length} записей; ФИО не совпало — ${nameDiff}; должность отличается — ${positionDiff}; ФИО совпало — ${match}.`;
+    $('dadataFeedback').textContent=stopReason||summary;
+    if(stopReason)showToast(`${summary} Остановлено: ${stopReason}`,'error');
+    else if(cancelled||managerCheckCancelRequested)showToast(`${summary} Сверка остановлена после завершения текущего пакета.`,'success');
+    else showToast(summary,'success');
+    updateDadataState();
+  } catch(e) {
+    $('dadataFeedback').textContent=e.message||'Ошибка сверки DaData.';
+    showToast(e.message||'Ошибка сверки DaData.','error');
+  } finally {
+    managerCheckRunning=false;$('managerCheckProgress').classList.remove('show');updateManagerCheckButton();renderTable();
+    if(activeModalRecordId){const activeRecord=dataset.records.find(row=>row.id===activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
+  }
+}
+function checkSelectedManagers() {
+  return runManagerCheckIds([...selectedIds],true);
+}
+async function init() {
+  try {
+    const response=await fetch('?action=data',{cache:'no-store'});
+    if (!response.ok) throw new Error('Не удалось загрузить демо-набор.');
+    dataset=await response.json();
+    managerChecks=dataset.managerChecks||{};
+    overrides={};
+    populateSources();
+    $('dbBadge').textContent=`${dataset.records.length.toLocaleString('ru-RU')} записей · демо-копия`;
+    $('dbBadge').className='pill ok';
+    $('emptyState').innerHTML='<div class="big">Выберите адресатов для формирования</div><div>По умолчанию показаны все наборы и регионы; начальный выбор пуст, чтобы случайно не сформировать или не отправить всю базу.</div>';
+    try { await loadTemplates(); } catch(e) { showToast(e.message||'Не удалось загрузить шаблоны.','error'); }
+    try { await loadSmtpSettings(); } catch(e) { $('smtpFeedback').textContent=e.message||'Не удалось загрузить SMTP-настройки.'; }
+    try { await loadDadataSettings(); } catch(e) { $('dadataFeedback').textContent=e.message||'Не удалось загрузить настройки DaData.'; }
+    try { await refreshQueue(); } catch(e) { $('queueCount').textContent='Ошибка загрузки'; }
+    updateMapping(); renderTable();
+  } catch(e) {
+    $('dbBadge').className='pill bad'; $('dbBadge').textContent='Ошибка данных';
+    $('emptyState').innerHTML=`<div class="big">Не удалось загрузить демо-данные</div><div>${esc(e.message||'Проверьте ответ сервера.')}</div>`;
+    showToast(e.message||'Ошибка загрузки данных.','error');
+  }
+}
+sourceSelect.addEventListener('change',()=>{pageNumber=1;updateRegionOptions(false);updateMapping();renderTable();});
+regionSelect.addEventListener('change',()=>{pageNumber=1;renderTable();});
+$('searchInput').addEventListener('input',()=>{pageNumber=1;renderTable();});
+$('selectFilteredBtn').addEventListener('click',()=>{getFilteredRecords().forEach(r=>selectedIds.add(r.id));renderTable();showToast(`Выбраны все записи по фильтру (${getFilteredRecords().length}).`);});
+$('clearSelectionBtn').addEventListener('click',()=>{selectedIds.clear();renderTable();});
+$('prevPage').addEventListener('click',()=>{if(pageNumber>1){pageNumber--;renderTable();}});
+$('nextPage').addEventListener('click',()=>{pageNumber++;renderTable();});
+$('generateBtn').addEventListener('click',generate);
+$('checkManagersBtn').addEventListener('click',checkSelectedManagers);
+$('cancelManagerCheckBtn').addEventListener('click',()=>{managerCheckCancelRequested=true;$('managerCheckProgressText').textContent='Завершаем текущий пакет DaData; новые запросы больше не запускаются…';});
+$('saveDadataBtn').addEventListener('click',saveDadataSettings);
+$('templateSelect').addEventListener('change',()=>selectTemplate(templateSelect.value));
+$('saveUploadedTemplate').addEventListener('click',saveUploadedTemplate);
+$('createHtmlTemplate').addEventListener('click',()=>openHtmlEditor());
+$('editHtmlTemplate').addEventListener('click',editHtmlTemplate);
+$('saveHtmlTemplateBtn').addEventListener('click',saveHtmlTemplate);
+$('htmlTemplateContent').addEventListener('input',updateHtmlPreview);
+$('htmlEditorClose').addEventListener('click',closeHtmlEditor);
+$('htmlEditorCancel').addEventListener('click',closeHtmlEditor);
+$('htmlTemplateModal').addEventListener('click',event=>{if(event.target===$('htmlTemplateModal'))closeHtmlEditor();});
+$('applyNameDative').addEventListener('click',()=>{const value=latestInflections?.nameCases?.dative;if(value){setModalField('ФИО ДП',value);derivedManual.nameDative=false;}});
+$('applyJobDative').addEventListener('click',()=>{const value=latestInflections?.jobCases?.dative;if(value){setModalField('Должность руководителя дательный',value);derivedManual.jobDative=false;}});
+$('saveCardBtn').addEventListener('click',saveRecordCard);
+$('modalCloseBtn').addEventListener('click',closeRecordCard);
+$('modalCancelBtn').addEventListener('click',closeRecordCard);
+$('recordModal').addEventListener('click',event=>{if(event.target===$('recordModal'))closeRecordCard();});
+$('queueModalClose').addEventListener('click',closeQueueModal);
+$('queueModalCancel').addEventListener('click',closeQueueModal);
+$('queueModal').addEventListener('click',event=>{if(event.target===$('queueModal'))closeQueueModal();});
+$('queueReviewedCheck').addEventListener('change',syncQueueReviewControls);
+['queueTo','queueCc','queueSubject','queueBody'].forEach(id=>$(id).addEventListener('input',()=>{if($('queueReviewedCheck').checked)$('queueReviewedCheck').checked=false;syncQueueReviewControls();}));
+$('saveQueueItemBtn').addEventListener('click',async()=>{try{await saveQueueItem(true);showToast('Правки письма сохранены.','success');}catch(e){showToast(e.message||'Не удалось сохранить правки.','error');}});
+$('sendQueueItemBtn').addEventListener('click',sendQueueItem);
+$('refreshQueueBtn').addEventListener('click',async()=>{try{await refreshQueue();showToast('Очередь обновлена.','success');}catch(e){showToast(e.message||'Не удалось обновить очередь.','error');}});
+$('previewExcelImportBtn').addEventListener('click',previewExcelImport);
+$('confirmExcelImportBtn').addEventListener('click',confirmExcelImport);
+$('excelImportClose').addEventListener('click',closeExcelImportModal);
+$('excelImportCancel').addEventListener('click',closeExcelImportModal);
+$('excelImportModal').addEventListener('click',event=>{if(event.target===$('excelImportModal'))closeExcelImportModal();});
+$('exportExcelBtn').addEventListener('click',exportExcel);
+$('addTableColumnBtn').addEventListener('click',addTableColumn);
+$('addTableSectionBtn').addEventListener('click',addTableSection);
+$('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
+$('testSmtpBtn').addEventListener('click',testSmtp);
+['smtpHost','smtpFromEmail'].forEach(id=>$(id).addEventListener('input',updateSmtpState));
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
+$('dropTemplate').addEventListener('click',()=>templateInput.click());
+$('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
+templateInput.addEventListener('change',()=>analyzeUpload(templateInput.files?.[0]));
+$('dropTemplate').addEventListener('dragover',e=>{e.preventDefault();$('dropTemplate').classList.add('dragover');});
+$('dropTemplate').addEventListener('dragleave',()=> $('dropTemplate').classList.remove('dragover'));
+$('dropTemplate').addEventListener('drop',e=>{e.preventDefault();$('dropTemplate').classList.remove('dragover');const file=e.dataTransfer?.files?.[0];if(file)analyzeUpload(file);});
+init();
+</script>
+</body>
+</html>
