@@ -19,6 +19,7 @@ require __DIR__ . '/webinars/docx.php';
 require __DIR__ . '/webinars/store.php';
 require __DIR__ . '/webinars/telegram.php';
 require __DIR__ . '/webinars/monitor.php';
+require __DIR__ . '/webinars/bot.php';
 
 $arguments = array_slice((array) ($argv ?? []), 1);
 $force = in_array('--force', $arguments, true);

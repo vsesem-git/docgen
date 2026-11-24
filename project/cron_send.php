@@ -33,6 +33,7 @@ if ($accountId === '') {
         require __DIR__ . '/webinars/store.php';
         require __DIR__ . '/webinars/telegram.php';
         require __DIR__ . '/webinars/monitor.php';
+        require __DIR__ . '/webinars/bot.php';
         $webinars = webinarsMonitorTick();
     } catch (Throwable $error) {
         $webinars = ['ok' => false, 'error' => mb_substr($error->getMessage(), 0, 300, 'UTF-8')];

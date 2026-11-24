@@ -293,6 +293,83 @@ webinarsTelegramForget();
 check(webinarsTelegramConfig() === null, 'привязка: отвязка удаляет токен');
 putenv('DOCGEN_WEBINARS_TELEGRAM_STUB');
 
+// --- Команды бота: меню, список, логи, расписание, ручная проверка -----------
+putenv('DOCGEN_WEBINARS_TELEGRAM_STUB=1');
+require_once __DIR__ . '/../webinars/bot.php';
+$botChat = '777123456';
+webinarsTelegramSave($pairToken, $botChat);
+$botStubFile = $storage . '/webinars/telegram-stub.json';
+$botFeed = static function (array $updates) use ($botStubFile): void {
+    // Сообщения бота копятся: по журналу видно, что именно он отправил.
+    $state = is_file($botStubFile) ? (array) json_decode((string) file_get_contents($botStubFile), true) : [];
+    $state['updates'] = $updates;
+    $state['messages'] = [];
+    @mkdir(dirname($botStubFile), 0700, true);
+    file_put_contents($botStubFile, json_encode($state));
+};
+$botMessages = static function () use ($botStubFile): array {
+    if (!is_file($botStubFile)) {
+        return [];
+    }
+    $state = (array) json_decode((string) file_get_contents($botStubFile), true);
+    return (array) ($state['messages'] ?? []);
+};
+
+check(webinarsBotCommand('/list') === 'list', 'бот: /list распознаётся');
+check(webinarsBotCommand('/list@cmk_docgen_test_bot') === 'list', 'бот: команда с упоминанием бота');
+check(webinarsBotCommand('📋 Список вебинаров') === 'list', 'бот: подпись кнопки равна команде');
+check(webinarsBotCommand('/on') === 'schedule_on' && webinarsBotCommand('/off') === 'schedule_off', 'бот: включение и выключение расписания');
+check(webinarsBotCommand('чепуха') === null, 'бот: неизвестная команда не распознаётся');
+
+$botMenu = webinarsBotMenu();
+$botLabels = array_merge(...array_map(static fn(array $row): array => array_column($row, 'text'), $botMenu['keyboard']));
+check(count($botLabels) === 6, 'бот: в меню шесть кнопок', (string) count($botLabels));
+check(in_array('📋 Список вебинаров', $botLabels, true) && in_array('🔎 Проверить сейчас', $botLabels, true)
+    && in_array('🗓 Расписание', $botLabels, true) && in_array('📜 Логи проверки', $botLabels, true),
+    'бот: меню содержит список, проверку, расписание и логи');
+
+$botList = webinarsBotAnswer('list');
+check(str_contains($botList['text'], 'Текущие вебинары') && str_contains($botList['text'], 'web-kodeks.ru'), 'бот: список содержит карточки со ссылками');
+check(mb_strlen($botList['text'], 'UTF-8') <= WEBINARS_BOT_MAX, 'бот: ответ в пределах лимита Telegram');
+// К этому месту тест уже добавил одну карточку сверх снимка, поэтому
+// сравниваем с фактическим числом, а не с 16.
+$botStatusText = webinarsBotAnswer('status')['text'];
+check(str_contains($botStatusText, 'Карточек в списке: ' . count(webinarsState()['events'])), 'бот: статус показывает число карточек', $botStatusText);
+foreach (['/menu', '/list', '/check', '/schedule', '/logs', '/status', '/help'] as $botCmd) {
+    check(str_contains(webinarsBotHelp(), $botCmd), 'бот: справка упоминает ' . $botCmd);
+}
+
+webinarsMonitorToggle(false);
+check(str_contains(webinarsBotAnswer('schedule_on')['text'], 'включено') && webinarsMonitorEnabled(), 'бот: /on включает расписание');
+check(str_contains(webinarsBotAnswer('schedule_off')['text'], 'приостановлено') && !webinarsMonitorEnabled(), 'бот: /off выключает расписание');
+
+$botFeed([
+    ['update_id' => 9001, 'message' => ['text' => '/menu', 'chat' => ['id' => (int) $botChat, 'type' => 'private']]],
+    ['update_id' => 9002, 'message' => ['text' => '/list', 'chat' => ['id' => (int) $botChat, 'type' => 'private']]],
+]);
+$botFirst = webinarsBotPoll();
+check(($botFirst['handled'] ?? 0) === 2 && count($botMessages()) === 2, 'бот: две команды дали два ответа');
+check(webinarsBotPoll()['handled'] === 0 && count($botMessages()) === 2, 'бот: повторный опрос не дублирует ответы');
+
+$botFeed([['update_id' => 9003, 'callback_query' => ['id' => 'cb-1', 'data' => 'logs', 'message' => ['chat' => ['id' => (int) $botChat, 'type' => 'private']]]]]);
+webinarsBotPoll();
+$botLast = $botMessages();
+check(str_contains((string) ($botLast[count($botLast) - 1]['text'] ?? ''), 'Логи проверки'), 'бот: кнопка «Логи» возвращает журнал');
+
+$botFeed([['update_id' => 9004, 'message' => ['text' => '/list', 'chat' => ['id' => 999999, 'type' => 'private']]]]);
+$botStranger = webinarsBotPoll();
+$botLast = $botMessages();
+$botStrangerText = (string) ($botLast[count($botLast) - 1]['text'] ?? '');
+check(($botStranger['ignored'] ?? 0) === 1 && str_contains($botStrangerText, 'только привязанному чату'), 'бот: чужой чат получает отказ без списка');
+check(!str_contains($botStrangerText, 'web-kodeks.ru'), 'бот: чужому чату карточки не отправляются');
+
+$botFeed([['update_id' => 9005, 'message' => ['text' => 'привет', 'chat' => ['id' => (int) $botChat, 'type' => 'private']]]]);
+webinarsBotPoll();
+$botLast = $botMessages();
+check(str_contains((string) ($botLast[count($botLast) - 1]['text'] ?? ''), '/menu — главное меню'), 'бот: свободный текст даёт подсказку по командам');
+webinarsTelegramForget();
+putenv('DOCGEN_WEBINARS_TELEGRAM_STUB');
+
 check(webinarsDueSlot(new DateTimeImmutable('2026-11-24 13:30:00', new DateTimeZone('Europe/Moscow'))) === '2026-11-24T13:30', 'слот 13:30 МСК срабатывает в свою минуту');
 check(webinarsDueSlot(new DateTimeImmutable('2026-11-24 13:31:00', new DateTimeZone('Europe/Moscow'))) === null, 'через минуту слот уже не активен');
 // 10:30 UTC — это 13:30 МСК, но webinarsDueSlot работает с МСК-временем процесса:

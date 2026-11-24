@@ -24,7 +24,14 @@ function webinarsMonitorTick(?DateTimeImmutable $now = null): array
     }
     $slot = webinarsDueSlot($now);
     if ($slot === null) {
-        return ['ok' => true, 'skipped' => 'no_slot', 'next' => webinarsNextSlot($now)];
+        // Между слотами планировщик всё равно полезен: он читает команды бота
+        // (меню, список, логи) раз в минуту. Ошибка Telegram не должна ронять тик.
+        try {
+            $bot = webinarsBotPoll($now);
+        } catch (Throwable $error) {
+            $bot = ['ok' => false, 'error' => mb_substr($error->getMessage(), 0, 200, 'UTF-8')];
+        }
+        return ['ok' => true, 'skipped' => 'no_slot', 'next' => webinarsNextSlot($now), 'bot' => $bot];
     }
     $state = webinarsState();
     if ((string) ($state['monitor']['last_slot'] ?? '') === $slot) {
@@ -46,7 +53,13 @@ function webinarsMonitorTick(?DateTimeImmutable $now = null): array
         $state['monitor'] = array_merge((array) ($state['monitor'] ?? []), ['last_slot' => $slot, 'started_at' => webinarsStamp($now)]);
         webinarsWriteState($state);
         $result = webinarsCheckNow(['mode' => 'chain']);
-        return ['ok' => true, 'slot' => $slot] + $result;
+        // После слотовой проверки сразу отвечаем на команды, пришедшие в чат.
+        try {
+            $bot = webinarsBotPoll($now);
+        } catch (Throwable $error) {
+            $bot = ['ok' => false, 'error' => mb_substr($error->getMessage(), 0, 200, 'UTF-8')];
+        }
+        return ['ok' => true, 'slot' => $slot] + $result + ['bot' => $bot];
     } finally {
         flock($lock, LOCK_UN);
         fclose($lock);

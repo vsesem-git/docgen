@@ -119,12 +119,31 @@ function webinarsTelegramStub(string $method, array $payload): mixed
             if (isset($payload['limit'])) {
                 $updates = array_slice($updates, 0, (int) $payload['limit']);
             }
-            return array_map(static fn(array $u): array => ['update_id' => (int) $u['update_id'], 'message' => $u['message']], $updates);
+            // Возвращаем обновление целиком: бот принимает и message, и callback_query.
+            return array_map(static function (array $u): array {
+                $out = ['update_id' => (int) $u['update_id']];
+                foreach (['message', 'callback_query'] as $kind) {
+                    if (isset($u[$kind]) && is_array($u[$kind])) {
+                        $out[$kind] = $u[$kind];
+                    }
+                }
+                return $out;
+            }, $updates);
         case 'sendMessage':
             $state['sent'] = (int) ($state['sent'] ?? 0) + 1;
             $state['last_chat'] = (string) ($payload['chat_id'] ?? '');
+            // Журнал ответов бота: по нему автономные проверки видят, что бот отправил.
+            $state['messages'] = array_slice(array_merge((array) ($state['messages'] ?? []), [[
+                'chat_id' => (string) ($payload['chat_id'] ?? ''),
+                'text' => (string) ($payload['text'] ?? ''),
+                'keyboard' => (array) ($payload['reply_markup']['inline_keyboard'] ?? []),
+            ]]), -40);
             docgenWriteJson($file, $state);
             return ['message_id' => $state['sent']];
+        case 'answerCallbackQuery':
+            $state['callbacks'] = array_slice(array_merge((array) ($state['callbacks'] ?? []), [(string) ($payload['callback_query_id'] ?? '')]), -40);
+            docgenWriteJson($file, $state);
+            return true;
         case 'setWebhook':
             return true;
     }

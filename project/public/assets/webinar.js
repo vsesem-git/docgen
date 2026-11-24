@@ -23,6 +23,7 @@ const el = {};
   'editorial-feedback', 'editorial-save', 'editorial-clear', 'ed-file_title', 'ed-benefit',
   'ed-audience', 'ed-with_whom', 'ed-intro_suffix', 'ed-topics', 'monitor-dialog', 'open-monitor',
   'monitor-state', 'monitor-last', 'monitor-next', 'monitor-note', 'monitor-times', 'monitor-telegram',
+  'bot-menu', 'bot-poll',
   'monitor-toggle', 'monitor-check-now', 'monitor-feedback', 'telegram-form', 'telegram-token',
   'telegram-connect', 'telegram-test', 'telegram-disconnect', 'telegram-env-note', 'pair-box',
   'pair-bot', 'pair-code', 'pair-remaining', 'layout-dialog', 'open-layout', 'layout-name',
@@ -667,6 +668,10 @@ function renderMonitorControls() {
   el['telegram-form'].hidden = Boolean(opt?.env);
   el['telegram-test'].hidden = !opt?.configured;
   el['telegram-test'].disabled = locked || busy;
+  el['bot-menu'].hidden = !opt?.configured;
+  el['bot-menu'].disabled = locked || busy;
+  el['bot-poll'].hidden = !opt?.configured;
+  el['bot-poll'].disabled = locked || busy;
   el['telegram-disconnect'].hidden = !opt?.configured || Boolean(opt?.env);
   el['telegram-disconnect'].disabled = locked || busy;
 }
@@ -888,6 +893,8 @@ el['telegram-form'].addEventListener('submit', event => {
   if (token) startTelegramPair(token);
 });
 el['telegram-test'].addEventListener('click', () => monitorAction('telegram_test', {}, 'Тестовое сообщение отправлено.'));
+el['bot-menu'].addEventListener('click', () => monitorAction('bot_menu', {}, 'Меню отправлено в чат.'));
+el['bot-poll'].addEventListener('click', () => monitorAction('bot_poll', {}, 'Команды из чата обработаны.'));
 el['telegram-disconnect'].addEventListener('click', () => {
   if (window.confirm('Отвязать этот чат? История вебинаров останется.')) monitorAction('telegram_disconnect', {}, 'Чат отвязан.');
 });

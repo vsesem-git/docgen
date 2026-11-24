@@ -43,6 +43,7 @@ require __DIR__ . '/webinars/docx.php';
 require __DIR__ . '/webinars/store.php';
 require __DIR__ . '/webinars/telegram.php';
 require __DIR__ . '/webinars/monitor.php';
+require __DIR__ . '/webinars/bot.php';
 
 $webinarsAction = (string) ($_GET['action'] ?? '');
 // Вход и выход обрабатывает общий код docgen; после входа возвращаемся сюда.
@@ -250,7 +251,7 @@ $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
 // ---------------------------------------------------------------------------
 
 if ($webinarsAction !== '' && $webinarsAction !== 'login' && $webinarsAction !== 'logout' && $webinarsAction !== 'page') {
-    $postActions = ['scan', 'export', 'editorial_save', 'layout_upload', 'layout_reset', 'monitor_schedule', 'monitor_check', 'telegram_pair', 'telegram_pair_check', 'telegram_test', 'telegram_disconnect'];
+    $postActions = ['scan', 'export', 'editorial_save', 'layout_upload', 'layout_reset', 'monitor_schedule', 'monitor_check', 'telegram_pair', 'telegram_pair_check', 'telegram_test', 'telegram_disconnect', 'bot_poll', 'bot_menu'];
     $getActions = ['catalog', 'detail', 'scan_status', 'progress', 'editorial', 'layout', 'monitor', 'telegram_status', 'bundle', 'saved'];
     if (in_array($webinarsAction, $postActions, true) && $method !== 'POST') {
         webinarsJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -435,6 +436,30 @@ if ($webinarsAction !== '' && $webinarsAction !== 'login' && $webinarsAction !==
                     'message' => $check['message'],
                     'monitor' => $check['state'] === 'done' ? webinarsMonitorStatus() : null,
                 ]);
+
+            case 'bot_poll':
+                // Прочитать команды из чата прямо сейчас, не дожидаясь тика.
+                try {
+                    $poll = webinarsBotPoll();
+                } catch (WebinarsTelegramError $error) {
+                    webinarsJson(['ok' => false, 'error' => $error->getMessage()], 400);
+                }
+                webinarsJson(['ok' => true, 'poll' => $poll, 'notice' => 'Команды из чата обработаны.']);
+            case 'bot_menu':
+                // Отправить меню в привязанный чат: удобно проверить бота из панели.
+                $config = webinarsTelegramConfig();
+                if ($config === null) {
+                    webinarsJson(['ok' => false, 'error' => 'Сначала привяжите бота к личному чату.'], 409);
+                }
+                $menu = webinarsBotMenu();
+                $payload = [
+                    'chat_id' => $config['chat_id'],
+                    'text' => $menu['text'],
+                    'disable_web_page_preview' => true,
+                    'reply_markup' => ['inline_keyboard' => $menu['keyboard']],
+                ];
+                webinarsTelegramCall($config['token'], 'sendMessage', $payload);
+                webinarsJson(['ok' => true, 'notice' => 'Меню отправлено в привязанный чат.']);
 
             case 'telegram_test':
                 $config = webinarsTelegramConfig();
@@ -674,9 +699,12 @@ header('Content-Type: text/html; charset=utf-8');
       </div>
       <p class="control-feedback" id="monitor-feedback" role="status" hidden></p>
       <div class="control-actions telegram-actions">
+        <button type="button" id="bot-menu" class="button button-outline" hidden>Отправить меню в чат</button>
+        <button type="button" id="bot-poll" class="button button-outline" hidden>Прочитать команды</button>
         <button type="button" id="telegram-test" class="button button-outline" hidden>Отправить тест</button>
         <button type="button" id="telegram-disconnect" class="button button-quiet" hidden>Отвязать бота</button>
       </div>
+      <p class="help-note">В чате бота: <code>/menu</code> — меню с кнопками, <code>/list</code> — текущие вебинары, <code>/logs</code> — журнал проверок, <code>/check</code> — проверить сайт сейчас, <code>/schedule</code> — расписание, <code>/status</code> — состояние, <code>/help</code> — все команды. Бот отвечает только привязанному чату; команды читает служба раз в минуту.</p>
     </section>
   </div>
   <div class="dialog-footer align-right"><form method="dialog"><button type="submit" class="button button-outline">Закрыть</button></form></div>
