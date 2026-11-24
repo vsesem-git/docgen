@@ -70,7 +70,13 @@ function batchItems(id){return items.filter(item=>id==='legacy'?!item.batchId:it
 function render(){
   $('batches').innerHTML = batches.length ? batches.map(batch=>{
     const rows=batchItems(batch.id);
-    const list=rows.map(item=>`<div class="item"><div class="meta"><b>${esc(item.recipientName||item.recordId||'Адресат')}</b>${pill(item.status)}<span class="muted">${esc(item.to||'получатель не указан')}</span><span class="muted">${esc(item.subject||'')}</span><a href="?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&inline=1" target="_blank" rel="noopener">PDF</a><a href="index.php?review=${encodeURIComponent(item.id)}">Открыть для проверки</a></div>${item.lastError?`<div class="error">${esc(item.lastError)}</div>`:''}</div>`).join('');
+    const list=rows.map(item=>{
+      const hasHtml=String(item.bodyHtml||'').trim()!=='';
+      const noText=hasHtml&&String(item.body||'').trim()==='';
+      const design=hasHtml?`<a href="?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&design=1&inline=1" target="_blank" rel="noopener">HTML-дизайн</a>`:'';
+      const textWarn=noText?`<span class="pill failed">нет текстовой версии — отправка заблокирована</span>`:(hasHtml?`<span class="pill">HTML + текст</span>`:'');
+      return `<div class="item"><div class="meta"><b>${esc(item.recipientName||item.recordId||'Адресат')}</b>${pill(item.status)}<span class="muted">${esc(item.to||'получатель не указан')}</span><span class="muted">${esc(item.subject||'')}</span>${textWarn}<a href="?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&inline=1" target="_blank" rel="noopener">PDF</a>${design}<a href="index.php?review=${encodeURIComponent(item.id)}">Открыть для проверки</a></div>${item.lastError?`<div class="error">${esc(item.lastError)}</div>`:''}</div>`;
+    }).join('');
     const canCancel=['manual','scheduled','sending','paused'].includes(batch.status);
     const canPause=['manual','scheduled'].includes(batch.status);
     const index=batches.indexOf(batch);

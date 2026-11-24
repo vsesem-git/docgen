@@ -31,6 +31,7 @@ define('DOCGEN_DEMO_OVERRIDES_FILE', DOCGEN_STORAGE_DIR . '/demo_overrides.json'
 define('DOCGEN_DADATA_API_URL', 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party');
 define('DOCGEN_DADATA_BATCH_SIZE', 20);
 define('DOCGEN_TEMPLATE_INDEX', DOCGEN_TEMPLATES_DIR . '/index.json');
+define('DOCGEN_TEMPLATE_LETTERS_FILE', DOCGEN_TEMPLATES_DIR . '/letters.json');
 define('DOCGEN_DOWNLOAD_TTL_SECONDS', 86400);
 define('DOCGEN_MAX_HTML_TEMPLATE_BYTES', 1_000_000);
 // Only the interactive "Check SMTP" probe is time-boxed. Actual mail delivery
@@ -39,8 +40,15 @@ define('DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS', 8);
 
 function docgenEnsureDir(string $directory, int $mode = 0700): void
 {
-    if (!is_dir($directory) && !mkdir($directory, $mode, true) && !is_dir($directory)) {
-        throw new RuntimeException('Не удалось создать приватную папку хранения.');
+    if (!is_dir($directory)) {
+        // Host mounts (PHP-wasm) can report mkdir()=false for a directory they
+        // just created, and keep the failed stat cached. Re-check after the
+        // cache is cleared instead of treating mkdir()'s return as the truth.
+        @mkdir($directory, $mode, true);
+        clearstatcache(true, $directory);
+        if (!is_dir($directory)) {
+            throw new RuntimeException('Не удалось создать приватную папку хранения: ' . $directory);
+        }
     }
     @chmod($directory, $mode);
 }
@@ -548,10 +556,28 @@ function docgenSmtpWriteAccount(array $account, string $password, bool $clearPas
 }
 
 /**
- * Global letter layout shared by all DOCX/HTML templates. Patterns use the same
- * {column} codes as the documents; the resulting letter is always editable in
- * the queue before a manual send.
+ * Letter layout per template: attachment name, recipients, subject and the
+ * letter text (plain text part + optional HTML design). The global file keeps
+ * the common defaults that other templates inherit until they save their own.
  */
+define('DOCGEN_LETTER_HTML_MAX_BYTES', 1_000_000);
+
+function docgenIsHtmlTemplateId(string $id): bool
+{
+    if ($id === 'sample-docx' || $id === '__upload__' || $id === '') {
+        return false;
+    }
+    if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+        return false;
+    }
+    foreach (docgenUserTemplateIndex() as $template) {
+        if ($template['id'] === $id) {
+            return $template['type'] === 'html';
+        }
+    }
+    return false;
+}
+
 function docgenLetterTemplateDefaults(): array
 {
     $legacy = docgenSmtpAccount(docgenSmtpAccountStore()['defaultId']);
@@ -561,15 +587,260 @@ function docgenLetterTemplateDefaults(): array
         'ccPattern' => '{Доп./старые email}',
         'subjectPattern' => (string) ($legacy['subjectTemplate'] ?? 'Документ'),
         'bodyPattern' => (string) ($legacy['bodyTemplate'] ?? "Добрый день.\n\nНаправляем документ во вложении."),
+        'htmlPattern' => '',
+        'htmlTextPattern' => '',
         'smtpAccountId' => 'default',
     ];
 }
 
+/** Global common letter defaults (config/letter-template.json). */
 function docgenLetterTemplate(): array
 {
     return array_merge(docgenLetterTemplateDefaults(), docgenReadJson(DOCGEN_LETTER_TEMPLATE_FILE, []));
 }
 
+/**
+ * One template's own letter settings. A saved copy wins; otherwise the common
+ * defaults apply — also for the built-in sample and one-off uploads.
+ * The letter text may live in any of bodyPattern / htmlTextPattern / htmlPattern.
+ */
+function docgenTemplateLetterSettings(string $templateId): array
+{
+    $stored = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    $own = preg_match('/^[a-f0-9]{32}$/', $templateId) === 1 ? ($stored[$templateId] ?? null) : null;
+    $settings = is_array($own)
+        ? array_merge(docgenLetterTemplateDefaults(), $own)
+        : docgenLetterTemplate();
+    $settings['templateId'] = $templateId;
+    $settings['own'] = is_array($own);
+    return $settings;
+}
+
+function docgenSaveTemplateLetterSettings(string $templateId, array $fields, string $accountId): void
+{
+    if ($templateId === '') {
+        // No saved template yet: only the global default can keep these values.
+        docgenWriteJson(DOCGEN_LETTER_TEMPLATE_FILE, array_merge(docgenLetterTemplateDefaults(), $fields, ['smtpAccountId' => $accountId]));
+        return;
+    }
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    $store[$templateId] = array_merge($fields, [
+        'smtpAccountId' => $accountId,
+        'updatedAt' => date(DATE_ATOM),
+    ]);
+    docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+}
+
+function docgenCleanupTemplateLetters(string $templateId): void
+{
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    if (isset($store[$templateId]) && is_array($store[$templateId])) {
+        unset($store[$templateId]);
+        docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+    }
+}
+
+/**
+ * Strip executable and remote-fetching content. Hyperlinks stay clickable for
+ * email bodies (buttons are the point of a design); the print path keeps the
+ * stricter document rules that the PDF converter always used.
+ */
+function docgenNormalizeLetterHtml(string $html, bool $forPrint): string
+{
+    // Inbox preheaders are hidden inline; drop the block so the screen preview
+    // starts at the visible headline instead of a blank strip.
+    $html = preg_replace('#<div\b[^>]*\bclass\s*=\s*("[^"]*\bpreheader\b[^"]*"|\'[^\']*\bpreheader\b[^\']*\')[^>]*>.*?<\s*/\s*div\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(script|iframe|object|embed|form|applet|base)\b[^>]*>.*?<\s*/\s*\1\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(script|iframe|object|embed|form|applet|base)\b[^>]*/?>#isu', '', $html) ?? $html;
+    $html = preg_replace('/\s+on[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)/iu', '', $html) ?? $html;
+    // Images and other embedded content are never fetched from the network.
+    $html = preg_replace('/\s+(src|poster|background|data)\s*=\s*("|\')\s*(?:https?:|file:|data:|javascript:|\/\/)[^"\']*\2/iu', '', $html) ?? $html;
+    $html = preg_replace('/@import\s+(?:url\()?[^;]+;?/iu', '', $html) ?? $html;
+    $html = preg_replace('/url\(\s*("|\')?\s*(?:https?:|file:|data:|javascript:|\/\/)[^)]*\)/iu', 'none', $html) ?? $html;
+    if ($forPrint) {
+        // PDF documents never need remote navigation; email designs keep buttons.
+        $html = preg_replace('/\s+(href)\s*=\s*("|\')\s*(?:https?:|file:|data:|javascript:|\/\/)[^"\']*\2/iu', '', $html) ?? $html;
+        if (!preg_match('/@page\b/i', $html)) {
+            $css = '<style>@page{size:A4;margin:22mm 20mm}body{font-family:"Liberation Serif","Times New Roman",serif;font-size:12pt;line-height:1.45;color:#111}</style>';
+            $html = preg_match('/<head\b[^>]*>/i', $html)
+                ? (preg_replace('/<head\b[^>]*>/i', '$0' . $css, $html, 1) ?? $html)
+                : $css . $html;
+        }
+        if (!preg_match('/<html\b/i', $html)) {
+            $html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Документ</title></head><body>' . $html . '</body></html>';
+        } elseif (!preg_match('/<meta\s+charset=/i', $html)) {
+            $html = preg_replace('/<head\b[^>]*>/i', '$0<meta charset="utf-8">', $html, 1) ?? $html;
+        }
+    } else {
+        // Email links may point outside; local/script schemes are unsafe.
+        $html = preg_replace('/\s+(href)\s*=\s*("|\')\s*(?:file:|data:|javascript:)[^"\']*\2/iu', '', $html) ?? $html;
+    }
+    return $html;
+}
+
+/** Preview page for the design: email layout with links kept, no page rules. */
+function docgenLetterHtmlPreview(string $html): string
+{
+    $html = docgenNormalizeLetterHtml($html, false);
+    // A fragment opens in a browser tab too, so it needs its own charset.
+    if (stripos($html, '<meta charset') === false && preg_match('/<head\b[^>]*>/i', $html)) {
+        $html = preg_replace('/<head\b[^>]*>/i', '$0<meta charset="utf-8">', $html, 1) ?? $html;
+    } elseif (stripos($html, '<html') === false) {
+        $html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>HTML-дизайн письма</title></head><body>' . $html . '</body></html>';
+    }
+    return $html;
+}
+
+/**
+ * Hand-written plain text becomes email markup: escaped text, {nl} and real
+ * line breaks, links clickable. URLs stop at braces and quotes so a following
+ * code such as {nl} or {Регион} is never swallowed into the link.
+ */
+function docgenLetterPlainToHtml(string $text): string
+{
+    $escaped = htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $escaped = preg_replace_callback(
+        '/(?<![">=(])(?:https?:\/\/|www\.)[^\s<>"\'{}]+/iu',
+        static function (array $match): string {
+            $url = rtrim($match[0], '.,;:!?)]');
+            $tail = substr($match[0], strlen($url));
+            return '<a href="' . $url . '">' . $url . '</a>' . $tail;
+        },
+        $escaped
+    ) ?? $escaped;
+    $escaped = str_ireplace('{nl}', '<br>', $escaped);
+    $escaped = str_replace(["\r\n", "\r"], "\n", $escaped);
+    return nl2br($escaped, false);
+}
+
+/**
+ * Parts of the outgoing letter. The text part is mandatory whenever a design
+ * is present: mail servers and clients must get multipart/alternative, not an
+ * HTML-only message. Errors are phrased for the operator, not for developers.
+ */
+function docgenLetterMailParts(array $item): array
+{
+    $text = trim((string) ($item['body'] ?? ''));
+    $html = trim((string) ($item['bodyHtml'] ?? ''));
+    if ($text === '' && $html === '') {
+        throw new RuntimeException('Письмо пустое: нет ни текстовой версии, ни HTML-дизайна.');
+    }
+    if ($html !== '' && $text === '') {
+        throw new RuntimeException('Нет текстовой версии письма. Письмо с HTML-дизайном отправляется как multipart/alternative, поэтому заполните «Текстовую версию» в карточке письма.');
+    }
+    return ['text' => $text, 'html' => $html];
+}
+
+/** Readable text from letter markup, used as the plain alternative. */
+function docgenLetterHtmlToText(string $html): string
+{
+    $html = preg_replace('#<div\b[^>]*\bclass\s*=\s*("[^"]*\bpreheader\b[^"]*"|\'[^\']*\bpreheader\b[^\']*\')[^>]*>.*?<\s*/\s*div\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(style|head|title)\b[^>]*>.*?<\s*/\s*\1\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*br\b[^>]*>#iu', "\n", $html) ?? $html;
+    $html = preg_replace('#<\s*/\s*(p|div|li|h[1-6]|tr|blockquote|td|th)\s*>#iu', "\n\n", $html) ?? $html;
+    $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = str_replace("\u{00A0}", ' ', $text);
+    $text = preg_replace('/[ \t]+/u', ' ', $text) ?? $text;
+    $text = preg_replace('/ *\n */u', "\n", $text) ?? $text;
+    $text = preg_replace('/\n{3,}/u', "\n\n", $text) ?? $text;
+    return trim($text);
+}
+
+/**
+ * Plain-text part of multipart/alternative. Order: the letter text, its own
+ * text variant, text derived from the design, and finally the common default.
+ */
+function docgenLetterTextAlternative(array $settings): string
+{
+    foreach (['bodyPattern', 'htmlTextPattern'] as $key) {
+        $value = trim((string) ($settings[$key] ?? ''));
+        if ($value !== '') {
+            return str_ireplace('{nl}', "\n", $value);
+        }
+    }
+    $derived = docgenLetterHtmlToText((string) ($settings['htmlPattern'] ?? ''));
+    if ($derived !== '') {
+        return $derived;
+    }
+    return trim((string) docgenLetterTemplateDefaults()['bodyPattern']);
+}
+
+/**
+ * Columns of the active book plus supported letter codes. Design validation
+ * uses them so {Регион} or {Фамилия И.О.} are recognised before generation.
+ */
+function docgenLetterKnownCodes(): array
+{
+    static $known = null;
+    if (is_array($known)) {
+        return $known;
+    }
+    $known = ['Наименование файла' => true, 'наименование файла' => true];
+    foreach (loadDataset()['records'] ?? [] as $record) {
+        if (is_array($record) && is_array($record['fields'] ?? null)) {
+            foreach (array_keys($record['fields']) as $field) {
+                $known[(string) $field] = true;
+            }
+            break;
+        }
+    }
+    foreach (docgenTableData()['columns'] ?? [] as $column) {
+        $known[(string) $column] = true;
+    }
+    return $known;
+}
+
+/**
+ * The design must reach the queue as a valid, self-contained email: unknown
+ * {codes} would otherwise be sent literally. Errors name the codes instead of
+ * guessing values. With $allowKnownCodes the book's own columns are accepted,
+ * so the design can be saved before records are picked.
+ */
+function docgenValidateLetterHtml(string $html, array $values, bool $allowKnownCodes = false): void
+{
+    if (trim($html) === '') {
+        throw new RuntimeException('HTML-дизайн письма пуст.');
+    }
+    if (strlen($html) > DOCGEN_LETTER_HTML_MAX_BYTES) {
+        throw new RuntimeException('HTML-дизайн письма больше 1 МБ.');
+    }
+    if (preg_match_all('/(?<!\{)\{([^{}:\n;]{1,120})\}(?!\})/u', $html, $matches)) {
+        $known = $allowKnownCodes ? docgenLetterKnownCodes() : [];
+        $unknown = [];
+        foreach (array_unique($matches[1]) as $field) {
+            $field = trim($field);
+            // Word style GUIDs and double-brace mail placeholders are not codes.
+            if ($field === '' || preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-/i', $field) === 1) {
+                continue;
+            }
+            if (!array_key_exists($field, $values) && !isset($known[$field])) {
+                $unknown[] = '{' . $field . '}';
+            }
+        }
+        if ($unknown) {
+            throw new RuntimeException('В HTML-дизайне письма остались незаполненные коды: ' . implode(', ', array_slice($unknown, 0, 8)) . '. Добавьте колонку в книгу или замените код текстом.');
+        }
+    }
+    if (docgenLetterHtmlToText($html) === '' && preg_match('/<img\b/i', $html) !== 1) {
+        throw new RuntimeException('В HTML-дизайне письма нет видимого текста — получатель увидит пустое письмо.');
+    }
+}
+
+/** Remaining {{UnsubscribeUrl}}-style placeholders of an external mail service. */
+function docgenLetterHtmlLeftoverPlaceholders(string $html): array
+{
+    if (!preg_match_all('/\{\{\s*([^{}\n]{1,80})\s*\}\}/u', $html, $matches)) {
+        return [];
+    }
+    return array_values(array_unique(array_map('trim', $matches[1])));
+}
+
+/**
+ * Save the letter layout: as this template's own copy (or the common defaults
+ * when only the sample/upload is selected). The HTML design is optional; when
+ * present it becomes the body and the text part is always kept for
+ * multipart/alternative.
+ */
 function docgenSaveLetterTemplate(): never
 {
     $fields = [
@@ -578,12 +849,47 @@ function docgenSaveLetterTemplate(): never
         'ccPattern' => trim((string) ($_POST['ccPattern'] ?? '')),
         'subjectPattern' => trim((string) ($_POST['subjectPattern'] ?? '')),
         'bodyPattern' => (string) ($_POST['bodyPattern'] ?? ''),
+        'htmlPattern' => (string) ($_POST['htmlPattern'] ?? ''),
+        'htmlTextPattern' => (string) ($_POST['htmlTextPattern'] ?? ''),
     ];
-    $limits = ['filenamePattern' => 300, 'toPattern' => 1000, 'ccPattern' => 1000, 'subjectPattern' => 500, 'bodyPattern' => 20_000];
-    $labels = ['filenamePattern' => 'имя вложенного файла', 'toPattern' => 'Кому', 'ccPattern' => 'копия', 'subjectPattern' => 'тема письма', 'bodyPattern' => 'текст письма'];
+    $limits = ['filenamePattern' => 300, 'toPattern' => 1000, 'ccPattern' => 1000, 'subjectPattern' => 500, 'bodyPattern' => 20_000, 'htmlPattern' => DOCGEN_LETTER_HTML_MAX_BYTES, 'htmlTextPattern' => 20_000];
+    $labels = ['filenamePattern' => 'имя вложенного файла', 'toPattern' => 'Кому', 'ccPattern' => 'копия', 'subjectPattern' => 'тема письма', 'bodyPattern' => 'текст письма', 'htmlPattern' => 'HTML-дизайн письма', 'htmlTextPattern' => 'текстовая версия'];
     foreach ($limits as $key => $limit) {
         if (mb_strlen($fields[$key], 'UTF-8') > $limit) {
             sendJson(['ok' => false, 'error' => 'Слишком длинное поле: ' . $labels[$key] . '.'], 422);
+        }
+    }
+    if (trim($fields['bodyPattern']) === '' && trim($fields['htmlTextPattern']) === '' && trim($fields['htmlPattern']) === '') {
+        sendJson(['ok' => false, 'error' => 'Письмо не может быть пустым: заполните текст письма, текстовую версию или HTML-дизайн.'], 422);
+    }
+    if ($fields['subjectPattern'] === '') {
+        sendJson(['ok' => false, 'error' => 'Укажите тему письма.'], 422);
+    }
+    $notice = '';
+    if (trim($fields['htmlPattern']) !== '') {
+        try {
+            docgenValidateLetterHtml($fields['htmlPattern'], [], true);
+        } catch (Throwable $e) {
+            sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+        $leftover = docgenLetterHtmlLeftoverPlaceholders($fields['htmlPattern']);
+        if ($leftover) {
+            $notice = 'В дизайне остались подстановки рассылки {{' . implode('}}, {{', array_slice($leftover, 0, 4)) . '}}. Для SMTP-отправки замените их настоящей ссылкой или удалите.';
+        } elseif (trim($fields['bodyPattern']) === '' && trim($fields['htmlTextPattern']) === '') {
+            $notice = 'Текстовая версия не заполнена: для multipart/alternative она будет собрана из HTML. Проверьте её в карточке письма — письма без текстовой версии нельзя отправить автоматически.';
+        }
+    }
+    $templateId = trim((string) ($_POST['templateId'] ?? ''));
+    if ($templateId !== '') {
+        $known = false;
+        foreach (docgenUserTemplateIndex() as $template) {
+            if ($template['id'] === $templateId) {
+                $known = true;
+                break;
+            }
+        }
+        if (!$known) {
+            sendJson(['ok' => false, 'error' => 'Шаблон не найден. Обновите список и повторите сохранение.'], 404);
         }
     }
     $accountId = trim((string) ($_POST['smtpAccountId'] ?? ''));
@@ -594,13 +900,20 @@ function docgenSaveLetterTemplate(): never
     if (!in_array($accountId, array_column($store['accounts'], 'id'), true)) {
         sendJson(['ok' => false, 'error' => 'Выберите существующий SMTP-ящик отправителя.'], 422);
     }
-    $settings = array_merge(docgenLetterTemplateDefaults(), $fields, ['smtpAccountId' => $accountId]);
     try {
-        docgenWriteJson(DOCGEN_LETTER_TEMPLATE_FILE, $settings);
+        docgenSaveTemplateLetterSettings($templateId, $fields, $accountId);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
     }
-    sendJson(['ok' => true, 'settings' => $settings, 'accountId' => $accountId]);
+    $settings = docgenTemplateLetterSettings($templateId);
+    sendJson([
+        'ok' => true,
+        'settings' => $settings,
+        'accountId' => $settings['smtpAccountId'],
+        'templateId' => $templateId,
+        'own' => $settings['own'],
+        'notice' => $notice,
+    ]);
 }
 
 function docgenDadataSecret(): array
@@ -821,6 +1134,7 @@ function docgenBackupFileMap(bool $includeSecrets): array
     }
     $index = is_file(DOCGEN_TEMPLATE_INDEX) ? docgenReadJson(DOCGEN_TEMPLATE_INDEX, []) : [];
     $files['templates/index.json'] = ['path' => DOCGEN_TEMPLATE_INDEX, 'label' => 'Список шаблонов', 'secret' => false];
+    $files['templates/letters.json'] = ['path' => DOCGEN_TEMPLATE_LETTERS_FILE, 'label' => 'Письма шаблонов (HTML-дизайн)', 'secret' => false];
     foreach (is_array($index) ? $index : [] as $item) {
         if (!is_array($item)) {
             continue;
@@ -1765,6 +2079,15 @@ function docgenReviewBatch(): never
         if ($broken > 0) {
             sendJson(['ok' => false, 'error' => 'В ' . $broken . ' письмах нет получателя или PDF. Исправьте их перед автоотправкой.'], 422);
         }
+        $missingText = 0;
+        foreach ($items as $item) {
+            if (trim((string) ($item['bodyHtml'] ?? '')) !== '' && trim((string) ($item['body'] ?? '')) === '') {
+                $missingText++;
+            }
+        }
+        if ($missingText > 0) {
+            sendJson(['ok' => false, 'error' => 'В ' . $missingText . ' письмах с HTML-дизайном нет текстовой версии. Без неё письмо нельзя отправить как multipart/alternative — заполните текст в карточке письма.'], 422);
+        }
     }
     $batch['status'] = $mode === 'auto' ? 'scheduled' : 'manual';
     $batch['mode'] = $mode;
@@ -2017,12 +2340,30 @@ function docgenQueueFile(): never
     if (!preg_match('/^[a-f0-9]{32}$/', $id) || !in_array($format, ['pdf', 'docx'], true)) {
         sendJson(['ok' => false, 'error' => 'Параметры файла очереди некорректны.'], 400);
     }
-    $meta = docgenReadQueueItem($id);
+    try {
+        $meta = docgenReadQueueItem($id);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 404);
+    }
+    if ($format === 'pdf' && (string) ($_GET['design'] ?? '') === '1') {
+        // The letter design preview is an HTML page, not the PDF attachment:
+        // it must open even when this letter has no PDF (for example, when the
+        // document conversion failed but the design is being checked).
+        if (trim((string) ($meta['bodyHtml'] ?? '')) === '') {
+            sendJson(['ok' => false, 'error' => 'У этого письма нет HTML-дизайна.'], 404);
+        }
+        header('Content-Type: text/html; charset=utf-8');
+        header('Content-Disposition: inline; filename="design.html"');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        echo docgenLetterHtmlPreview((string) $meta['bodyHtml']);
+        exit;
+    }
     $path = docgenQueuePath($id) . '/document.' . $format;
     if (!is_file($path)) {
         sendJson(['ok' => false, 'error' => 'Файл документа не найден.'], 404);
     }
-    $inline = $format === 'pdf' && (string) ($_GET['inline'] ?? '') === '1';
+    $inline = (string) ($_GET['inline'] ?? '') === '1';
     $mime = $format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     $name = safeFilename((string) ($meta['filename'] ?? 'document')) . '.' . $format;
     header('Content-Type: ' . $mime);
@@ -2286,7 +2627,32 @@ function docgenGenerate(): never
     $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
     $store = docgenSmtpAccountStore();
     $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
-    $letter = docgenLetterTemplate();
+    // One template = document + its own letter layout (HTML design, recipients,
+    // name, subject, text). Templates without a saved copy use common defaults.
+    $letterTemplateId = (string) ($template['id'] ?? '');
+    if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
+        $letterTemplateId = '';
+    }
+    $letter = docgenTemplateLetterSettings($letterTemplateId);
+    // A one-off DOCX has no saved template yet: the design typed in this window
+    // must still reach its letters instead of being silently replaced.
+    if ($letterTemplateId === '' && (string) ($template['id'] ?? '') === '__upload__') {
+        $draft = json_decode((string) ($_POST['letterDraft'] ?? ''), true);
+        if (is_array($draft)) {
+            $fields = [];
+            foreach (['filenamePattern', 'toPattern', 'ccPattern', 'subjectPattern', 'bodyPattern', 'htmlPattern', 'htmlTextPattern'] as $key) {
+                if (isset($draft[$key]) && is_scalar($draft[$key])) {
+                    $fields[$key] = (string) $draft[$key];
+                }
+            }
+            if ($fields) {
+                $letter = array_merge($letter, $fields, ['own' => false]);
+                if (trim((string) ($letter['subjectPattern'] ?? '')) === '') {
+                    $letter['subjectPattern'] = (string) docgenLetterTemplateDefaults()['subjectPattern'];
+                }
+            }
+        }
+    }
     $batchId = bin2hex(random_bytes(16));
     docgenEnsureDir(docgenBatchPath($batchId));
     $sourceNames = [];
@@ -2350,7 +2716,24 @@ function docgenGenerate(): never
                 $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
                 $cc = array_values(array_filter($cc, static fn(string $email): bool => !isset($toKeys[mb_strtolower($email, 'UTF-8')])));
                 $subject = docgenReplaceCodes((string) $letter['subjectPattern'], $emailValues);
-                $body = docgenReplaceCodes((string) $letter['bodyPattern'], $emailValues);
+                // Bodies for multipart/alternative: plain text first, then the
+                // HTML design (when set) as the rich alternative.
+                $body = docgenReplaceCodes(docgenLetterTextAlternative($letter), $emailValues);
+                $bodyHtml = '';
+                if (trim((string) ($letter['htmlPattern'] ?? '')) !== '') {
+                    $bodyHtml = docgenReplaceCodes((string) $letter['htmlPattern'], $emailValues);
+                    docgenValidateLetterHtml($bodyHtml, $emailValues);
+                    if (trim($body) === '') {
+                        $body = trim(docgenLetterHtmlToText($bodyHtml));
+                    }
+                }
+                if (trim($body) === '' && $bodyHtml === '') {
+                    throw new RuntimeException('Письмо пустое: заполните текст письма или HTML-дизайн.');
+                }
+                // A generated-only text part still works, but the operator must see it.
+                $htmlFallback = $bodyHtml !== ''
+                    && trim((string) ($letter['bodyPattern'] ?? '')) === ''
+                    && trim((string) ($letter['htmlTextPattern'] ?? '')) === '';
                 $meta = [
                     'id' => $queueId,
                     'batchId' => $batchId,
@@ -2368,6 +2751,10 @@ function docgenGenerate(): never
                     'sourceAdditionalEmails' => (string) ($fields['Доп./старые email'] ?? ''),
                     'subject' => trim(preg_replace('/[\r\n]+/u', ' ', $subject) ?? $subject),
                     'body' => $body,
+                    'bodyHtml' => $bodyHtml,
+                    'htmlFallback' => $htmlFallback,
+                    'templateId' => (string) ($template['id'] ?? ''),
+                    'letterTemplateId' => $letterTemplateId,
                     'hasDocx' => $hasDocx,
                     'status' => 'queued',
                     'lastError' => count($to) ? '' : 'В исходной записи не найден корректный основной email. Заполните получателя перед отправкой.',
@@ -2431,6 +2818,19 @@ function docgenGenerate(): never
             $errors[] = ['id' => '', 'region' => '', 'reason' => $e->getMessage()];
         }
     }
+    // Multipart/alternative: the text part is mandatory, so a generated-only
+    // fallback must be visible while the batch is reviewed.
+    $htmlFallbackCount = 0;
+    $htmlLettersCount = 0;
+    foreach (docgenQueueList() as $queuedLetter) {
+        if ((string) ($queuedLetter['batchId'] ?? '') !== $batchId || trim((string) ($queuedLetter['bodyHtml'] ?? '')) === '') {
+            continue;
+        }
+        $htmlLettersCount++;
+        if (!empty($queuedLetter['htmlFallback'])) {
+            $htmlFallbackCount++;
+        }
+    }
     cleanupTree($jobDir);
     $progress('done', $totalSteps, 'Готово: ' . $queueCreated . ' писем в очереди, ошибок/пропусков ' . count($errors) . '.');
     if ($progressToken !== '') {
@@ -2461,6 +2861,8 @@ function docgenGenerate(): never
         'documents' => $downloadedDocuments,
         'skipped' => count($errors),
         'details' => array_slice(array_map(static fn(array $item): string => ($item['region'] !== '' ? $item['region'] . ': ' : '') . ($item['id'] ?? '') . ' — ' . $item['reason'], $errors), 0, 12),
+        'htmlLetters' => $htmlLettersCount,
+        'htmlTextFallback' => $htmlFallbackCount,
         'queueUrl' => '#emailQueue',
     ]);
 }
@@ -2573,6 +2975,11 @@ function docgenDeleteTemplate(): never
         sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
     }
     @unlink($found['path']);
+    try {
+        docgenCleanupTemplateLetters($id);
+    } catch (Throwable $e) {
+        // A stale letter config is harmless; the template itself is gone.
+    }
     $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
     $raw = array_values(array_filter($raw, static fn($item): bool => !is_array($item) || (string) ($item['id'] ?? '') !== $id));
     docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
@@ -2929,10 +3336,18 @@ function docgenUpdateQueueItem(): never
     if (preg_match('/[\r\n]/u', $subject)) {
         sendJson(['ok' => false, 'error' => 'Тема письма не должна содержать переносы строк.'], 422);
     }
+    $hasHtml = trim((string) ($meta['bodyHtml'] ?? '')) !== '';
+    if ($hasHtml && trim($body) === '') {
+        sendJson(['ok' => false, 'error' => 'У письма с HTML-дизайном должна быть текстовая версия. Заполните поле «Текстовая версия».'], 422);
+    }
     $meta['to'] = $to;
     $meta['cc'] = $cc;
     $meta['subject'] = $subject;
     $meta['body'] = $body;
+    if ($hasHtml) {
+        // A hand-written text alternative is now the operator's own choice.
+        $meta['htmlFallback'] = false;
+    }
     $meta['lastError'] = '';
     docgenSaveQueueItem($meta);
     sendJson(['ok' => true, 'item' => $meta]);
@@ -2978,7 +3393,17 @@ function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, ar
             }
         }
         $mailer->Subject = trim((string) ($current['subject'] ?? ''));
-        $mailer->Body = (string) ($current['body'] ?? '');
+        $parts = docgenLetterMailParts($current);
+        if ($parts['html'] !== '') {
+            // Always multipart/alternative: a text part goes with every HTML letter.
+            $mailer->isHTML(true);
+            $mailer->Body = $parts['html'];
+            $mailer->AltBody = $parts['text'];
+        } else {
+            $mailer->isHTML(false);
+            $mailer->Body = $parts['text'];
+            $mailer->AltBody = '';
+        }
         $mailer->addAttachment($pdfPath, safeFilename((string) ($current['filename'] ?? 'Документ')) . '.pdf', 'base64', 'application/pdf');
         $mailer->send();
         $current['status'] = 'sent';
@@ -3356,8 +3781,21 @@ function docgenDispatch(string $action): void
         case 'smtp_settings':
             sendJson(docgenSmtpPublicPayload());
         case 'letter_template':
-            $letter = docgenLetterTemplate();
-            sendJson(['ok' => true, 'settings' => $letter, 'accountId' => $letter['smtpAccountId']]);
+            $letterTemplateId = trim((string) ($_GET['template_id'] ?? ''));
+            if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
+                $letterTemplateId = '';
+            }
+            if ($letterTemplateId !== '' && preg_match('/^[a-f0-9]{32}$/', $letterTemplateId) !== 1) {
+                sendJson(['ok' => false, 'error' => 'Некорректный идентификатор шаблона.'], 400);
+            }
+            $letter = docgenTemplateLetterSettings($letterTemplateId);
+            sendJson([
+                'ok' => true,
+                'settings' => $letter,
+                'accountId' => $letter['smtpAccountId'],
+                'templateId' => $letterTemplateId,
+                'htmlAvailable' => docgenIsHtmlTemplateId($letterTemplateId),
+            ]);
         case 'mailing_settings':
             sendJson(['ok' => true, 'settings' => docgenMailingSettings(), 'accounts' => docgenMailingAccounts()]);
         case 'save_mailing_settings':
