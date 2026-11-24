@@ -280,7 +280,7 @@ check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'ssl', 587), '
 check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'tls', 465), 'SSL/TLS') !== false, 'STARTTLS на 465 подсказывает SSL');
 check(strpos(docgenSmtpExplain('SMTP Error: Could not authenticate.', 'tls', 587), 'внешнего приложения') !== false, 'ошибка входа объяснена про пароль приложения');
 check(strpos(docgenSmtpExplain('certificate verify failed', 'tls', 587), 'сертификат') !== false, 'ошибка сертификата объяснена');
-check(strpos(docgenSmtpExplain('Connection timed out', 'tls', 587), 'не ответил') !== false, 'таймаут объяснён');
+check(strpos(docgenSmtpExplain('Connection timed out', 'tls', 587), 'молчит') !== false, 'таймаут объяснён как блокировка порта');
 $openTcp = [['step' => 'TCP', 'ok' => true, 'detail' => 'открыт']];
 check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'tls', 587, $openTcp), 'SMTP-диалог не начался') !== false, 'открытый порт без приветствия объяснён отдельно');
 $closedTcp = [['step' => 'TCP', 'ok' => false, 'detail' => 'закрыт']];
@@ -313,6 +313,13 @@ check(trim((string) $diagnostics['summary']) !== '', 'диагностика д�
 check(strpos((string) $diagnostics['transcript'], $smtpPassword) === false, 'в полном журнале нет пароля');
 check(array_key_exists('PHP', (array) $diagnostics['context']) && isset($diagnostics['context']['openssl']), 'в журнале есть окружение PHP/openssl');
 check(isset($diagnostics['elapsedMs']) && $diagnostics['elapsedMs'] >= 0, 'в журнале есть время попытки');
+check(is_array($diagnostics['ports']) && count($diagnostics['ports']) === 4, 'при сбое проверяются соседние порты', (string) count((array) ($diagnostics['ports'] ?? [])));
+$probedPorts = array_column((array) $diagnostics['ports'], 'port');
+check($probedPorts === [465, 587, 25, 2525], 'проверяются 465, 587, 25 и 2525', implode(',', $probedPorts));
+foreach ((array) $diagnostics['ports'] as $probe) {
+    check(isset($probe['ok'], $probe['detail'], $probe['encryption']), 'у пробы порта ' . $probe['port'] . ' есть итог и описание');
+}
+check(strpos(docgenSmtpExplain('SMTP ERROR: Failed to connect to server: Connection timed out (110)', 'ssl', 465), 'не ошибка пароля') !== false, 'таймаут 465 объяснён как блокировка порта, а не пароль');
 
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');

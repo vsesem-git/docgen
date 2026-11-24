@@ -1607,6 +1607,10 @@ body.modal-open{overflow:hidden}
     <div class="modal-main">
       <div class="smtp-log-summary"><div class="smtp-log-head"><span class="smtp-log-badge" id="smtpLogBadge">Проверка</span><strong id="smtpLogHeadline"></strong></div><p class="smtp-log-hint" id="smtpLogHint"></p></div>
       <ul class="smtp-log-steps" id="smtpLogSteps"></ul>
+      <div id="smtpLogPortsBox" hidden>
+        <div class="small-muted" style="margin:0 0 5px">Какие порты реально открываются из этого контейнера</div>
+        <ul class="smtp-log-steps" id="smtpLogPorts"></ul>
+      </div>
       <div class="small-muted" style="margin:0 0 5px">Полный диалог с сервером (пароль скрыт)</div>
       <pre class="smtp-log-transcript" id="smtpLogTranscript"></pre>
       <dl class="smtp-log-context" id="smtpLogContext"></dl>
@@ -3173,6 +3177,20 @@ function openSmtpLog(diagnostics) {
   $('smtpLogHint').textContent=ok?'Пароль и диалог с сервером скрыты. Сервер принял параметры авторизации.':'Ниже — сетевые шаги и полный диалог: по ним видно, на каком этапе всё остановилось.';
   const steps=Array.isArray(log.steps)?log.steps:[];
   $('smtpLogSteps').innerHTML=steps.length?steps.map(step=>`<li class="${step.ok?'good':'bad'}"><span class="step-name">${esc(step.step||'')}</span><span>${step.ok?'✓':'✕'} ${esc(step.detail||'')}</span></li>`).join(''):'<li><span class="step-name">Сеть</span><span>Сетевые шаги недоступны.</span></li>';
+  const ports=Array.isArray(log.ports)?log.ports:[];
+  const portsBox=$('smtpLogPortsBox');
+  portsBox.hidden=ports.length===0;
+  $('smtpLogPorts').innerHTML=ports.map(item=>{
+    const open=Boolean(item.ok);
+    const usable=open&&/приветствие/.test(String(item.detail||''));
+    return `<li class="${open?'good':'bad'}"><span class="step-name">${item.port}</span><span>${open?'✓ открыт':'✕ '+esc(String(item.detail||'').replace(/^\d+\s*—\s*/,''))}${open?': '+esc(item.detail):''}${usable?` · <button type="button" class="link-button" data-smtp-use="${item.port}" data-smtp-enc="${esc(item.encryption)}">применить ${item.port} + ${item.encryption==='tls'?'STARTTLS':(item.encryption==='ssl'?'SSL/TLS':'без шифрования')}</button>`:''}</span></li>`;
+  }).join('');
+  $('smtpLogPorts').querySelectorAll('[data-smtp-use]').forEach(button=>button.addEventListener('click',()=>{
+    $('smtpPort').value=button.dataset.smtpUse;
+    $('smtpEncryption').value=button.dataset.smtpEnc;
+    updateSmtpState();
+    $('smtpLogFeedback').textContent=`Порт ${button.dataset.smtpUse} и режим шифрования перенесены в форму. Нажмите «Проверить SMTP» ещё раз, затем сохраните настройки.`;
+  }));
   const smtpError=log.smtpError||{};
   const errorLine=[smtpError.error,smtpError.detail,smtpError.code&&`код ${smtpError.code}`].filter(Boolean).join(' · ');
   $('smtpLogTranscript').textContent=[log.transcript||'PHPMailer не оставил журнала.',errorLine?`\nSMTP: ${errorLine}`:''].join('');
@@ -3619,7 +3637,8 @@ $('smtpLogClose').addEventListener('click',closeSmtpLog);
 $('smtpLogCloseBtn').addEventListener('click',closeSmtpLog);
 $('smtpLogModal').addEventListener('click',event=>{if(event.target===$('smtpLogModal'))closeSmtpLog();});
 $('smtpLogCopyBtn').addEventListener('click',async()=>{
-  const text=[$('smtpLogTitle').textContent,$('smtpLogHeadline').textContent,$('smtpLogSteps').innerText,$('smtpLogTranscript').textContent,$('smtpLogContext').innerText].join('\n');
+  const portsText=$('smtpLogPortsBox').hidden?'':('Порты:\n'+$('smtpLogPorts').innerText);
+  const text=[$('smtpLogTitle').textContent,$('smtpLogHeadline').textContent,$('smtpLogSteps').innerText,portsText,$('smtpLogTranscript').textContent,$('smtpLogContext').innerText].filter(Boolean).join('\n');
   try { await navigator.clipboard.writeText(text); $('smtpLogFeedback').textContent='Журнал скопирован.'; }
   catch(e) {
     const area=document.createElement('textarea');area.value=text;document.body.appendChild(area);area.select();

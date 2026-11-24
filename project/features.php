@@ -3720,6 +3720,54 @@ function docgenSmtpNetworkSteps(string $host, int $port, string $encryption, flo
 }
 
 /**
+ * Быстрая проверка соседних портов и режимов: когда 465 не отвечает,
+ * оператору нужен не совет «проверьте порт», а список того, что реально
+ * открывается из этого контейнера. Таймаут короткий, чтобы модалка не ждала.
+ *
+ * @return list<array{port: int, encryption: string, ok: bool, detail: string}>
+ */
+function docgenSmtpPortProbe(string $host, float $timeout = 3.0): array
+{
+    $targets = [
+        ['port' => 465, 'encryption' => 'ssl'],
+        ['port' => 587, 'encryption' => 'tls'],
+        ['port' => 25, 'encryption' => 'none'],
+        ['port' => 2525, 'encryption' => 'tls'],
+    ];
+    $results = [];
+    foreach ($targets as $target) {
+        $port = (int) $target['port'];
+        $errno = 0;
+        $errstr = '';
+        $started = microtime(true);
+        $socket = @fsockopen($host, $port, $errno, $errstr, $timeout);
+        $ms = (int) round((microtime(true) - $started) * 1000);
+        if (is_resource($socket)) {
+            // Приветствие есть только у настоящего SMTP: это отличает его от
+            // веб-сервера, который тоже может держать порт открытым.
+            stream_set_timeout($socket, 2);
+            $banner = @fgets($socket, 512);
+            fclose($socket);
+            $results[] = [
+                'port' => $port,
+                'encryption' => (string) $target['encryption'],
+                'ok' => true,
+                'detail' => sprintf('%d открыт за %d мс%s', $port, $ms, $banner !== false && trim((string) $banner) !== '' ? '; приветствие: ' . trim((string) $banner) : '; приветствия SMTP нет'),
+            ];
+            continue;
+        }
+        $why = match (true) {
+            $errno === 110 || $errno === 10060 || stripos($errstr, 'timed out') !== false => 'таймаут',
+            $errno === 111 || $errno === 10061 => 'отклонено',
+            $errno === 113 || $errno === 101 => 'сеть недоступна',
+            default => $errstr !== '' ? $errstr : 'нет соединения',
+        };
+        $results[] = ['port' => $port, 'encryption' => (string) $target['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+    }
+    return $results;
+}
+
+/**
  * Полный журнал проверки SMTP для модалки: параметры, сетевой слой,
  * полный диалог PHPMailer без пароля и подсказка по конкретной ошибке.
  *
@@ -3764,6 +3812,8 @@ function docgenSmtpDiagnose(array $settings, string $password): array
         $phpmailerError = docgenSmtpMaskSecrets($phpmailerError, $password, $username);
     }
     $steps = docgenSmtpNetworkSteps($host, $port, $encryption);
+    // Соседние порты проверяем только при сбое: при успехе это лишние 12 секунд.
+    $ports = $ok ? [] : docgenSmtpPortProbe($host);
     return [
         'ok' => $ok,
         'phpmailer' => $phpmailerError,
@@ -3771,6 +3821,7 @@ function docgenSmtpDiagnose(array $settings, string $password): array
             ? 'Соединение с SMTP установлено, сервер принял параметры авторизации.'
             : docgenSmtpExplain($phpmailerError, $encryption, $port, $steps),
         'steps' => $steps,
+        'ports' => $ports,
         'transcript' => $transcript !== '' ? $transcript : 'PHPMailer не успел начать диалог.',
         'smtpError' => [
             'error' => docgenSmtpMaskSecrets((string) ($smtpError['error'] ?? ''), $password, $username),
@@ -3814,6 +3865,14 @@ function docgenSmtpExplain(string $error, string $encryption, int $port, array $
     }
     if ($tcpOpen && stripos($error, 'Could not connect to SMTP host') !== false) {
         return 'TCP-соединение с ' . $port . ' открылось, но SMTP-диалог не начался: сервер не прислал приветствие 220 или оборвал связь. Часто это фильтр провайдера, прокси или не SMTP-сервис на этом порту — проверьте порт и шифрование.';
+    }
+    // Таймаут на SMTP-порту — самая частая ситуация: провайдер или файрвол
+    // молча отбрасывает пакеты. errno 110/10060 и текст «timed out» означают
+    // именно это, а не загруженный сервер.
+    $timedOut = stripos($error, 'timed out') !== false || stripos($error, 'errno 110') !== false
+        || stripos($error, '(110)') !== false || stripos($error, '10060') !== false;
+    if ($timedOut && in_array($port, [25, 465, 587], true)) {
+        return 'Порт ' . $port . ' молчит: соединение ушло в таймаут, ответа не было вообще. Это не ошибка пароля и не ошибка сервера — трафик на этот порт не доходит. Чаще всего исходящую почту блокирует провайдер или файрвол LXC, реже порт закрыт на самом почтовом сервере. Смотрите проверку соседних портов ниже: если открыт 587 — переключитесь на 587 + STARTTLS.';
     }
     if (stripos($error, 'Could not connect to SMTP host') !== false) {
         if ($encryption === 'ssl' && $port !== 465) {
