@@ -20,5 +20,24 @@ if ($accountId !== '' && preg_match('/^[A-Za-z0-9_-]{1,80}$/', $accountId) !== 1
 }
 
 $result = $accountId === '' ? docgenCronSend(null, true) : docgenCronSend($accountId, false);
-echo json_encode(['ok' => true] + $result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), PHP_EOL;
+
+// The same one-minute timer also runs the webinar generator schedule (07:00,
+// 13:30, 20:00 Moscow time). A generator failure never blocks letter sending
+// and is reported separately.
+$webinars = ['ok' => true, 'skipped' => 'not_started'];
+if ($accountId === '') {
+    try {
+        require __DIR__ . '/webinars/source.php';
+        require __DIR__ . '/webinars/http.php';
+        require __DIR__ . '/webinars/docx.php';
+        require __DIR__ . '/webinars/store.php';
+        require __DIR__ . '/webinars/telegram.php';
+        require __DIR__ . '/webinars/monitor.php';
+        $webinars = webinarsMonitorTick();
+    } catch (Throwable $error) {
+        $webinars = ['ok' => false, 'error' => mb_substr($error->getMessage(), 0, 300, 'UTF-8')];
+    }
+}
+
+echo json_encode(['ok' => true] + $result + ['webinars' => $webinars], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), PHP_EOL;
 exit(0);

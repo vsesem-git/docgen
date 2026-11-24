@@ -965,6 +965,8 @@ button,input,select{font:inherit}
 .app-header .sub{display:flex;align-items:center;gap:8px;color:#cfe3f5;font-size:13px}
 .app-header .sub svg{flex:none}
 .header-badge{border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.1);border-radius:999px;padding:7px 12px;color:#e9f4ff;white-space:nowrap;font-size:12px;font-weight:650}.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.logout-button{padding:7px 10px;border:1px solid rgba(255,255,255,.38);border-radius:8px;background:rgba(255,255,255,.08);color:#fff;font-size:12px}.logout-button:hover{background:rgba(255,255,255,.16)}
+.webinar-button{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border:1px solid rgba(255,255,255,.5);border-radius:8px;background:#fff;color:#0e4f8a;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap}
+.webinar-button:hover{background:#e8f2ff;border-color:#fff}.webinar-button svg{flex:none}
 main{max-width:1480px;margin:0 auto;padding:22px 24px 48px}
 .notice{border:1px solid #c9d9ea;border-radius:10px;background:#f8fbff;color:#39536f;padding:11px 14px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start}
 .notice strong{color:#173b60}
@@ -1191,7 +1193,7 @@ body.modal-open{overflow:hidden}
         Выберите адресатов и шаблон DOCX или HTML; письма формируются в PDF и отправляются по одному
       </div>
     </div>
-    <div class="header-actions"><div class="header-badge">ТЕСТ · XLSX · DOCX · PDF · SMTP</div><?php if (docgenAuthHash() !== ''): ?><form method="post" action="?action=logout"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(docgenCsrfToken(), ENT_QUOTES, 'UTF-8') ?>"><button class="logout-button" type="submit">Выйти</button></form><?php endif; ?></div>
+    <div class="header-actions"><a class="webinar-button" href="webinar.php" title="Генератор программ вебинаров ЦМК по расписанию «Кодекса»"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3v5h5M8.5 12h7m-7 4h7"/></svg>Генератор вебинаров</a><div class="header-badge">ТЕСТ · XLSX · DOCX · PDF · SMTP</div><?php if (docgenAuthHash() !== ''): ?><form method="post" action="?action=logout"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(docgenCsrfToken(), ENT_QUOTES, 'UTF-8') ?>"><button class="logout-button" type="submit">Выйти</button></form><?php endif; ?></div>
   </div>
 </header>
 <main>

@@ -131,14 +131,14 @@ function docgenVerifyCsrf(): void
     }
 }
 
-function docgenRenderLogin(string $error = ''): never
+function docgenRenderLogin(string $error = '', string $return = ''): never
 {
     $token = docgenCsrfToken();
     http_response_code($error === '' ? 200 : 401);
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
     $safeError = $error !== '' ? '<div class="error">' . docgenEsc($error) . '</div>' : '';
-    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход — Формирование документов</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f2f5f9;color:#16283c;font:15px/1.5 system-ui,"Segoe UI",sans-serif}.box{width:min(420px,calc(100% - 28px));background:white;border:1px solid #dde5ee;border-radius:14px;padding:26px;box-shadow:0 12px 35px #16283c18}h1{font-size:20px;margin:0 0 8px;color:#123c61}.muted{color:#5b6b7f;font-size:13px;margin-bottom:18px}label{display:block;font-size:13px;font-weight:650;margin-bottom:6px}input{width:100%;height:42px;padding:8px 10px;border:1px solid #cbd7e3;border-radius:8px;font:inherit}button{width:100%;margin-top:14px;padding:10px;border:0;border-radius:8px;background:#0e4f8a;color:white;font:inherit;font-weight:700;cursor:pointer}.error{padding:9px 11px;margin:0 0 13px;background:#fdecea;color:#9f2e28;border-radius:7px;font-size:13px}</style></head><body><main class="box"><h1>Формирование документов</h1><div class="muted">Войдите, чтобы открыть тестовое приложение.</div>' . $safeError . '<form method="post" action="?action=login"><input type="hidden" name="csrf_token" value="' . docgenEsc($token) . '"><label for="password">Пароль администратора</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus><button type="submit">Войти</button></form></main></body></html>';
+    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход — Формирование документов</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f2f5f9;color:#16283c;font:15px/1.5 system-ui,"Segoe UI",sans-serif}.box{width:min(420px,calc(100% - 28px));background:white;border:1px solid #dde5ee;border-radius:14px;padding:26px;box-shadow:0 12px 35px #16283c18}h1{font-size:20px;margin:0 0 8px;color:#123c61}.muted{color:#5b6b7f;font-size:13px;margin-bottom:18px}label{display:block;font-size:13px;font-weight:650;margin-bottom:6px}input{width:100%;height:42px;padding:8px 10px;border:1px solid #cbd7e3;border-radius:8px;font:inherit}button{width:100%;margin-top:14px;padding:10px;border:0;border-radius:8px;background:#0e4f8a;color:white;font:inherit;font-weight:700;cursor:pointer}.error{padding:9px 11px;margin:0 0 13px;background:#fdecea;color:#9f2e28;border-radius:7px;font-size:13px}</style></head><body><main class="box"><h1>Формирование документов</h1><div class="muted">Войдите, чтобы открыть тестовое приложение.</div>' . $safeError . '<form method="post" action="?action=login"><input type="hidden" name="csrf_token" value="' . docgenEsc($token) . '"><input type="hidden" name="return" value="' . docgenEsc($return) . '"><label for="password">Пароль администратора</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus><button type="submit">Войти</button></form></main></body></html>';
     exit;
 }
 
@@ -168,7 +168,7 @@ function docgenBoot(string $action): void
     $authRequired = $hash !== '';
     if ($action === 'login') {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            docgenRenderLogin();
+            docgenRenderLogin('', (string) ($_GET['return'] ?? ''));
         }
         docgenVerifyCsrf();
         $password = (string) ($_POST['password'] ?? '');
@@ -176,10 +176,12 @@ function docgenBoot(string $action): void
             session_regenerate_id(true);
             $_SESSION['docgen_authenticated'] = true;
             $_SESSION['docgen_csrf'] = bin2hex(random_bytes(32));
-            header('Location: ./', true, 303);
+            // Возврат только на известные страницы приложения: открытый redirect недопустим.
+            $target = (string) ($_POST['return'] ?? '');
+            header('Location: ' . ($target === 'webinar.php' || $target === 'queue.php' ? $target : './'), true, 303);
             exit;
         }
-        docgenRenderLogin('Неверный пароль. Попробуйте ещё раз.');
+        docgenRenderLogin('Неверный пароль. Попробуйте ещё раз.', (string) ($_POST['return'] ?? ''));
     }
     if ($action === 'logout') {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -197,8 +199,12 @@ function docgenBoot(string $action): void
     }
     $authenticated = !$authRequired || !empty($_SESSION['docgen_authenticated']);
     if (!$authenticated) {
+        // Пустое действие — это HTML-страница, которую можно показать формой входа:
+        // главная (?), менеджер очереди и генератор вебинаров (webinar.php?).
         if ($action === '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
-            docgenRenderLogin();
+            // Первый аргумент — текст ошибки, второй — адрес возврата после
+            // входа. Раньше сюда попадал return, и страница отдавалась с 401.
+            docgenRenderLogin('', (string) ($_GET['return'] ?? ''));
         }
         sendJson(['ok' => false, 'error' => 'Требуется вход администратора. Обновите страницу и войдите.'], 401);
     }

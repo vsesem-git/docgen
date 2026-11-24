@@ -1,0 +1,27 @@
+/* Дополнения страницы генератора в docgen: возврат к основной странице,
+   редактура карточки, загрузка бланка и пояснения к полям. */
+.brand .back{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650;color:#26507c;background:#e8f1fb;border:1px solid #dde9f6;border-radius:999px;padding:5px 11px;margin-right:14px;text-decoration:none}
+.brand .back:hover{background:#dcebfa}
+.card-head{display:flex;align-items:center;gap:12px;padding:15px 18px 10px}
+.card-head h2{font-size:15px;font-weight:720;letter-spacing:-.01em}
+.editorial-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0}
+.editorial-grid .field{display:flex;flex-direction:column;gap:5px}
+.editorial-grid .field>span{font-size:12px;color:var(--muted);font-weight:650}
+.editorial-grid input,.editorial-grid textarea{border:1px solid #cddbea;border-radius:8px;padding:8px 10px;font:inherit;background:#fff}
+.editorial-grid textarea{resize:vertical;min-height:74px}
+.editorial-grid input:focus,.editorial-grid textarea:focus{outline:none;border-color:#0e4f8a;box-shadow:0 0 0 3px rgba(14,79,138,.12)}
+.topics-editor{margin-top:8px;border:1px solid #e2eaf4;border-radius:10px;padding:10px 12px;background:#fbfdff}
+.topics-editor>summary{cursor:pointer;font-weight:650;font-size:13px;color:#26507c}
+.topics-editor .topic-row{display:grid;grid-template-columns:26px minmax(0,1fr);gap:8px;align-items:center;margin-top:8px}
+.topics-editor .topic-row span{font-size:12px;color:var(--muted);text-align:right}
+.topics-editor .topic-row input{width:100%;border:1px solid #cddbea;border-radius:7px;padding:6px 9px;font:inherit}
+.layout-meta{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 14px;font-size:13px;margin:12px 0}
+.layout-meta dt{color:var(--muted)}
+.layout-meta dd{margin:0;font-weight:600;word-break:break-word}
+.dropzone{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;min-height:112px;border:1.5px dashed #c6d4e3;border-radius:11px;background:#fbfdff;color:#26507c;font-size:13px;cursor:pointer;text-align:center;padding:14px}
+.dropzone:hover,.dropzone.dragover{border-color:#0e4f8a;background:#eaf2fb}
+.dropzone .icon{width:26px;height:26px;color:#0e4f8a}
+.control-feedback{font-size:12.5px;margin:9px 0 0;color:#26507c}
+.control-feedback.is-error{color:var(--danger)}
+.preview-actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.help-steps code{background:#eef4fb;border-radius:5px;padding:1px 5px;font-size:12px}

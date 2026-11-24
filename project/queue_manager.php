@@ -12,7 +12,11 @@ function sendJson(array $payload, int $status = 200): never
 }
 
 require __DIR__ . '/features.php';
-docgenBoot('');
+// Страница и её вход/выход обслуживаются здесь; данные очереди — в index.php.
+$queueAction = (string) ($_GET['action'] ?? '');
+// После входа возвращаемся в менеджер очереди, а не на главную.
+$_GET['return'] = $_REQUEST['return'] = $_POST['return'] = 'queue.php';
+docgenBoot($queueAction);
 $csrf = docgenCsrfToken();
 $authEnabled = docgenAuthHash() !== '';
 ?>

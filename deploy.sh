@@ -44,7 +44,7 @@ fi
 
 # Never publish a broken revision: lint the entrypoints before swapping code.
 if command -v php >/dev/null 2>&1; then
-  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php" "$SOURCE/public/queue.php" "$SOURCE/queue_manager.php" "$SOURCE/cron_send.php"; do
+  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php" "$SOURCE/public/queue.php" "$SOURCE/queue_manager.php" "$SOURCE/cron_send.php" "$SOURCE/webinar.php" "$SOURCE/webinars_tick.php"; do
     php -l "$file" >/dev/null || die "Ошибка синтаксиса PHP в $file — обновление отменено."
   done
   # Without OpenSSL, PHP has no ssl:// transport and PHPMailer reports
