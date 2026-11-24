@@ -42,11 +42,16 @@ if [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-# Never publish a broken revision: lint the entrypoints before swapping code.
+# Never publish a broken revision: lint every PHP file before swapping code.
+# A module that only an entrypoint includes (webinars/store.php) used to slip
+# through a short list of entrypoints and broke the installed app.
 if command -v php >/dev/null 2>&1; then
-  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php" "$SOURCE/public/queue.php" "$SOURCE/queue_manager.php" "$SOURCE/cron_send.php" "$SOURCE/webinar.php" "$SOURCE/webinars_tick.php"; do
-    php -l "$file" >/dev/null || die "Ошибка синтаксиса PHP в $file — обновление отменено."
+  LINT_FAILED=0
+  # app.env is excluded: secrets, not code. Tests are linted too — they ship.
+  for file in $(find "$SOURCE" -name '*.php' -not -path '*/vendor/*' | sort); do
+    php -l "$file" >/dev/null || LINT_FAILED=1
   done
+  [ "$LINT_FAILED" -eq 0 ] || die "Ошибка синтаксиса PHP — обновление отменено (см. вывод php -l выше)."
   # Without OpenSSL, PHP has no ssl:// transport and PHPMailer reports
   # "Could not connect to SMTP host" even when the server is reachable.
   if ! php -r "exit(extension_loaded('openssl') ? 0 : 1);"; then

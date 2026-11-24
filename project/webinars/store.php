@@ -580,7 +580,10 @@ function webinarsNextSlot(?DateTimeImmutable $now = null): string
         }
     }
     $tomorrow = $now->modify('+1 day');
-    return new DateTimeImmutable($tomorrow->format('Y-m-d') . ' ' . WEBINARS_CHECK_TIMES[0] . ':00', $now->getTimezone())->format('Y-m-d\TH:i:sP');
+    // Скобки обязательны: вызов метода на результате `new` без них разрешён
+    // только с PHP 8.4, а приложение работает на PHP 8.1+.
+    $first = (new DateTimeImmutable($tomorrow->format('Y-m-d') . ' ' . WEBINARS_CHECK_TIMES[0] . ':00', $now->getTimezone()));
+    return $first->format('Y-m-d\TH:i:sP');
 }
 
 /** Слот, который наступил в эту минуту (без догона пропусков задним числом). */
