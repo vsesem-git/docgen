@@ -37,6 +37,10 @@ define('DOCGEN_MAX_HTML_TEMPLATE_BYTES', 1_000_000);
 // Only the interactive "Check SMTP" probe is time-boxed. Actual mail delivery
 // keeps PHPMailer's normal timeout, so a slow server can still accept a letter.
 define('DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS', 8);
+// Вся проверка обязана уложиться в бюджет браузера (30 с), иначе модалка
+// покажет таймаут вместо журнала. Бюджет делится: PHPMailer получает
+// DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS, остальное — сетевые шаги и порты.
+define('DOCGEN_SMTP_PROBE_BUDGET_SECONDS', 22.0);
 
 function docgenEnsureDir(string $directory, int $mode = 0700): void
 {
@@ -3687,18 +3691,53 @@ function docgenSmtpNetworkSteps(string $host, int $port, string $encryption, flo
         }
     }
 
-    // Простой TCP: виден errno, по которому можно отличить фильтр, отказ и таймаут.
+    // Простой TCP с собственным дедлайном: fsockopen держит только свой
+    // таймаут, а нам нужен общий бюджет на всю проверку.
     $errno = 0;
     $errstr = '';
-    $socket = @fsockopen($host, $port, $errno, $errstr, $timeout);
+    $tcpStarted = microtime(true);
+    $deadline = $tcpStarted + max(0.5, $timeout);
+    $socket = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 0.0, STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT);
     if (is_resource($socket)) {
-        $elapsed = microtime(true) - $started;
+        stream_set_blocking($socket, false);
+        $opened = false;
+        while (microtime(true) < $deadline) {
+            $write = [$socket];
+            $read = [];
+            $except = [$socket];
+            $left = max(0.02, $deadline - microtime(true));
+            $ready = @stream_select($read, $write, $except, (int) $left, (int) (($left - (int) $left) * 1_000_000));
+            if ($ready === false) {
+                break;
+            }
+            if ($ready > 0) {
+                $name = @stream_socket_get_name($socket, true);
+                $opened = $name !== false && $name !== '';
+                $errno = $opened ? 0 : 111;
+                break;
+            }
+        }
+        if (!$opened && $errno === 0) {
+            // Дедлайн истёк без ответа — это и есть «молчащий» порт.
+            $errno = 110;
+            $errstr = 'Connection timed out';
+        }
+        if (!$opened) {
+            fclose($socket);
+            $socket = false;
+        } else {
+            stream_set_blocking($socket, true);
+            stream_set_timeout($socket, 2);
+        }
+    }
+    if (is_resource($socket)) {
+        $elapsed = microtime(true) - $tcpStarted;
         $banner = @fgets($socket, 512);
         $steps[] = ['step' => 'TCP', 'ok' => true, 'detail' => sprintf('%s:%d открыт за %.2f с%s', $host, $port, $elapsed, $banner !== false ? '; приветствие: ' . trim($banner) : '')];
         if ($encryption === 'ssl') {
             // Порт 465 ждёт TLS сразу, до любого SMTP-диалога.
             $context = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => true, 'peer_name' => $host]]);
-            $tls = @stream_socket_client('ssl://' . $host . ':' . $port, $tlsErrno, $tlsErrstr, $timeout, STREAM_CLIENT_CONNECT, $context);
+            $tls = @stream_socket_client('ssl://' . $host . ':' . $port, $tlsErrno, $tlsErrstr, max(1.0, $deadline - microtime(true)), STREAM_CLIENT_CONNECT, $context);
             if (is_resource($tls)) {
                 $steps[] = ['step' => 'TLS', 'ok' => true, 'detail' => 'согласование SSL/TLS на порту ' . $port . ' прошло' . (function_exists('stream_socket_get_name') ? '; узел: ' . (string) stream_socket_get_name($tls, true) : '')];
                 fclose($tls);
@@ -3726,7 +3765,7 @@ function docgenSmtpNetworkSteps(string $host, int $port, string $encryption, flo
  *
  * @return list<array{port: int, encryption: string, ok: bool, detail: string}>
  */
-function docgenSmtpPortProbe(string $host, float $timeout = 3.0): array
+function docgenSmtpPortProbe(string $host, float $timeout = 2.5): array
 {
     $targets = [
         ['port' => 465, 'encryption' => 'ssl'],
@@ -3734,36 +3773,116 @@ function docgenSmtpPortProbe(string $host, float $timeout = 3.0): array
         ['port' => 25, 'encryption' => 'none'],
         ['port' => 2525, 'encryption' => 'tls'],
     ];
-    $results = [];
+    // Жёсткий предел на весь опрос: даже если каждый connect «залипнет»,
+    // остальные порты честно помечаются «не проверялся».
+    $hardDeadline = microtime(true) + max(1.0, min(4.0, $timeout * 2));
+    $sockets = [];
+    $skipped = [];
+    $started = microtime(true);
+
+    // Неблокирующий connect в PHP не гарантирован: некоторые сборки всё равно
+    // ждут внутри stream_socket_client. Поэтому после каждого сокета сверяем
+    // часы и при исчерпанном бюджете честно отмечаем остаток «не проверялось»,
+    // а не висим четыре таймаута подряд.
     foreach ($targets as $target) {
         $port = (int) $target['port'];
-        $errno = 0;
-        $errstr = '';
-        $started = microtime(true);
-        $socket = @fsockopen($host, $port, $errno, $errstr, $timeout);
-        $ms = (int) round((microtime(true) - $started) * 1000);
-        if (is_resource($socket)) {
-            // Приветствие есть только у настоящего SMTP: это отличает его от
-            // веб-сервера, который тоже может держать порт открытым.
-            stream_set_timeout($socket, 2);
-            $banner = @fgets($socket, 512);
-            fclose($socket);
-            $results[] = [
-                'port' => $port,
-                'encryption' => (string) $target['encryption'],
-                'ok' => true,
-                'detail' => sprintf('%d открыт за %d мс%s', $port, $ms, $banner !== false && trim((string) $banner) !== '' ? '; приветствие: ' . trim((string) $banner) : '; приветствия SMTP нет'),
-            ];
+        if (microtime(true) > $hardDeadline - 0.2) {
+            $skipped[] = $port;
             continue;
         }
-        $why = match (true) {
-            $errno === 110 || $errno === 10060 || stripos($errstr, 'timed out') !== false => 'таймаут',
-            $errno === 111 || $errno === 10061 => 'отклонено',
-            $errno === 113 || $errno === 101 => 'сеть недоступна',
-            default => $errstr !== '' ? $errstr : 'нет соединения',
-        };
-        $results[] = ['port' => $port, 'encryption' => (string) $target['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+        $errno = 0;
+        $errstr = '';
+        $socket = @stream_socket_client(
+            'tcp://' . $host . ':' . $port,
+            $errno,
+            $errstr,
+            $timeout,
+            STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT
+        );
+        if (is_resource($socket)) {
+            stream_set_blocking($socket, false);
+            $sockets[$port] = ['socket' => $socket, 'encryption' => (string) $target['encryption'], 'errno' => 0, 'errstr' => '', 'opened' => null];
+        } else {
+            $sockets[$port] = ['socket' => null, 'encryption' => (string) $target['encryption'], 'errno' => $errno, 'errstr' => $errstr, 'opened' => false];
+        }
     }
+
+    $deadline = min(microtime(true) + $timeout, $hardDeadline);
+    $pending = [];
+    foreach ($sockets as $port => $item) {
+        if (is_resource($item['socket'])) {
+            $pending[$port] = $item['socket'];
+            $sockets[$port]['opened'] = false;
+        }
+    }
+    while ($pending !== [] && microtime(true) < $deadline) {
+        $read = [];
+        $write = [];
+        $except = [];
+        foreach ($pending as $port => $stream) {
+            $write['p' . $port] = $stream;
+            $except['p' . $port] = $stream;
+        }
+        $left = max(0.02, $deadline - microtime(true));
+        $ready = @stream_select($read, $write, $except, (int) $left, (int) (($left - (int) $left) * 1_000_000));
+        if ($ready === false) {
+            break;
+        }
+        foreach ([$write, $except] as $set) {
+            foreach ($set as $key => $stream) {
+                $port = (int) substr((string) $key, 1);
+                if (!isset($pending[$port])) {
+                    continue;
+                }
+                $name = @stream_socket_get_name($stream, true);
+                $sockets[$port]['opened'] = $name !== false && $name !== '';
+                if ($sockets[$port]['opened'] === false) {
+                    $sockets[$port]['errno'] = 111;
+                }
+                unset($pending[$port]);
+            }
+        }
+    }
+    foreach ($pending as $port => $stream) {
+        $sockets[$port]['opened'] = false;
+        $sockets[$port]['errno'] = 110;
+    }
+
+    $results = [];
+    foreach ($sockets as $port => $item) {
+        $ms = (int) round((microtime(true) - $started) * 1000);
+        if (is_resource($item['socket'])) {
+            if ($item['opened'] === true) {
+                // Приветствие есть только у настоящего SMTP: это отличает его от
+                // веб-сервера, который тоже может держать порт открытым.
+                stream_set_blocking($item['socket'], true);
+                stream_set_timeout($item['socket'], 1);
+                $banner = @fgets($item['socket'], 512);
+                $results[] = [
+                    'port' => (int) $port,
+                    'encryption' => $item['encryption'],
+                    'ok' => true,
+                    'detail' => sprintf('%d открыт за %d мс%s', $port, $ms, $banner !== false && trim((string) $banner) !== '' ? '; приветствие: ' . trim((string) $banner) : '; приветствия SMTP нет'),
+                ];
+            } else {
+                $why = $item['errno'] === 111 ? 'отклонено' : 'таймаут';
+                $results[] = ['port' => (int) $port, 'encryption' => $item['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+            }
+            fclose($item['socket']);
+        } else {
+            $why = match (true) {
+                $item['errno'] === 110 || $item['errno'] === 10060 || stripos((string) $item['errstr'], 'timed out') !== false => 'таймаут',
+                $item['errno'] === 111 || $item['errno'] === 10061 => 'отклонено',
+                $item['errno'] === 113 || $item['errno'] === 101 => 'сеть недоступна',
+                default => $item['errstr'] !== '' ? (string) $item['errstr'] : 'нет соединения',
+            };
+            $results[] = ['port' => (int) $port, 'encryption' => $item['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+        }
+    }
+    foreach ($skipped as $port) {
+        $results[] = ['port' => (int) $port, 'encryption' => '—', 'ok' => false, 'detail' => sprintf('%d — не проверялся: исчерпан бюджет времени проверки', $port)];
+    }
+    usort($results, static fn(array $a, array $b): int => $a['port'] <=> $b['port']);
     return $results;
 }
 
@@ -3793,6 +3912,35 @@ function docgenSmtpDiagnose(array $settings, string $password): array
     $username = (string) ($settings['username'] ?? '');
     $fromEmail = (string) ($settings['fromEmail'] ?? '');
 
+    // Журнал сохраняем до ответа: если браузер оборвёт запрос по таймауту,
+    // его всё равно можно будет прочитать кнопкой «Последний журнал».
+    $journalPath = DOCGEN_STORAGE_DIR . '/smtp-last-diagnose.json';
+    $save = static function (array $payload) use ($journalPath): array {
+        $payload['savedAt'] = date(DATE_ATOM);
+        try {
+            docgenWriteJson($journalPath, $payload);
+        } catch (Throwable $ignored) {
+            // Запись журнала не должна ломать саму проверку.
+        }
+        return $payload;
+    };
+    // Две одновременные проверки — двойная серия подключений к серверу.
+    $lockPath = DOCGEN_STORAGE_DIR . '/smtp-probe.lock';
+    $lock = @fopen($lockPath, 'c');
+    if (is_resource($lock) && !flock($lock, LOCK_EX | LOCK_NB)) {
+        fclose($lock);
+        return $save([
+            'ok' => false,
+            'summary' => 'Проверка уже идёт в другой вкладке. Дождитесь её окончания: параллельные подключения только увеличивают число отказов.',
+            'steps' => [],
+            'ports' => [],
+            'transcript' => '',
+            'busy' => true,
+            'probeWarn' => '',
+            'context' => [],
+        ]);
+    }
+
     $transcript = '';
     $phpmailerError = '';
     $smtpError = [];
@@ -3805,9 +3953,12 @@ function docgenSmtpDiagnose(array $settings, string $password): array
         $mailer->Debugoutput = static function (string $line, int $level) use (&$transcript): void {
             $transcript .= rtrim($line) . "\n";
         };
-        $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+        // PHPMailer получает меньший таймаут, чем общий бюджет: остаток нужен
+        // сетевым шагам, чтобы журнал всё равно дошёл до браузера.
+        $mailerTimeout = (int) min(6, max(2, DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS - 2));
+        $mailer->Timeout = $mailerTimeout;
         $smtp = $mailer->getSMTPInstance();
-        $smtp->Timelimit = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+        $smtp->Timelimit = $mailerTimeout;
         $ok = (bool) $mailer->smtpConnect();
         $smtpError = (array) $smtp->getError();
         if ($ok) {
@@ -3823,15 +3974,26 @@ function docgenSmtpDiagnose(array $settings, string $password): array
     if ($phpmailerError !== '') {
         $phpmailerError = docgenSmtpMaskSecrets($phpmailerError, $password, $username);
     }
-    $steps = docgenSmtpNetworkSteps($host, $port, $encryption);
-    // Соседние порты проверяем только при сбое: при успехе это лишние 12 секунд.
-    $ports = $ok ? [] : docgenSmtpPortProbe($host);
-    return [
+    // Каждый следующий шаг берёт только остаток бюджета: лучше короткая
+    // проверка с журналом, чем ответ браузера «сервер не ответил за 30 с».
+    $spent = microtime(true) - $connectStarted;
+    $left = max(1.0, DOCGEN_SMTP_PROBE_BUDGET_SECONDS - $spent);
+    // Сетевые шаги при сбое полезны, но требуют до двух таймаутов; при
+    // остатке меньше 5 с их пропускаем и говорим об этом прямо.
+    $steps = ($left >= 3.0) ? docgenSmtpNetworkSteps($host, $port, $encryption, min(4.0, $left / 2)) : [];
+    $spent = microtime(true) - $connectStarted;
+    $left = max(0.0, DOCGEN_SMTP_PROBE_BUDGET_SECONDS - $spent);
+    // Соседние порты — параллельно, с таймаутом не больше остатка.
+    $ports = ($ok || $left < 1.0) ? [] : docgenSmtpPortProbe($host, min(1.5, $left));
+    $budgetNote = ($steps === [] || $ports === []) && !$ok
+        ? ' Проверка остановлена по бюджету времени: часть сетевых шагов пропущена, чтобы журнал дошёл до браузера.'
+        : '';
+    $payload = [
         'ok' => $ok,
         'phpmailer' => $phpmailerError,
         'summary' => $ok
             ? 'Соединение с SMTP установлено, сервер принял параметры авторизации.'
-            : docgenSmtpExplain($phpmailerError, $encryption, $port, $steps),
+            : docgenSmtpExplain($phpmailerError, $encryption, $port, $steps) . $budgetNote,
         'steps' => $steps,
         'ports' => $ports,
         'transcript' => $transcript !== '' ? $transcript : 'PHPMailer не успел начать диалог.',
@@ -3842,7 +4004,7 @@ function docgenSmtpDiagnose(array $settings, string $password): array
             'codeEx' => (string) ($smtpError['smtp_code_ex'] ?? ''),
         ],
         'server' => $host . ':' . $port,
-        'elapsedMs' => $connectMs,
+        'elapsedMs' => (int) round((microtime(true) - $connectStarted) * 1000),
         'probeCount' => $probeCount,
         'probeWarn' => (!$ok && $probeCount >= 3)
             ? 'Это ' . $probeCount . '-я проверка за 10 минут. Каждая попытка — новое подключение: если сервер банит по числу отказов, следующая проверка продлит бан. Сделайте паузу 10–15 минут и сначала разберитесь с блокировкой.'
@@ -3859,6 +4021,21 @@ function docgenSmtpDiagnose(array $settings, string $password): array
             'проверка сертификата' => 'включена при подключении PHPMailer',
         ],
     ];
+    if (is_resource($lock)) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+    return $save($payload);
+}
+
+/** Последний сохранённый журнал: спасает, когда запрос оборвался по таймауту. */
+function docgenSmtpLastDiagnose(): array
+{
+    $payload = docgenReadJson(DOCGEN_STORAGE_DIR . '/smtp-last-diagnose.json', []);
+    if ($payload === []) {
+        return ['ok' => false, 'summary' => 'Сохранённого журнала пока нет: ни одна проверка ещё не завершилась.', 'steps' => [], 'ports' => [], 'transcript' => '', 'context' => []];
+    }
+    return $payload;
 }
 
 /** Полный диалог без пароля: он маскируется отдельной функцией. */
@@ -4688,6 +4865,8 @@ function docgenDispatch(string $action): void
             docgenDeleteSmtpAccount();
         case 'test_smtp':
             docgenTestSmtp();
+        case 'smtp_last_diagnose':
+            sendJson(docgenSmtpLastDiagnose());
         case 'dadata_settings':
             sendJson(docgenDadataPublicPayload());
         case 'save_dadata_settings':

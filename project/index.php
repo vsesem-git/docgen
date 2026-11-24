@@ -1615,7 +1615,7 @@ body.modal-open{overflow:hidden}
       <pre class="smtp-log-transcript" id="smtpLogTranscript"></pre>
       <dl class="smtp-log-context" id="smtpLogContext"></dl>
     </div>
-    <div class="modal-actions"><span class="small-muted" id="smtpLogFeedback">Скопируйте журнал, если нужно показать администратору.</span><div class="right"><button type="button" class="btn-ghost" id="smtpLogCopyBtn">Скопировать журнал</button><button type="button" class="btn-primary" id="smtpLogCloseBtn">Закрыть</button></div></div>
+    <div class="modal-actions"><span class="small-muted" id="smtpLogFeedback">Скопируйте журнал, если нужно показать администратору.</span><div class="right"><button type="button" class="btn-ghost" id="smtpLogReloadBtn">Последний журнал с сервера</button><button type="button" class="btn-ghost" id="smtpLogCopyBtn">Скопировать журнал</button><button type="button" class="btn-primary" id="smtpLogCloseBtn">Закрыть</button></div></div>
   </section>
 </div>
 <div class="modal-backdrop" id="queueModal" hidden>
@@ -3236,11 +3236,14 @@ async function testSmtp() {
 }
 async function fetchSmtpTest() {
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),30000);
+  // Бюджет сервера — 22 с, поэтому клиент ждёт дольше: сервер должен успеть
+  // вернуть журнал, а не оборваться по таймауту браузера.
+  const limitSeconds=35;
+  const timer=setTimeout(()=>controller.abort(),limitSeconds*1000);
   try {
     return await fetch('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false),signal:controller.signal});
   } catch(e) {
-    if(e.name==='AbortError')throw new Error('Сервер не ответил за 30 с: SMTP-сервер недоступен или сеть контейнера блокирует соединение.');
+    if(e.name==='AbortError')throw new Error(`Сервер не ответил за ${limitSeconds} с: проверка не уложилась в бюджет. Попробуйте ещё раз через минуту — журнал появится, как только сервер ответит.`);
     throw e;
   } finally {clearTimeout(timer);}
 }
@@ -3635,6 +3638,16 @@ $('letterDesignFileInput').addEventListener('change',()=>{
 });
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
+$('smtpLogReloadBtn').addEventListener('click',async()=>{
+  $('smtpLogFeedback').textContent='Читаем сохранённый журнал…';
+  try {
+    const response=await fetch('?action=smtp_last_diagnose',{cache:'no-store'});
+    const payload=await response.json();
+    if(!response.ok||!payload)throw new Error('Журнал не прочитан.');
+    openSmtpLog(payload);
+    $('smtpLogFeedback').textContent=payload.savedAt?`Журнал от ${payload.savedAt}.`:'Журнал прочитан.';
+  } catch(e) {$('smtpLogFeedback').textContent=e.message||'Не удалось прочитать журнал.';}
+});
 $('smtpLogClose').addEventListener('click',closeSmtpLog);
 $('smtpLogCloseBtn').addEventListener('click',closeSmtpLog);
 $('smtpLogModal').addEventListener('click',event=>{if(event.target===$('smtpLogModal'))closeSmtpLog();});

@@ -315,7 +315,7 @@ check(array_key_exists('PHP', (array) $diagnostics['context']) && isset($diagnos
 check(isset($diagnostics['elapsedMs']) && $diagnostics['elapsedMs'] >= 0, 'в журнале есть время попытки');
 check(is_array($diagnostics['ports']) && count($diagnostics['ports']) === 4, 'при сбое проверяются соседние порты', (string) count((array) ($diagnostics['ports'] ?? [])));
 $probedPorts = array_column((array) $diagnostics['ports'], 'port');
-check($probedPorts === [465, 587, 25, 2525], 'проверяются 465, 587, 25 и 2525', implode(',', $probedPorts));
+check($probedPorts === [25, 465, 587, 2525], 'проверяются 25, 465, 587 и 2525', implode(',', $probedPorts));
 foreach ((array) $diagnostics['ports'] as $probe) {
     check(isset($probe['ok'], $probe['detail'], $probe['encryption']), 'у пробы порта ' . $probe['port'] . ' есть итог и описание');
 }
@@ -360,6 +360,36 @@ $probeThird = docgenSmtpDiagnose($probeSettings, 'pw');
 check($probeThird['probeCount'] === 3, 'счётчик нажатий проверки растёт');
 check(strpos((string) $probeThird['probeWarn'], 'продлит бан') !== false, 'на третьем нажатии предупреждение о бане');
 check(strpos(docgenSmtpExplain('SMTP ERROR: Failed to connect to server: Connection timed out (110)', 'ssl', 465), 'fail2ban') !== false, 'таймаут объяснён через fail2ban');
+
+// 14. Журнал проверки переживает обрыв браузера и не запускается дважды.
+$journalPath = DOCGEN_STORAGE_DIR . '/smtp-last-diagnose.json';
+@unlink($journalPath);
+$noJournal = docgenSmtpLastDiagnose();
+check($noJournal['ok'] === false && strpos((string) $noJournal['summary'], 'пока нет') !== false, 'до проверки сохранённого журнала нет');
+$journalSettings = ['host' => '127.0.0.1', 'port' => 9, 'encryption' => 'tls', 'username' => 'u@mail.ru',
+    'fromEmail' => 'u@mail.ru', 'fromName' => '', 'replyTo' => ''];
+$journalResult = docgenSmtpDiagnose($journalSettings, 'S3cret-Pa55word');
+check($journalResult['ok'] === false, 'журнальная проверка выполнена');
+check(!empty($journalResult['savedAt']), 'в ответе есть время сохранения');
+check(is_file($journalPath), 'журнал сохранён в приватном каталоге');
+$storedJournal = docgenSmtpLastDiagnose();
+check(trim((string) $storedJournal['transcript']) !== '', 'сохранённый журнал содержит протокол', substr((string) $storedJournal['transcript'], 0, 120));
+check(strpos((string) $storedJournal['transcript'], 'S3cret-Pa55word') === false, 'в сохранённом журнале нет пароля');
+check(count((array) $storedJournal['ports']) === 4, 'сохранённый журнал содержит опрос портов');
+check((string) $storedJournal['summary'] === (string) $journalResult['summary'], 'сохранён тот же вывод');
+
+$probeLock = fopen(DOCGEN_STORAGE_DIR . '/smtp-probe.lock', 'c');
+flock($probeLock, LOCK_EX | LOCK_NB);
+$busyResult = docgenSmtpDiagnose($journalSettings, 'pw');
+check(!empty($busyResult['busy']), 'вторая одновременная проверка отклоняется');
+check(strpos((string) $busyResult['summary'], 'уже идёт') !== false, 'причина отказа от второй проверки понятна');
+flock($probeLock, LOCK_UN);
+fclose($probeLock);
+check(empty(docgenSmtpDiagnose($journalSettings, 'pw')['busy']), 'после снятия блокировки проверка снова идёт');
+
+// Бюджет: PHPMailer не должен забирать всё время, клиент ждёт дольше сервера.
+check(DOCGEN_SMTP_PROBE_BUDGET_SECONDS <= 25, 'бюджет проверки меньше клиентского таймаута');
+check(DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS < DOCGEN_SMTP_PROBE_BUDGET_SECONDS, 'таймаут подключения меньше общего бюджета');
 
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
