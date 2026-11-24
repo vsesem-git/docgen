@@ -3775,6 +3775,18 @@ function docgenSmtpPortProbe(string $host, float $timeout = 3.0): array
  */
 function docgenSmtpDiagnose(array $settings, string $password): array
 {
+    // Проверка — это тоже подключение. Если её жать подряд после бана,
+    // firewall получит новую серию попыток и продлит блокировку.
+    $probeStatePath = DOCGEN_STORAGE_DIR . '/smtp-probe-state.json';
+    $probeState = docgenReadJson($probeStatePath, []);
+    $lastProbe = (int) ($probeState['lastAt'] ?? 0);
+    $probeCount = (int) ($probeState['count'] ?? 0);
+    if ($lastProbe < time() - 600) {
+        $probeCount = 0;
+    }
+    $probeCount++;
+    docgenWriteJson($probeStatePath, ['lastAt' => time(), 'count' => $probeCount, 'host' => (string) ($settings['host'] ?? '')]);
+
     $host = (string) ($settings['host'] ?? '');
     $port = (int) ($settings['port'] ?? 587);
     $encryption = (string) ($settings['encryption'] ?? 'tls');
@@ -3831,6 +3843,10 @@ function docgenSmtpDiagnose(array $settings, string $password): array
         ],
         'server' => $host . ':' . $port,
         'elapsedMs' => $connectMs,
+        'probeCount' => $probeCount,
+        'probeWarn' => (!$ok && $probeCount >= 3)
+            ? 'Это ' . $probeCount . '-я проверка за 10 минут. Каждая попытка — новое подключение: если сервер банит по числу отказов, следующая проверка продлит бан. Сделайте паузу 10–15 минут и сначала разберитесь с блокировкой.'
+            : '',
         'context' => [
             'PHP' => PHP_VERSION,
             'SAPI' => PHP_SAPI,
@@ -3872,7 +3888,10 @@ function docgenSmtpExplain(string $error, string $encryption, int $port, array $
     $timedOut = stripos($error, 'timed out') !== false || stripos($error, 'errno 110') !== false
         || stripos($error, '(110)') !== false || stripos($error, '10060') !== false;
     if ($timedOut && in_array($port, [25, 465, 587], true)) {
-        return 'Порт ' . $port . ' молчит: соединение ушло в таймаут, ответа не было вообще. Это не ошибка пароля и не ошибка сервера — трафик на этот порт не доходит. Чаще всего исходящую почту блокирует провайдер или файрвол LXC, реже порт закрыт на самом почтовом сервере. Смотрите проверку соседних портов ниже: если открыт 587 — переключитесь на 587 + STARTTLS.';
+        return 'Порт ' . $port . ' молчит: соединение ушло в таймаут, ответа не было вообще. Это не ошибка пароля и не ошибка сервера — трафик на этот порт не доходит. '
+            . 'Частая причина — этот IP забанен firewall/fail2ban на почтовом сервере: тогда пакеты молча отбрасываются. '
+            . 'Проверьте на сервере: fail2ban-client status, iptables -S | grep <IP>. '
+            . 'Смотрите проверку соседних портов ниже: если открыт 587 — переключитесь на 587 + STARTTLS.';
     }
     if (stripos($error, 'Could not connect to SMTP host') !== false) {
         if ($encryption === 'ssl' && $port !== 465) {
@@ -4311,6 +4330,54 @@ function docgenCronPauseRemaining(string $accountId): int
     return max(0, $until - time());
 }
 
+/**
+ * Сетевой сбой: сервер не ответил вообще или соединение не открылось.
+ * Так выглядит и бан fail2ban (пакеты молча отбрасываются), и упавший
+ * хост. Повторять попытки в этом состоянии нельзя: именно серия
+ * неудачных подключений и приводит к бану.
+ */
+function docgenIsNetworkError(string $message): bool
+{
+    return preg_match(
+        '/Could not connect to SMTP host|Failed to connect to server|Connection (timed out|refused)|'
+        . 'stream_socket_client|errno 1(10|11)|\b(110|111)\b|Network (is )?unreachable|'
+        . 'SMTP Connect\(\) failed|Connection closed|Lost connection/i',
+        $message
+    ) === 1;
+}
+
+/** Пауза после сетевого сбоя: короче, чем после лимита, но достаточная, чтобы не долбить. */
+function docgenCronNetworkPauseSeconds(): int
+{
+    return 900;
+}
+
+function docgenCronNoteNetworkFailure(string $accountId, string $message): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $state['networkPauseUntil'] = time() + docgenCronNetworkPauseSeconds();
+    $state['networkPauseReason'] = mb_substr($message, 0, 400, 'UTF-8');
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+function docgenCronNetworkPauseRemaining(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    return max(0, (int) ($state['networkPauseUntil'] ?? 0) - time());
+}
+
+/** Понятная причина для интерфейса: бан firewall выглядит именно так. */
+function docgenSmtpNetworkErrorHint(): string
+{
+    return 'Сервер не отвечает по этому порту вообще: соединение уходит в таймаут или отбрасывается. '
+        . 'Так выглядит и блокировка firewall/fail2ban, и запрет исходящей почты у провайдера. '
+        . 'Отправка приостановлена, чтобы серия попыток не продлила бан. '
+        . 'Проверьте, не забанен ли IP: iptables -S | grep <IP>, fail2ban-client status.';
+}
+
 /** True when a delivery error means "now is too fast" rather than "bad letter". */
 function docgenIsRateLimitError(string $message): bool
 {
@@ -4338,6 +4405,15 @@ function docgenCronSendAccount(string $accountId): array
         if ($pauseLeft > 0) {
             $result['reason'] = 'rate_limit_pause';
             $result['pauseLeft'] = $pauseLeft;
+            return $result;
+        }
+        // Сетевой сбой (в том числе бан fail2ban) — тоже пауза: пока сервер
+        // молчит, любая попытка только подтверждает firewall, что мы «атакуем».
+        $networkPauseLeft = docgenCronNetworkPauseRemaining($accountId);
+        if ($networkPauseLeft > 0) {
+            $result['reason'] = 'network_pause';
+            $result['pauseLeft'] = $networkPauseLeft;
+            $result['hint'] = docgenSmtpNetworkErrorHint();
             return $result;
         }
         $mailing = docgenMailingSettings();
@@ -4400,6 +4476,22 @@ function docgenCronSendAccount(string $accountId): array
                     $result['sent']++;
                 } catch (Throwable $e) {
                     $result['failed']++;
+                    if (docgenIsNetworkError($e->getMessage())) {
+                        // Письмо остаётся в расписании: дело не в адресе и не
+                        // в тексте, а в том, что сервер сейчас недоступен.
+                        docgenCronNoteNetworkFailure($accountId, $e->getMessage());
+                        $result['reason'] = 'network_error';
+                        $result['pauseLeft'] = docgenCronNetworkPauseSeconds();
+                        $result['hint'] = docgenSmtpNetworkErrorHint();
+                        try {
+                            $again = docgenReadQueueItem((string) $item['id']);
+                            $again['status'] = 'scheduled';
+                            $again['lastError'] = 'Сервер не ответил: отправка приостановлена на 15 минут, письмо осталось в расписании. ' . docgenSmtpNetworkErrorHint();
+                            docgenSaveQueueItem($again);
+                        } catch (Throwable $ignored) {
+                        }
+                        break;
+                    }
                     if (docgenIsRateLimitError($e->getMessage())) {
                         // The provider said "too fast": hold this mailbox and stop
                         // the run instead of burning the rest of the batch.

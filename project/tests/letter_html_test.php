@@ -321,6 +321,46 @@ foreach ((array) $diagnostics['ports'] as $probe) {
 }
 check(strpos(docgenSmtpExplain('SMTP ERROR: Failed to connect to server: Connection timed out (110)', 'ssl', 465), 'не ошибка пароля') !== false, 'таймаут 465 объяснён как блокировка порта, а не пароль');
 
+// 13. Бан firewall выглядит как сетевой сбой: пауза вместо серии попыток.
+check(docgenIsNetworkError('SMTP Error: Could not connect to SMTP host. Failed to connect to server') === true, 'сетевой сбой распознан');
+check(docgenIsNetworkError('SMTP ERROR: Failed to connect to server: Connection timed out (110)') === true, 'таймаут 110 распознан как сетевой');
+check(docgenIsNetworkError('stream_socket_client(): Unable to connect (Connection refused)') === true, 'отказ соединения распознан');
+check(docgenIsNetworkError('SMTP Error: The following recipients failed: boss@example.org') === false, 'ошибка адреса не считается сетевой');
+check(docgenIsNetworkError('SMTP Error: Could not authenticate.') === false, 'ошибка входа не считается сетевой');
+check(docgenIsNetworkError('421 4.7.0 ratelimit exceeded') === false, 'лимит 421 не считается сетевым сбоем');
+check(docgenIsRateLimitError('421 4.7.0 ratelimit exceeded') === true, 'лимит 421 остаётся лимитом');
+
+$netAccountId = 'acc_net_test';
+check(docgenCronNetworkPauseRemaining($netAccountId) === 0, 'до сбоя сетевой паузы нет');
+docgenCronNoteNetworkFailure($netAccountId, 'Connection timed out (110)');
+$netLeft = docgenCronNetworkPauseRemaining($netAccountId);
+check($netLeft > 800 && $netLeft <= 900, 'после сетевого сбоя пауза около 15 минут');
+$netState = docgenReadJson(docgenCronAccountPath($netAccountId, 'state.json'), []);
+check(strpos((string) ($netState['networkPauseReason'] ?? ''), 'timed out') !== false, 'причина сетевой паузы сохранена');
+check(strpos(docgenSmtpNetworkErrorHint(), 'fail2ban') !== false, 'подсказка называет fail2ban');
+$netDefault = (string) docgenSmtpAccountStore()['defaultId'];
+docgenCronNoteNetworkFailure($netDefault, 'Connection timed out (110)');
+$netTick = docgenCronSend($netDefault, false);
+check(($netTick['reason'] ?? '') === 'network_pause', 'тик ящика на сетевой паузе ничего не отправляет');
+check((int) ($netTick['pauseLeft'] ?? 0) > 0, 'тик сообщает остаток сетевой паузы');
+check(strpos((string) ($netTick['hint'] ?? ''), 'fail2ban') !== false, 'тик объясняет причину паузы');
+$netState = docgenReadJson(docgenCronAccountPath($netDefault, 'state.json'), []);
+$netState['networkPauseUntil'] = 0;
+docgenWriteJson(docgenCronAccountPath($netDefault, 'state.json'), $netState);
+check(docgenCronNetworkPauseRemaining($netDefault) === 0, 'сетевую паузу можно снять');
+
+// Частые нажатия «Проверить SMTP» сами по себе серия отказов — их считаем.
+@unlink(DOCGEN_STORAGE_DIR . '/smtp-probe-state.json');
+$probeSettings = ['host' => '127.0.0.1', 'port' => 9, 'encryption' => 'tls', 'username' => 'u@mail.ru',
+    'fromEmail' => 'u@mail.ru', 'fromName' => '', 'replyTo' => ''];
+$probeFirst = docgenSmtpDiagnose($probeSettings, 'pw');
+check($probeFirst['probeCount'] === 1 && $probeFirst['probeWarn'] === '', 'первое нажатие проверки без предупреждения');
+docgenSmtpDiagnose($probeSettings, 'pw');
+$probeThird = docgenSmtpDiagnose($probeSettings, 'pw');
+check($probeThird['probeCount'] === 3, 'счётчик нажатий проверки растёт');
+check(strpos((string) $probeThird['probeWarn'], 'продлит бан') !== false, 'на третьем нажатии предупреждение о бане');
+check(strpos(docgenSmtpExplain('SMTP ERROR: Failed to connect to server: Connection timed out (110)', 'ssl', 465), 'fail2ban') !== false, 'таймаут объяснён через fail2ban');
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 

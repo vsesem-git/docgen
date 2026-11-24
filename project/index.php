@@ -3174,7 +3174,9 @@ function openSmtpLog(diagnostics) {
   bad.className='smtp-log-badge '+(ok?'ok':'bad');
   $('smtpLogSubtitle').textContent=[log.server||'', log.context?.['шифрование']||'', log.elapsedMs?`${log.elapsedMs} мс`:''].filter(Boolean).join(' · ');
   $('smtpLogHeadline').textContent=log.summary||(ok?'Соединение проверено.':'Проверка не прошла.');
-  $('smtpLogHint').textContent=ok?'Пароль и диалог с сервером скрыты. Сервер принял параметры авторизации.':'Ниже — сетевые шаги и полный диалог: по ним видно, на каком этапе всё остановилось.';
+  $('smtpLogHint').textContent=ok
+    ?'Пароль и диалог с сервером скрыты. Сервер принял параметры авторизации.'
+    :(log.probeWarn||'Ниже — сетевые шаги и полный диалог: по ним видно, на каком этапе всё остановилось.');
   const steps=Array.isArray(log.steps)?log.steps:[];
   $('smtpLogSteps').innerHTML=steps.length?steps.map(step=>`<li class="${step.ok?'good':'bad'}"><span class="step-name">${esc(step.step||'')}</span><span>${step.ok?'✓':'✕'} ${esc(step.detail||'')}</span></li>`).join(''):'<li><span class="step-name">Сеть</span><span>Сетевые шаги недоступны.</span></li>';
   const ports=Array.isArray(log.ports)?log.ports:[];
