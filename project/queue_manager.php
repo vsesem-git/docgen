@@ -37,6 +37,8 @@ h2{font-size:16px;margin:0 0 10px;color:#173b60}.hint{color:var(--muted);font-si
 button,input,select{font:inherit}button{cursor:pointer}.btn{border:1px solid #bdd0e3;background:#fff;border-radius:8px;padding:8px 12px;color:#174a7e}.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}.btn.danger{border-color:#e6b4ae;color:var(--bad)}button:disabled{opacity:.45;cursor:not-allowed}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}.field input{width:100%;border:1px solid #cbd7e3;border-radius:8px;padding:8px}
 .batch{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}.batch>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650}.batch .body{padding:12px 13px;border-top:1px solid var(--line)}
+.account-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:9px;padding:8px 10px;border:1px dashed #c3d5e6;border-radius:8px;background:#f7fbff}
+.account-row select{border:1px solid #cbd7e3;border-radius:7px;padding:6px 9px;font:inherit;min-width:200px;background:#fff}
 .item{border:1px solid #e3ebf4;border-radius:8px;padding:9px 11px;margin-bottom:7px;background:#fff}.item .meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.pill{border-radius:999px;padding:2px 8px;font-size:11px;background:#eef3f9;color:var(--muted)}.pill.sent{background:#e8f6ee;color:var(--ok)}.pill.failed{background:#fdecea;color:var(--bad)}.pill.scheduled{background:#fff5e5;color:var(--warn)}.pill.paused{background:#ece7f8;color:#5b3fa3}
 a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:9px}.muted{color:var(--muted);font-size:12px}.error{color:var(--bad);font-size:12px}.feedback{margin-left:8px;font-size:12px}
 [hidden]{display:none!important}
@@ -70,7 +72,7 @@ a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:ce
 <script>
 'use strict';
 const CSRF_TOKEN = <?= json_encode($csrf, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
-let batches = [], items = [];
+let batches = [], items = [], smtpAccounts = [];
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const labels = {queued:'в ручной очереди',scheduled:'в расписании',sending:'отправляется',sent:'отправлено',failed:'ошибка',cancelled:'отменено',review:'на проверке',manual:'ручная очередь',done:'завершено',paused:'на паузе'};
@@ -90,7 +92,7 @@ function render(){
     const canPause=['manual','scheduled'].includes(batch.status);
     const index=batches.indexOf(batch);
     const canUp=index>0, canDown=index>=0&&index<batches.length-1;
-    return `<details class="batch" ${batch.status==='scheduled'?'open':''}><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')} ${pill(batch.status)}</summary><div class="body"><div class="muted">Позиция в очереди: ${Number(batch.priority||index+1)} · создано: ${esc(batch.createdAt||'')} · отправлено: ${Number(batch.sentCount||0)} · ошибок: ${Number(batch.failedCount||0)} · режим: ${esc(batch.mode==='auto'?'авто по расписанию':'ручной')}${batch.pausedAt?` · на паузе с ${esc(batch.pausedAt)}`:''}</div><div class="actions"><button class="btn" data-action="up" data-id="${esc(batch.id)}" ${canUp?'':'disabled'} title="Переместить выше">↑ Выше</button><button class="btn" data-action="down" data-id="${esc(batch.id)}" ${canDown?'':'disabled'} title="Переместить ниже">↓ Ниже</button><button class="btn" data-action="${batch.status==='paused'?'resume':'pause'}" data-id="${esc(batch.id)}" ${(batch.status==='paused'||canPause)?'':'disabled'}>${batch.status==='paused'?'Продолжить':'Пауза'}</button><button class="btn danger" data-action="cancel" data-id="${esc(batch.id)}" ${canCancel?'':'disabled'}>Остановить пачку</button><button class="btn" data-action="retry" data-id="${esc(batch.id)}">Повторить ошибочные</button><button class="btn danger" data-action="delete" data-id="${esc(batch.id)}">Удалить пачку</button><span class="feedback" data-feedback="${esc(batch.id)}"></span></div><div style="margin-top:10px">${list||'<span class="muted">Писем нет.</span>'}</div></div></details>`;
+    return `<details class="batch" ${batch.status==='scheduled'?'open':''}><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')} ${pill(batch.status)}</summary><div class="body"><div class="muted">Позиция в очереди: ${Number(batch.priority||index+1)} · создано: ${esc(batch.createdAt||'')} · отправлено: ${Number(batch.sentCount||0)} · ошибок: ${Number(batch.failedCount||0)} · режим: ${esc(batch.mode==='auto'?'авто по расписанию':'ручной')}${batch.pausedAt?` · на паузе с ${esc(batch.pausedAt)}`:''}</div><div class="account-row"><span class="muted">Ящик отправки: <b>${esc(batch.smtpAccountLabel||'не выбран')}</b></span><select data-batch-account="${esc(batch.id)}" ${['review','manual','scheduled','paused'].includes(batch.status)?'':'disabled'}>${accountOptions(batch.smtpAccountId)}</select><button class="btn" data-action="account" data-id="${esc(batch.id)}" ${['review','manual','scheduled','paused'].includes(batch.status)?'':'disabled'}>Сменить ящик</button></div><div class="actions"><button class="btn" data-action="up" data-id="${esc(batch.id)}" ${canUp?'':'disabled'} title="Переместить выше">↑ Выше</button><button class="btn" data-action="down" data-id="${esc(batch.id)}" ${canDown?'':'disabled'} title="Переместить ниже">↓ Ниже</button><button class="btn" data-action="${batch.status==='paused'?'resume':'pause'}" data-id="${esc(batch.id)}" ${(batch.status==='paused'||canPause)?'':'disabled'}>${batch.status==='paused'?'Продолжить':'Пауза'}</button><button class="btn danger" data-action="cancel" data-id="${esc(batch.id)}" ${canCancel?'':'disabled'}>Остановить пачку</button><button class="btn" data-action="retry" data-id="${esc(batch.id)}">Повторить ошибочные</button><button class="btn danger" data-action="delete" data-id="${esc(batch.id)}">Удалить пачку</button><span class="feedback" data-feedback="${esc(batch.id)}"></span></div><div style="margin-top:10px">${list||'<span class="muted">Писем нет.</span>'}</div></div></details>`;
   }).join('') : '<p class="muted">Пачек в менеджере пока нет. Сформируйте документы и проверьте новую пачку на главной странице.</p>';
   document.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>runBatchAction(button.dataset.action,button.dataset.id)));
 }
@@ -106,7 +108,21 @@ async function post(action,fd,label){
   if(!response.ok||!payload.ok)throw new Error(payload.error||'Операция не выполнена.');
   showToast(label,'success');await load();return payload;
 }
+function accountOptions(selected){
+  return smtpAccounts.map(account=>`<option value="${esc(account.id)}"${account.id===selected?' selected':''}>${esc(account.label||account.fromEmail||account.id)}${account.fromEmail?' · '+esc(account.fromEmail):''}</option>`).join('');
+}
 async function runBatchAction(action,id){
+  if(action==='account'){
+    const select=document.querySelector(`[data-batch-account="${CSS.escape(id)}"]`);
+    const accountId=select?.value||'';
+    if(!accountId)return;
+    const fd=new FormData();fd.append('batch_id',id);fd.append('smtp_account_id',accountId);
+    const target=document.querySelector(`[data-feedback="${CSS.escape(id)}"]`);
+    if(target)target.textContent='Меняем ящик…';
+    try{const payload=await post('change_batch_account',fd,'Ящик изменён.');if(target)target.textContent=payload.message||'Ящик изменён.';}
+    catch(e){if(target)target.textContent=e.message;showToast(e.message,'error');}
+    return;
+  }
   if(action==='delete'){
     if(!window.confirm('Удалить пачку вместе со всеми письмами и файлами? Это действие нельзя отменить.'))return;
   }
@@ -155,6 +171,7 @@ function applyMailingForm(payload){
   $('jitterSeconds').value=Number(settings.jitterSeconds??20);
   $('weekdaysOnly').checked=Boolean(settings.weekdaysOnly);
   renderMailingAccounts(payload.accounts||[]);
+  smtpAccounts=(payload.accounts||[]).map(account=>({id:String(account.id||''),label:account.label||'',fromEmail:account.fromEmail||''}));
 }
 async function loadMailingSettings(){
   const response=await fetch('?action=mailing_settings',{cache:'no-store'});

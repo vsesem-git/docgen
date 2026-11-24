@@ -2139,10 +2139,34 @@ function docgenSaveMailingSettings(): never
     sendJson(['ok' => true, 'settings' => $settings, 'accounts' => docgenMailingAccounts()]);
 }
 
+/**
+ * Назначить ящик пачке и всем её письмам. Вызывается только на этапе проверки
+ * пачки: до этого очередь существует без отправителя и его можно выбрать
+ * спокойно, зная, сколько писем и кому уйдёт.
+ */
+function docgenAssignBatchAccount(string $batchId, string $accountId): array
+{
+    $store = docgenSmtpAccountStore();
+    if (!in_array($accountId, array_column($store['accounts'], 'id'), true)) {
+        throw new RuntimeException('Выберите SMTP-ящик из списка: он определяет отправителя писем.');
+    }
+    $account = docgenSmtpAccount($accountId);
+    foreach (docgenBatchItems($batchId) as $item) {
+        if (($item['status'] ?? '') === 'sent') {
+            continue;
+        }
+        $item['smtpAccountId'] = (string) $account['id'];
+        $item['smtpAccountLabel'] = (string) ($account['label'] ?? '');
+        docgenSaveQueueItem($item);
+    }
+    return $account;
+}
+
 function docgenReviewBatch(): never
 {
     $batchId = trim((string) ($_POST['batch_id'] ?? ''));
     $mode = (string) ($_POST['mode'] ?? '');
+    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
     if (!in_array($mode, ['manual', 'auto'], true)) {
         sendJson(['ok' => false, 'error' => 'Выберите режим очереди.'], 422);
     }
@@ -2157,6 +2181,13 @@ function docgenReviewBatch(): never
     if (!$items) {
         sendJson(['ok' => false, 'error' => 'В пачке нет писем.'], 422);
     }
+    // Очередь уже сформирована — теперь выбираем ящик, из которого пойдут письма.
+    try {
+        $account = docgenAssignBatchAccount($batchId, $accountId);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    $items = docgenBatchItems($batchId);
     if ($mode === 'auto') {
         $broken = 0;
         foreach ($items as $item) {
@@ -2184,6 +2215,8 @@ function docgenReviewBatch(): never
     $batch['mode'] = $mode;
     $batch['reviewedAt'] = date(DATE_ATOM);
     $batch['updatedAt'] = date(DATE_ATOM);
+    $batch['smtpAccountId'] = (string) $account['id'];
+    $batch['smtpAccountLabel'] = (string) ($account['label'] ?? '');
     foreach ($items as $item) {
         if (($item['status'] ?? '') !== 'queued') {
             continue;
@@ -2199,7 +2232,46 @@ function docgenReviewBatch(): never
     } else {
         docgenSaveLegacyBatchState($batch);
     }
-    sendJson(['ok' => true, 'batch' => $batch, 'itemCount' => count($items)]);
+    sendJson([
+        'ok' => true,
+        'batch' => $batch,
+        'itemCount' => count($items),
+        'account' => ['id' => (string) $account['id'], 'label' => (string) ($account['label'] ?? ''), 'fromEmail' => (string) ($account['fromEmail'] ?? '')],
+    ]);
+}
+
+/**
+ * Сменить ящик у пачки, которая ещё не начала отправляться. Нужно, когда
+ * оператор поставил пачку в очередь, а потом передумал насчёт отправителя.
+ */
+function docgenChangeBatchAccount(): never
+{
+    $batchId = trim((string) ($_POST['batch_id'] ?? ''));
+    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
+    $batch = docgenBatchMeta($batchId);
+    if (!$batch) {
+        sendJson(['ok' => false, 'error' => 'Пачка не найдена.'], 404);
+    }
+    if (!in_array(($batch['status'] ?? ''), ['review', 'manual', 'scheduled', 'paused'], true)) {
+        sendJson(['ok' => false, 'error' => 'Ящик можно менять только до начала отправки пачки.'], 409);
+    }
+    try {
+        $account = docgenAssignBatchAccount($batchId, $accountId);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    if ($batchId !== 'legacy') {
+        $batch['smtpAccountId'] = (string) $account['id'];
+        $batch['smtpAccountLabel'] = (string) ($account['label'] ?? '');
+        $batch['updatedAt'] = date(DATE_ATOM);
+        docgenSaveBatch($batch);
+    }
+    sendJson([
+        'ok' => true,
+        'batch' => $batch,
+        'account' => ['id' => (string) $account['id'], 'label' => (string) ($account['label'] ?? ''), 'fromEmail' => (string) ($account['fromEmail'] ?? '')],
+        'message' => 'Письма пачки будут отправлены из ящика «' . (string) ($account['label'] ?? $account['id']) . '».',
+    ]);
 }
 
 function docgenCancelBatch(): never
@@ -2715,9 +2787,8 @@ function docgenGenerate(): never
         }
     }
 
-    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
-    $store = docgenSmtpAccountStore();
-    $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
+    // Ящик здесь не выбирается: очередь формируется без отправителя, а ящик
+    // оператор назначает на этапе проверки пачки (docgenReviewBatch).
     // One template = document + its own letter layout (HTML design, recipients,
     // name, subject, text). Templates without a saved copy use common defaults.
     $letterTemplateId = (string) ($template['id'] ?? '');
@@ -2833,8 +2904,8 @@ function docgenGenerate(): never
                     'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
                     'position' => (string) ($fields['Должность'] ?? $fields['Должность руководителя'] ?? ''),
                     'templateName' => (string) $template['name'],
-                    'smtpAccountId' => (string) $settings['id'],
-                    'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
+                    'smtpAccountId' => '',
+                    'smtpAccountLabel' => '',
                     'filename' => $baseName,
                     'to' => implode('; ', $to),
                     'cc' => implode('; ', $cc),
@@ -2937,8 +3008,8 @@ function docgenGenerate(): never
         'priority' => docgenNextBatchPriority(),
         'createdAt' => date(DATE_ATOM),
         'reviewedAt' => null,
-        'smtpAccountId' => (string) ($settings['id'] ?? ''),
-        'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
+        'smtpAccountId' => '',
+        'smtpAccountLabel' => '',
         'sentCount' => 0,
         'failedCount' => 0,
         'lastError' => '',
@@ -3736,6 +3807,9 @@ function docgenSendQueueItem(): never
     if (!is_file($pdfPath) || filesize($pdfPath) === 0) {
         sendJson(['ok' => false, 'error' => 'PDF-вложение отсутствует.'], 404);
     }
+    if (trim((string) ($meta['smtpAccountId'] ?? '')) === '') {
+        sendJson(['ok' => false, 'error' => 'У письма не выбран ящик отправки. Передайте пачку в очередь на главной странице и выберите ящик при проверке.'], 422);
+    }
     $toText = (string) ($meta['to'] ?? '');
     $ccText = (string) ($meta['cc'] ?? '');
     if (docgenHasUnparsedEmailText($toText) || docgenHasUnparsedEmailText($ccText)) {
@@ -4292,6 +4366,8 @@ function docgenDispatch(string $action): void
             docgenSendQueueItem();
         case 'review_batch':
             docgenReviewBatch();
+        case 'change_batch_account':
+            docgenChangeBatchAccount();
         case 'cancel_batch':
             docgenCancelBatch();
         case 'retry_batch':

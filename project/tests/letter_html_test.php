@@ -219,6 +219,53 @@ $fromDomain = 'cmkcenter.ru';
 check(preg_match('/^[a-z0-9][a-z0-9.-]*$/i', $fromDomain) === 1, 'sender domain is a valid HELO name');
 check(preg_match('/^[a-z0-9][a-z0-9.-]*$/i', 'docgen') === 1, 'container hostname would have passed the old check, so the explicit HELO matters');
 
+// 11. Письма очереди не привязаны к ящику: сначала очередь, потом ящик.
+$accA = 'acc_' . bin2hex(random_bytes(4));
+$accB = 'acc_' . bin2hex(random_bytes(4));
+docgenSmtpWriteAccount(['id' => $accA, 'label' => 'Первый ящик', 'host' => 'smtp.mail.ru', 'port' => 465,
+    'encryption' => 'ssl', 'username' => 'one@mail.ru', 'fromEmail' => 'one@mail.ru', 'fromName' => 'ЦМК'], 'secret-a', false);
+docgenSmtpWriteAccount(['id' => $accB, 'label' => 'Второй ящик', 'host' => 'smtp.mail.ru', 'port' => 465,
+    'encryption' => 'ssl', 'username' => 'two@mail.ru', 'fromEmail' => 'two@mail.ru', 'fromName' => 'ЦМК'], 'secret-b', false);
+
+$queueBatch = bin2hex(random_bytes(16));
+$queueIds = [];
+foreach (['Регион А', 'Регион Б'] as $index => $region) {
+    $queueId = bin2hex(random_bytes(16));
+    $queueIds[] = $queueId;
+    docgenEnsureDir(docgenQueuePath($queueId));
+    file_put_contents(docgenQueuePath($queueId) . '/document.pdf', '%PDF-1.4 test');
+    docgenSaveQueueItem([
+        'id' => $queueId, 'batchId' => $queueBatch, 'recipientName' => 'Иванов И.И.', 'to' => 'boss@example.org',
+        'cc' => '', 'subject' => 'Программа', 'body' => 'Текст', 'bodyHtml' => '', 'filename' => 'Программа',
+        'status' => 'queued', 'createdAt' => date(DATE_ATOM), 'smtpAccountId' => '', 'smtpAccountLabel' => '', 'region' => $region,
+    ]);
+}
+docgenSaveBatch(['id' => $queueBatch, 'name' => 'МИНЗДРАВ', 'itemCount' => 2, 'subject' => 'Программа',
+    'status' => 'review', 'mode' => '', 'priority' => docgenNextBatchPriority(), 'createdAt' => date(DATE_ATOM),
+    'sentCount' => 0, 'failedCount' => 0, 'smtpAccountId' => '', 'smtpAccountLabel' => '']);
+
+check(docgenReadQueueItem($queueIds[0])['smtpAccountId'] === '', 'очередь создаётся без ящика');
+check((docgenBatchMeta($queueBatch)['smtpAccountId'] ?? '') === '', 'пачка на проверке без ящика');
+
+$assigned = docgenAssignBatchAccount($queueBatch, $accB);
+check($assigned['id'] === $accB, 'ящик назначается на этапе проверки пачки');
+check(docgenReadQueueItem($queueIds[0])['smtpAccountId'] === $accB
+    && docgenReadQueueItem($queueIds[1])['smtpAccountId'] === $accB, 'ящик попадает во все письма пачки');
+check(docgenReadQueueItem($queueIds[1])['smtpAccountLabel'] === 'Второй ящик', 'в письме остаётся читаемое имя ящика');
+
+$refused = false;
+try {
+    docgenAssignBatchAccount($queueBatch, 'acc_missing');
+} catch (Throwable $e) {
+    $refused = strpos($e->getMessage(), 'SMTP-ящик') !== false;
+}
+check($refused, 'неизвестный ящик отклоняется');
+check(docgenReadQueueItem($queueIds[0])['smtpAccountId'] === $accB, 'отказ не сбрасывает уже назначенный ящик');
+
+docgenAssignBatchAccount($queueBatch, $accA);
+check(docgenReadQueueItem($queueIds[0])['smtpAccountId'] === $accA, 'ящик можно сменить до отправки');
+check(docgenCronItemAccountId(docgenReadQueueItem($queueIds[0])) === $accA, 'лимит и поток считаются по выбранному ящику');
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 
