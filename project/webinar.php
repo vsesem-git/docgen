@@ -250,7 +250,7 @@ $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
 // ---------------------------------------------------------------------------
 
 if ($webinarsAction !== '' && $webinarsAction !== 'login' && $webinarsAction !== 'logout' && $webinarsAction !== 'page') {
-    $postActions = ['scan', 'export', 'editorial_save', 'layout_upload', 'layout_reset', 'monitor_schedule', 'monitor_check', 'telegram_pair', 'telegram_test', 'telegram_disconnect'];
+    $postActions = ['scan', 'export', 'editorial_save', 'layout_upload', 'layout_reset', 'monitor_schedule', 'monitor_check', 'telegram_pair', 'telegram_pair_check', 'telegram_test', 'telegram_disconnect'];
     $getActions = ['catalog', 'detail', 'scan_status', 'progress', 'editorial', 'layout', 'monitor', 'telegram_status', 'bundle', 'saved'];
     if (in_array($webinarsAction, $postActions, true) && $method !== 'POST') {
         webinarsJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -403,31 +403,38 @@ if ($webinarsAction !== '' && $webinarsAction !== 'login' && $webinarsAction !==
                 ]);
 
             case 'telegram_pair':
+                // Шаг 1: проверить токен и выдать код. Ответ короткий — код виден
+                // сразу, а не после трёх минут ожидания, которые обрывал браузер.
                 if (webinarsTelegramConfig() !== null && !empty(webinarsTelegramConfig()['env'])) {
                     webinarsJson(['ok' => false, 'error' => 'Telegram задан окружением службы. Для настройки из панели уберите переменные DOCGEN_WEBINARS_TELEGRAM_*.'], 409);
                 }
                 $token = webinarsTelegramCheckToken((string) ($_POST['token'] ?? ''));
-                $progress = bin2hex(random_bytes(16));
-                webinarsProgressWrite($progress, ['state' => 'starting', 'message' => 'Связываемся с Telegram…']);
-                try {
-                    $username = webinarsTelegramUsername($token);
-                    webinarsProgressWrite($progress, ['state' => 'waiting', 'message' => 'Отправьте этот код боту в личном чате.', 'username' => $username]);
-                    $paired = webinarsTelegramPair($token, static function (string $bot, string $code) use ($progress): void {
-                        webinarsProgressWrite($progress, [
-                            'state' => 'waiting',
-                            'username' => $bot,
-                            'code' => $code,
-                            'expires' => time() + 180,
-                            'message' => 'Отправьте этот код боту в личном чате.',
-                        ]);
-                    });
-                    webinarsTelegramSend($token, $paired['chat_id'], WEBINARS_TELEGRAM_TEST);
-                    webinarsTelegramSave($token, $paired['chat_id']);
-                    webinarsProgressWrite($progress, ['state' => 'done', 'message' => 'Бот привязан. Тестовое сообщение отправлено в этот чат.']);
-                } catch (WebinarsTelegramError $error) {
-                    webinarsProgressWrite($progress, ['state' => 'error', 'message' => $error->getMessage()]);
+                $pair = webinarsTelegramPairStart($token);
+                webinarsJson([
+                    'ok' => true,
+                    'pair' => [
+                        'code' => $pair['code'],
+                        'username' => $pair['username'],
+                        'url' => $pair['url'],
+                        'expires' => $pair['expires'],
+                    ],
+                    'message' => 'Откройте @' . $pair['username'] . ', нажмите «Запустить» и отправьте код в личном чате.',
+                ]);
+
+            case 'telegram_pair_check':
+                // Шаг 2: интерфейс сам опрашивает этот эндпоинт; каждый вызов —
+                // один короткий getUpdates, поэтому запрос не висит минутами.
+                if (webinarsTelegramConfig() !== null && !empty(webinarsTelegramConfig()['env'])) {
+                    webinarsJson(['ok' => false, 'error' => 'Telegram задан окружением службы. Для настройки из панели уберите переменные DOCGEN_WEBINARS_TELEGRAM_*.'], 409);
                 }
-                webinarsJson(['ok' => true, 'progress' => $progress, 'monitor' => webinarsMonitorStatus()]);
+                $token = webinarsTelegramCheckToken((string) ($_POST['token'] ?? ''));
+                $check = webinarsTelegramPairCheck($token);
+                webinarsJson([
+                    'ok' => true,
+                    'state' => $check['state'],
+                    'message' => $check['message'],
+                    'monitor' => $check['state'] === 'done' ? webinarsMonitorStatus() : null,
+                ]);
 
             case 'telegram_test':
                 $config = webinarsTelegramConfig();

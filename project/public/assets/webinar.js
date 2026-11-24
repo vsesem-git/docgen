@@ -674,43 +674,80 @@ async function refreshMonitor() {
 
 function renderTelegramTask(task) {
   monitorUi.task = task;
-  el['pair-box'].hidden = task.state !== 'waiting';
+  const waiting = task.state === 'waiting';
+  el['pair-box'].hidden = !waiting || !task.code;
   if (!el['pair-box'].hidden) {
     el['pair-bot'].href = 'https://t.me/' + task.username;
     el['pair-bot'].textContent = '@' + task.username;
-    el['pair-code'].textContent = task.code || '—';
-    el['pair-remaining'].textContent = task.expires ? `Код действует ещё ${Math.max(0, task.expires - Math.floor(Date.now() / 1000))} с.` : '';
-  } else {
+    el['pair-code'].textContent = task.code;
+    const left = task.expires ? Math.max(0, task.expires - Math.floor(Date.now() / 1000)) : 0;
+    el['pair-remaining'].textContent = left ? `Код действует ещё ${left} с. Бот уже ждёт сообщение — панель проверит его сама.` : '';
+  } else if (task.state !== 'waiting') {
     el['pair-code'].textContent = '';
     el['pair-bot'].removeAttribute('href');
   }
-  const message = task.state === 'waiting' ? '' : task.message;
-  if (el['monitor-feedback'].textContent !== message) feedback('monitor-feedback', message, task.state === 'error');
+  if (!waiting && task.message) feedback('monitor-feedback', task.message, task.state === 'error');
   renderMonitorControls();
 }
 
-async function followTelegramTask(start) {
-  renderTelegramTask(start);
-  if (monitorUi.pollId === start.id) return;
-  if (!taskActive(start)) {
-    refreshMonitor();
-    return;
-  }
-  monitorUi.pollId = start.id;
-  let task = start;
+// Привязка бота: сервер отдаёт код сразу, а интерфейс сам опрашивает
+// telegram_pair_check раз в 2 с. Один долгий HTTP-запрос не используется —
+// раньше именно он обрывался по таймауту раньше, чем показывался код.
+async function followTelegramPair(pair, token) {
+  const id = pair.code;
+  renderTelegramTask({ state: 'waiting', username: pair.username, code: pair.code, expires: pair.expires, message: '' });
+  feedback('monitor-feedback', 'Отправьте код боту в личном чате — ждём сообщение.');
+  if (monitorUi.pollId) return;
+  monitorUi.pollId = id;
+  let lastMessage = '';
   try {
-    while (taskActive(task) && monitorUi.pollId === start.id) {
-      await delay(1100);
-      const data = await read('progress', { token: start.id });
-      task = { id: start.id, ...(data.progress || {}) };
-      if (monitorUi.pollId !== start.id) break;
-      renderTelegramTask(task);
+    while (monitorUi.pollId === id) {
+      const left = (pair.expires || 0) - Math.floor(Date.now() / 1000);
+      if (left <= 0) {
+        renderTelegramTask({ state: 'error', message: 'Код устарел. Нажмите «Привязать бота» ещё раз.' });
+        break;
+      }
+      await delay(2000);
+      if (monitorUi.pollId !== id) break;
+      const data = await request('telegram_pair_check', form({ token }));
+      if (data.state === 'done') {
+        renderTelegramTask({ state: 'done', message: data.message });
+        if (data.monitor) renderMonitor(data.monitor);
+        toast('Бот привязан.');
+        break;
+      }
+      if (data.state === 'expired') {
+        renderTelegramTask({ state: 'error', message: data.message });
+        break;
+      }
+      renderTelegramTask({ state: 'waiting', username: pair.username, code: pair.code, expires: pair.expires, message: '' });
+      if (data.message && data.message !== lastMessage) {
+        lastMessage = data.message;
+        if (/не в личном чате/i.test(data.message)) feedback('monitor-feedback', data.message, true);
+      }
     }
   } catch (error) {
-    renderTelegramTask({ ...task, state: 'error', message: error.message || 'Не удалось получить состояние привязки.' });
+    renderTelegramTask({ state: 'error', message: error.message || 'Не удалось получить состояние привязки.' });
   } finally {
-    if (monitorUi.pollId === start.id) monitorUi.pollId = null;
+    if (monitorUi.pollId === id) monitorUi.pollId = null;
+    renderMonitorControls();
     refreshMonitor();
+  }
+}
+
+async function startTelegramPair(token) {
+  if (monitorUi.pending) return;
+  monitorUi.pending = true;
+  feedback('monitor-feedback', 'Связываемся с Telegram…');
+  renderMonitorControls();
+  try {
+    const result = await request('telegram_pair', form({ token }));
+    if (result.pair) followTelegramPair(result.pair, token);
+  } catch (error) {
+    feedback('monitor-feedback', error.message || 'Не удалось начать привязку.', true);
+  } finally {
+    monitorUi.pending = false;
+    renderMonitorControls();
   }
 }
 
@@ -721,15 +758,11 @@ async function monitorAction(action, fields = {}, success = '') {
   renderMonitorControls();
   try {
     const result = await request(action, form(fields));
-    if (result.progress) {
-      followTelegramTask({ id: result.progress, state: 'starting', message: 'Связываемся с Telegram…' });
-    } else {
-      if (result.monitor) renderMonitor(result.monitor);
-      feedback('monitor-feedback', result.notice || success);
-      if (action === 'monitor_check') {
-        if (result.catalog) useCatalog(result.catalog, false, true);
-        toast(result.result?.note || 'Проверка завершена.', !result.result?.ok);
-      }
+    if (result.monitor) renderMonitor(result.monitor);
+    feedback('monitor-feedback', result.notice || success);
+    if (action === 'monitor_check') {
+      if (result.catalog) useCatalog(result.catalog, false, true);
+      toast(result.result?.note || 'Проверка завершена.', !result.result?.ok);
     }
   } catch (error) {
     feedback('monitor-feedback', error.message || 'Не удалось выполнить действие.', true);
@@ -837,11 +870,11 @@ el['monitor-toggle'].addEventListener('click', () => {
     enabled ? 'Расписание сохранено и включено.' : 'Следующие автоматические проверки приостановлены.');
 });
 el['monitor-check-now'].addEventListener('click', () => monitorAction('monitor_check', {}, 'Проверка запущена.'));
+// Токен не стираем до успеха: при ошибке его не нужно вставлять заново.
 el['telegram-form'].addEventListener('submit', event => {
   event.preventDefault();
   const token = el['telegram-token'].value.trim();
-  el['telegram-token'].value = '';
-  if (token) monitorAction('telegram_pair', { token });
+  if (token) startTelegramPair(token);
 });
 el['telegram-test'].addEventListener('click', () => monitorAction('telegram_test', {}, 'Тестовое сообщение отправлено.'));
 el['telegram-disconnect'].addEventListener('click', () => {

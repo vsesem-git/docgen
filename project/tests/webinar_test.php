@@ -254,6 +254,45 @@ foreach (['', 'не токен', '12345:короткий'] as $bad) {
 check($invalid === 3, 'некорректные токены бота отклоняются');
 check(webinarsTelegramCheckChat('-1001234567890') === '-1001234567890', 'числовой ID чата принимается');
 
+// --- Привязка бота: два коротких шага вместо одного 180-секундного запроса ---
+// Именно долгий запрос ломал привязку: браузер обрывал его раньше, чем
+// появлялся код, и оператор видел «Код не получен».
+putenv('DOCGEN_WEBINARS_TELEGRAM_STUB=1');
+$pairToken = '9011524943:AAGqTja64rY3SmVJQb_9XDGL78pqG1tGbb4';
+$stubFile = $storage . '/webinars/telegram-stub.json';
+$stubWrite = static function (array $updates) use ($stubFile): void {
+    docgenEnsureDir(dirname($stubFile), 0700);
+    file_put_contents($stubFile, json_encode(['sent' => 0, 'updates' => $updates]));
+};
+$stubRead = static function () use ($stubFile): array {
+    return is_file($stubFile) ? (array) json_decode((string) file_get_contents($stubFile), true) : [];
+};
+
+$pairStarted = microtime(true);
+$pair = webinarsTelegramPairStart($pairToken);
+check(microtime(true) - $pairStarted < 1.0, 'привязка: код выдаётся сразу, без ожидания');
+check(preg_match('/^ЦМК-[A-F0-9]{10}$/', $pair['code']) === 1, 'привязка: код вида ЦМК-XXXXXXXXXX');
+check($pair['username'] === 'cmk_docgen_test_bot' && str_starts_with($pair['url'], 'https://t.me/'), 'привязка: имя и ссылка на бота');
+check(webinarsTelegramPairCheck($pairToken)['state'] === 'waiting', 'привязка: до сообщения — waiting');
+
+$stubWrite([['update_id' => 100, 'message' => ['text' => 'привет', 'chat' => ['id' => 1, 'type' => 'private']]]]);
+check(webinarsTelegramPairCheck($pairToken)['state'] === 'waiting', 'привязка: постороннее сообщение не привязывает чат');
+
+$stubWrite([['update_id' => 101, 'message' => ['text' => $pair['code'], 'chat' => ['id' => -1001234567890, 'type' => 'group']]]]);
+$groupAnswer = webinarsTelegramPairCheck($pairToken);
+check($groupAnswer['state'] === 'waiting' && str_contains($groupAnswer['message'], 'личн'), 'привязка: код из группы не принимается');
+
+$stubWrite([['update_id' => 102, 'message' => ['text' => $pair['code'], 'chat' => ['id' => 777123456, 'type' => 'private']]]]);
+$paired = webinarsTelegramPairCheck($pairToken);
+check($paired['state'] === 'done' && ($paired['chat_id'] ?? '') === '777123456', 'привязка: код из личного чата привязывает бота');
+check(($stubRead()['sent'] ?? 0) === 1, 'привязка: тестовое сообщение отправлено один раз');
+$savedTelegram = webinarsTelegramConfig();
+check($savedTelegram !== null && $savedTelegram['chat_id'] === '777123456', 'привязка: токен и чат сохранены');
+check(webinarsTelegramPairCheck($pairToken)['state'] === 'expired', 'привязка: повторный опрос после успеха — expired');
+webinarsTelegramForget();
+check(webinarsTelegramConfig() === null, 'привязка: отвязка удаляет токен');
+putenv('DOCGEN_WEBINARS_TELEGRAM_STUB');
+
 check(webinarsDueSlot(new DateTimeImmutable('2026-11-24 13:30:00', new DateTimeZone('Europe/Moscow'))) === '2026-11-24T13:30', 'слот 13:30 МСК срабатывает в свою минуту');
 check(webinarsDueSlot(new DateTimeImmutable('2026-11-24 13:31:00', new DateTimeZone('Europe/Moscow'))) === null, 'через минуту слот уже не активен');
 // 10:30 UTC — это 13:30 МСК, но webinarsDueSlot работает с МСК-временем процесса:

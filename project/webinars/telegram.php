@@ -43,6 +43,11 @@ function webinarsTelegramCheckChat(string $chat): string
 function webinarsTelegramCall(string $token, string $method, array $payload = [], int $timeout = 20): mixed
 {
     webinarsTelegramCheckToken($token);
+    // Проверки без сети: DOCGEN_WEBINARS_TELEGRAM_STUB=1 возвращает правдоподобные
+    // ответы Bot API. В рабочей установке переменная не задаётся.
+    if (trim((string) getenv('DOCGEN_WEBINARS_TELEGRAM_STUB')) === '1') {
+        return webinarsTelegramStub($method, $payload);
+    }
     $url = 'https://api.telegram.org/bot' . $token . '/' . rawurlencode($method);
     $headers = ['Content-Type: application/json', 'Accept: application/json'];
     $body = json_encode($payload === [] ? new stdClass() : $payload, JSON_UNESCAPED_UNICODE);
@@ -99,6 +104,33 @@ function webinarsTelegramCall(string $token, string $method, array $payload = []
     throw new WebinarsTelegramError(webinarsTelegramErrorText($code, $method));
 }
 
+/** Ответы Bot API для автономных проверок (только при DOCGEN_WEBINARS_TELEGRAM_STUB=1). */
+function webinarsTelegramStub(string $method, array $payload): mixed
+{
+    $file = WEBINARS_STORAGE_DIR . '/telegram-stub.json';
+    $state = docgenReadJson($file, ['updates' => [], 'sent' => 0]);
+    switch ($method) {
+        case 'getMe':
+            return ['username' => 'cmk_docgen_test_bot'];
+        case 'getUpdates':
+            $updates = (array) ($state['updates'] ?? []);
+            $offset = (int) ($payload['offset'] ?? 0);
+            $updates = array_values(array_filter($updates, static fn($u): bool => is_array($u) && (int) ($u['update_id'] ?? 0) >= $offset));
+            if (isset($payload['limit'])) {
+                $updates = array_slice($updates, 0, (int) $payload['limit']);
+            }
+            return array_map(static fn(array $u): array => ['update_id' => (int) $u['update_id'], 'message' => $u['message']], $updates);
+        case 'sendMessage':
+            $state['sent'] = (int) ($state['sent'] ?? 0) + 1;
+            $state['last_chat'] = (string) ($payload['chat_id'] ?? '');
+            docgenWriteJson($file, $state);
+            return ['message_id' => $state['sent']];
+        case 'setWebhook':
+            return true;
+    }
+    return true;
+}
+
 function webinarsTelegramErrorText(int $code, string $method): string
 {
     if (in_array($code, [401, 404], true)) {
@@ -137,46 +169,128 @@ function webinarsTelegramSend(string $token, string $chat, string $text): void
 }
 
 /**
- * Привязка личного чата одноразовым кодом: оператор открывает бота, нажимает
- * «Запустить» и присылает код. Панель ждёт код короткими запросами getUpdates.
+ * Привязка личного чата одноразовым кодом.
  *
- * @param callable(string, string):void $onCode имя бота и код для экрана
- * @return array{username: string, chat_id: string}
+ * Раньше это был один синхронный запрос на 180 секунд: браузер обрывал его по
+ * таймауту раньше, чем панель успевала показать код, и привязка не работала
+ * вовсе. Теперь шаги короткие и независимые:
+ *   webinarsTelegramPairStart() — проверяет токен, выдаёт код и сразу отвечает;
+ *   webinarsTelegramPairCheck() — один короткий getUpdates на каждое нажатие
+ *                                 интерфейса, пока оператор не пришлёт код.
+ *
+ * Ожидание хранится в приватном файле, поэтому переживает любой запрос.
  */
-function webinarsTelegramPair(string $token, callable $onCode, int $seconds = 180): array
+
+/** Ожидание привязки: код, имя бота и момент истечения. */
+function webinarsTelegramPairFile(): string
+{
+    return WEBINARS_STORAGE_DIR . '/telegram-pair.json';
+}
+
+function webinarsTelegramPairForget(): void
+{
+    @unlink(webinarsTelegramPairFile());
+}
+
+/** @return array{code: string, username: string, expires: int}|null */
+function webinarsTelegramPairPending(): ?array
+{
+    $path = webinarsTelegramPairFile();
+    if (!is_file($path)) {
+        return null;
+    }
+    $data = docgenReadJson($path, []);
+    $code = (string) ($data['code'] ?? '');
+    $expires = (int) ($data['expires'] ?? 0);
+    if ($code === '' || $expires < time()) {
+        webinarsTelegramPairForget();
+        return null;
+    }
+    return ['code' => $code, 'username' => (string) ($data['username'] ?? ''), 'expires' => $expires];
+}
+
+/**
+ * Шаг 1: проверить токен и выдать код. Отвечает за секунды, а не за минуты.
+ *
+ * @return array{code: string, username: string, expires: int, url: string}
+ */
+function webinarsTelegramPairStart(string $token, int $seconds = 180): array
 {
     $username = webinarsTelegramUsername($token);
-    $code = 'ЦМК-' . strtoupper(bin2hex(random_bytes(5)));
-    $onCode($username, $code);
-    $deadline = microtime(true) + $seconds;
-    $offset = 0;
-    while (microtime(true) < $deadline) {
-        $polling = max(1, min(10, (int) floor($deadline - microtime(true))));
-        $updates = webinarsTelegramCall($token, 'getUpdates', [
-            'offset' => $offset,
-            'timeout' => $polling,
-            'allowed_updates' => ['message'],
-        ], $polling + 8);
-        if (!is_array($updates)) {
-            throw new WebinarsTelegramError('Telegram вернул неверный список сообщений.');
-        }
-        foreach ($updates as $item) {
-            if (!is_array($item) || !isset($item['update_id'])) {
-                continue;
-            }
-            $offset = max($offset, (int) $item['update_id'] + 1);
-            $message = $item['message'] ?? null;
-            if (!is_array($message) || trim((string) ($message['text'] ?? '')) !== $code) {
-                continue;
-            }
-            $chat = $message['chat'] ?? null;
-            if (is_array($chat) && ($chat['type'] ?? '') === 'private') {
-                return ['username' => $username, 'chat_id' => webinarsTelegramCheckChat((string) ($chat['id'] ?? ''))];
+    // Старые обновления не нужны: ищем только сообщение с новым кодом.
+    try {
+        $updates = webinarsTelegramCall($token, 'getUpdates', ['timeout' => 0, 'limit' => 1]);
+        if (is_array($updates) && $updates !== []) {
+            $last = end($updates);
+            if (is_array($last) && isset($last['update_id'])) {
+                // Подтверждаем прочитанное, чтобы поиск кода шёл по свежим событиям.
+                webinarsTelegramCall($token, 'getUpdates', ['offset' => (int) $last['update_id'] + 1, 'timeout' => 0, 'limit' => 1]);
             }
         }
-        usleep(150000);
+    } catch (WebinarsTelegramError $error) {
+        // Бот без истории или уже опрошенный — это не повод отказывать в привязке.
+        if (str_contains($error->getMessage(), 'webhook')) {
+            throw $error;
+        }
     }
-    throw new WebinarsTelegramError('Код не получен. Откройте личный чат с ботом и повторите привязку.');
+    $code = 'ЦМК-' . strtoupper(bin2hex(random_bytes(5)));
+    $expires = time() + $seconds;
+    webinarsBoot();
+    docgenWriteJson(webinarsTelegramPairFile(), [
+        'code' => $code,
+        'username' => $username,
+        'expires' => $expires,
+        'token_hash' => hash('sha256', $token),
+        'saved_at' => webinarsStamp(),
+    ]);
+    @chmod(webinarsTelegramPairFile(), 0600);
+    return ['code' => $code, 'username' => $username, 'expires' => $expires, 'url' => 'https://t.me/' . $username];
+}
+
+/**
+ * Шаг 2: один короткий опрос Telegram. Интерфейс вызывает его раз в пару секунд.
+ *
+ * @return array{state: 'waiting'|'done'|'expired', chat_id?: string, message: string}
+ */
+function webinarsTelegramPairCheck(string $token): array
+{
+    $pending = webinarsTelegramPairPending();
+    if ($pending === null) {
+        return ['state' => 'expired', 'message' => 'Код устарел. Нажмите «Привязать бота» ещё раз.'];
+    }
+    $updates = webinarsTelegramCall($token, 'getUpdates', [
+        'timeout' => 0,
+        'limit' => 20,
+        'allowed_updates' => ['message'],
+    ]);
+    if (!is_array($updates)) {
+        throw new WebinarsTelegramError('Telegram вернул неверный список сообщений.');
+    }
+    $maxUpdate = 0;
+    foreach ($updates as $item) {
+        if (!is_array($item) || !isset($item['update_id'])) {
+            continue;
+        }
+        $maxUpdate = max($maxUpdate, (int) $item['update_id']);
+        $message = $item['message'] ?? null;
+        if (!is_array($message) || trim((string) ($message['text'] ?? '')) !== $pending['code']) {
+            continue;
+        }
+        $chat = $message['chat'] ?? null;
+        if (!is_array($chat) || ($chat['type'] ?? '') !== 'private') {
+            return ['state' => 'waiting', 'message' => 'Код отправлен не в личном чате. Напишите боту в личные сообщения.'];
+        }
+        $chatId = webinarsTelegramCheckChat((string) ($chat['id'] ?? ''));
+        webinarsTelegramSend($token, $chatId, WEBINARS_TELEGRAM_TEST);
+        webinarsTelegramSave($token, $chatId);
+        webinarsTelegramPairForget();
+        return ['state' => 'done', 'chat_id' => $chatId, 'message' => 'Бот привязан. Тестовое сообщение отправлено в этот чат.'];
+    }
+    if ($maxUpdate > 0) {
+        // Прочитанные обновления больше не нужны, но offset не должен пропустить код.
+        webinarsTelegramCall($token, 'getUpdates', ['offset' => $maxUpdate + 1, 'timeout' => 0, 'limit' => 1]);
+    }
+    return ['state' => 'waiting', 'message' => 'Код пока не получен. Отправьте его боту в личном чате.'];
 }
 
 /**
