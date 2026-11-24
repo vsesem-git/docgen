@@ -709,6 +709,13 @@ function generateDocuments(): never
     if (!is_array($overrides)) {
         $overrides = [];
     }
+    // Отключённые переменные: их коды вырезаются, значения не требуются.
+    $excluded = docgenExcludedFromRequest($template);
+    $excluded = array_values(array_intersect($excluded, (array) $templateInfo['fields']));
+    $requiredFields = array_values(array_diff((array) $templateInfo['fields'], $excluded));
+    if ($requiredFields === [] && $excluded !== []) {
+        sendJson(['ok' => false, 'error' => 'Все переменные шаблона отключены. Оставьте хотя бы одну или загрузите другой DOCX.'], 422);
+    }
     $workRoot = __DIR__ . '/../docgen_demo_storage/tmp';
     if (!is_dir($workRoot) && !mkdir($workRoot, 0700, true) && !is_dir($workRoot)) {
         sendJson(['ok' => false, 'error' => 'Не удалось создать временную папку для обработки.'], 500);
@@ -746,7 +753,7 @@ function generateDocuments(): never
 
         $values = [];
         $missing = [];
-        foreach ($templateInfo['fields'] as $variable) {
+        foreach ($requiredFields as $variable) {
             if (array_key_exists($variable, $rowOverrides) && trim((string) $rowOverrides[$variable]) !== '') {
                 $values[$variable] = trim((string) $rowOverrides[$variable]);
             } elseif (array_key_exists($variable, $fields) && trim((string) $fields[$variable]) !== '') {
@@ -765,12 +772,24 @@ function generateDocuments(): never
         }
 
         try {
-            $processor = new TemplateProcessor($template['path']);
+            $docxPath = $jobDir . '/doc_' . str_pad((string) (++$counter), 4, '0', STR_PAD_LEFT) . '.docx';
+            if ($excluded !== []) {
+                // Код вырезаем на копии: исходный шаблон не меняется.
+                if (!copy($template['path'], $docxPath)) {
+                    throw new RuntimeException('Не удалось скопировать шаблон для правки.');
+                }
+                docgenStripExcludedFromDocx($docxPath, $excluded);
+                $processor = new TemplateProcessor($docxPath);
+            } else {
+                $processor = new TemplateProcessor($template['path']);
+            }
             $processor->setMacroChars($macroOpen, '}');
             foreach ($values as $key => $value) {
+                if (in_array((string) $key, $excluded, true)) {
+                    continue;
+                }
                 $processor->setValue($key, $value);
             }
-            $docxPath = $jobDir . '/doc_' . str_pad((string) (++$counter), 4, '0', STR_PAD_LEFT) . '.docx';
             $processor->saveAs($docxPath);
             unset($processor);
 
@@ -910,6 +929,8 @@ if ($action === 'analyze') {
         $info['analysis'] = buildFieldAnalysis($info, $dataset['records'] ?? [], $sourceKey);
         $info['ok'] = true;
         $info['templateName'] = $template['name'];
+        // Раздел 3: все переменные шаблона и сохранённые отметки об отключении.
+        $info['variables'] = docgenTemplateVariablePayload($info, $template);
         sendJson($info);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
@@ -939,6 +960,7 @@ $sampleInfo['analysis'] = buildFieldAnalysis($sampleInfo, loadDataset()['records
 $sampleInfo['type'] = 'docx';
 $sampleInfo['templateId'] = 'sample-docx';
 $sampleInfo['templateName'] = 'Письмо-пример.docx';
+$sampleInfo['variables'] = docgenTemplateVariablePayload($sampleInfo, ['id' => 'sample-docx', 'name' => 'Письмо-пример.docx']);
 
 ?><!doctype html>
 <html lang="ru">
@@ -1017,6 +1039,16 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .mapping-head strong{font-size:13px}.mapping-body{padding:0 14px 12px;display:flex;gap:7px;flex-wrap:wrap}
 .map-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;background:#fafcff;font-size:11.5px;color:var(--muted)}
 .map-chip b{color:var(--ink);font-weight:650}.map-chip .state{font-size:10.5px;font-weight:750;color:var(--ok)}.map-chip.manual{background:#fff9ec;border-color:#f0d9a8}.map-chip.manual .state{color:var(--warn)}
+.var-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:7px;margin:11px 0 0}
+.var-row{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdff;font-size:12.5px}
+.var-row.off{background:#fdf6f5;border-color:#eec9c4}
+.var-row label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;flex:1;min-width:0}
+.var-row input{width:auto;height:auto;margin:2px 0 0;flex:none}
+.var-name{font-weight:650;color:var(--ink);overflow-wrap:anywhere}
+.var-state{font-size:11px;color:var(--muted);display:block}
+.var-row.off .var-name{text-decoration:line-through;color:#9a5a52}
+.var-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.var-tools .small-muted{flex:1;min-width:200px}
 .var-chip{cursor:pointer;background:#fff;border:1px solid #bfd2e6;border-radius:7px;padding:5px 9px;font-size:11.5px;color:#174a7e;font-family:inherit}
 .var-chip:hover,.var-chip:focus-visible{background:#eaf3fc;border-color:var(--brand);outline:none}
 .letter-vars{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
@@ -2154,6 +2186,10 @@ function getUnmappedFields() {
   if (!records.length) return [];
   return (templateInfo.fields||[]).filter(name=>records.some(record=>!fieldValue(record,name).trim()));
 }
+function templateExcludedSet() {
+  const raw=Array.isArray(templateInfo.excluded)?templateInfo.excluded:[];
+  return new Set(raw.map(name=>String(name)));
+}
 function updateMapping() {
   const fields=templateInfo.fields||[];
   renderLetterVariables();
@@ -2163,14 +2199,58 @@ function updateMapping() {
     return;
   }
   const records=activeSourceRecords();
+  const excluded=templateExcludedSet();
   const counts=fields.map(name=>records.filter(record=>fieldValue(record,name).trim()).length);
-  $('mappingBody').innerHTML=fields.map((name,index)=>{
+  const chips=fields.map((name,index)=>{
     const count=counts[index], complete=records.length>0&&count===records.length;
     const state=complete?'колонка книги':(count?`частично · ${count}/${records.length}`:'ручное поле');
     return `<span class="map-chip ${complete?'':'manual'}"><b>${esc(name)}</b><span class="state">${state}</span></span>`;
-  }).join('')+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`;
-  if (counts.some(count=>count<records.length)) {
+  }).join('');
+  const rows=fields.map(name=>{
+    const off=excluded.has(name);
+    return `<div class="var-row ${off?'off':''}"><label><input type="checkbox" data-var-exclude="${esc(name)}" ${off?'checked':''}><span><span class="var-name">${'{'+esc(name)+'}'}</span><span class="var-state">${off?'код будет удалён из документа':'подставляется значением из данных'}</span></span></label></div>`;
+  }).join('');
+  const offCount=fields.filter(name=>excluded.has(name)).length;
+  $('mappingBody').innerHTML=chips+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`
+    +'<div style="width:100%;margin-top:12px"><b class="small-muted">Отключить заполнение отдельных переменных</b><span class="small-muted" style="display:block;margin-top:3px">Снимите отметку — код не будет заменяться значением, а удалится из документа вместе с пустыми скобками и запятыми. Сам шаблон не меняется.</span></div>'
+    +`<div class="var-list">${rows}</div>`
+    +`<div class="var-tools"><span class="small-muted" id="varExcludeFeedback">${offCount?(offCount+' отключено · значения по ним не требуются'):'Все переменные подставляются'}</span><button type="button" class="btn-ghost btn-small" id="varExcludeAllBtn">Отключить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeNoneBtn">Включить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeSaveBtn">Сохранить для шаблона</button></div>`;
+  const list=$('mappingBody').querySelector('.var-list');
+  list?.querySelectorAll('[data-var-exclude]').forEach(box=>box.addEventListener('change',()=>{
+    const set=new Set([...list.querySelectorAll('[data-var-exclude]')].filter(item=>item.checked).map(item=>item.dataset.varExclude));
+    setVarExcluded(set);
+  }));
+  $('varExcludeAllBtn')?.addEventListener('click',()=>setVarExcluded(new Set(fields)));
+  $('varExcludeNoneBtn')?.addEventListener('click',()=>setVarExcluded(new Set()));
+  $('varExcludeSaveBtn')?.addEventListener('click',()=>saveVarExcluded());
+  if (counts.some((count,index)=>records.length>0&&count<records.length&&!excluded.has(fields[index]))) {
     $('mappingBody').insertAdjacentHTML('beforeend','<span class="small-muted" style="width:100%;color:#8b5b00">Незаполненные значения нужно проверить в карточке записи или задать в янтарных ячейках. Неизвестные данные автоматически не угадываются.</span>');
+  }
+}
+function setVarExcluded(set) {
+  const fields=templateInfo.fields||[];
+  templateInfo.excluded=fields.filter(name=>set.has(name));
+  updateMapping();
+}
+async function saveVarExcluded() {
+  const feedback=$('varExcludeFeedback');
+  if(feedback)feedback.textContent='Сохраняем…';
+  const fd=new FormData();
+  fd.append('template_id',templateId==='__upload__'?'':templateId);
+  fd.append('template_name',templateInfo.templateName||'');
+  fd.append('excluded_fields',JSON.stringify(templateInfo.excluded||[]));
+  try {
+    const response=await fetch('?action=template_excluded',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить настройку.');
+    if(payload.excluded)templateInfo.excluded=payload.excluded;
+    updateMapping();
+    const target=$('varExcludeFeedback');
+    if(target)target.textContent=payload.message||'Сохранено.';
+    showToast(payload.message||'Настройка переменных сохранена.','success');
+  } catch(e) {
+    if(feedback)feedback.textContent=e.message||'Ошибка сохранения.';
+    showToast(e.message||'Не удалось сохранить настройку переменных.','error');
   }
 }
 function statusBadge(record) {
@@ -2519,6 +2599,7 @@ async function generate() {
   const fd=new FormData();
   fd.append('selected_ids',JSON.stringify(ids));
   fd.append('overrides',JSON.stringify(overrides));
+  fd.append('excluded_fields',JSON.stringify(templateInfo.excluded||[]));
   if (templateMode==='upload' && templateFile) fd.append('template',templateFile);
   else fd.append('template_id',templateId);
   // A one-off DOCX keeps the letter typed in this window, design included.

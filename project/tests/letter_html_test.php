@@ -391,6 +391,55 @@ check(empty(docgenSmtpDiagnose($journalSettings, 'pw')['busy']), 'после с�
 check(DOCGEN_SMTP_PROBE_BUDGET_SECONDS <= 25, 'бюджет проверки меньше клиентского таймаута');
 check(DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS < DOCGEN_SMTP_PROBE_BUDGET_SECONDS, 'таймаут подключения меньше общего бюджета');
 
+// 15. Отключённые переменные: код вырезается из копии, шаблон не меняется.
+$exclusionKey = docgenTemplateExclusionKey('sample-docx', 'Письмо-пример.docx');
+check($exclusionKey === 'id:sample-docx', 'ключ отключений строится по id шаблона');
+check(docgenTemplateExclusionKey('', 'Мой шаблон.DOCX') === 'file:мой шаблон.docx', 'разовый файл запоминается по имени в нижнем регистре');
+docgenSaveTemplateExcluded($exclusionKey, ['Полное наименование']);
+check(docgenTemplateExcluded($exclusionKey) === ['Полное наименование'], 'набор отключённых переменных сохраняется');
+docgenSaveTemplateExcluded($exclusionKey, []);
+check(docgenTemplateExcluded($exclusionKey) === [], 'пустой набор очищает настройку');
+
+$stripXml = '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    . '<w:p><w:r><w:t>Контакт: ({Телефон})</w:t></w:r></w:p>'
+    . '<w:p><w:r><w:t>{Телефон}, добрый день</w:t></w:r></w:p>'
+    . '<w:p><w:r><w:t>{Адрес}, {Телефон}</w:t></w:r></w:p>'
+    . '<w:p><w:r><w:t>{Телефон}</w:t></w:r></w:p>'
+    . '</w:body></w:document>';
+$strippedCount = 0;
+$strippedXml = (string) docgenStripExcludedXml($stripXml, ['Телефон'], 'http://schemas.openxmlformats.org/wordprocessingml/2006/main', $strippedCount);
+preg_match_all('#<w:t[^>]*>(.*?)</w:t>#s', $strippedXml, $strippedTexts);
+$strippedTexts = array_map(fn($text) => html_entity_decode($text, ENT_QUOTES | ENT_XML1, 'UTF-8'), $strippedTexts[1]);
+check($strippedCount > 0, 'вырезание затронуло документ');
+check(!str_contains($strippedXml, '{Телефон}'), 'код отключённой переменной удалён');
+check(in_array('', $strippedTexts, true), 'строка из одного кода становится пустой');
+check(in_array('добрый день', $strippedTexts, true), 'текст после запятой сохранён');
+check(in_array('Контакт', $strippedTexts, true) || in_array('Контакт:', $strippedTexts, true), 'пустые скобки убраны');
+check(in_array('{Адрес}', $strippedTexts, true) || in_array('{Адрес}, ', $strippedTexts, true), 'включённая переменная не тронута');
+check(docgenStripExcludedCodes('X ${Телефон} Y', ['Телефон']) === 'X  Y', 'доллар-формат кода также вырезается');
+
+// Разовый шаблон: отключение приходит из запроса, а не из настроек.
+$_POST['excluded_fields'] = json_encode(['Телефон', 'Адрес']);
+check(docgenExcludedFromRequest(['id' => 'sample-docx', 'name' => 'Письмо-пример.docx']) === ['Телефон', 'Адрес'], 'отключения берутся из запроса генерации');
+$_POST['excluded_fields'] = 'Телефон, Адрес';
+check(docgenExcludedFromRequest(['id' => 'sample-docx', 'name' => 'Письмо-пример.docx']) === ['Телефон', 'Адрес'], 'поддерживается список через запятую');
+unset($_POST['excluded_fields']);
+docgenSaveTemplateExcluded($exclusionKey, ['Адрес']);
+check(docgenExcludedFromRequest(['id' => 'sample-docx', 'name' => 'Письмо-пример.docx']) === ['Адрес'], 'без запроса действует сохранённая настройка');
+docgenSaveTemplateExcluded($exclusionKey, []);
+
+// HTML-шаблон: отключённый код вырезается до подстановки значений.
+$htmlTemplate = [
+    'id' => 'html-test', 'name' => 'Письмо.html', 'type' => 'html',
+    'content' => '<p>{Обращение} {Имя Отчество}!</p><p>Тел.: {Телефон}</p>',
+];
+$htmlSource = sys_get_temp_dir() . '/excluded-html-' . bin2hex(random_bytes(4)) . '.txt';
+docgenBuildDocumentSource($htmlTemplate, ['fields' => ['Обращение', 'Имя Отчество', 'Телефон'], 'syntax' => 'filldocuments', 'excluded' => ['Телефон']], ['Обращение' => 'Уважаемый', 'Имя Отчество' => 'Иван Иванович'], $htmlSource);
+$htmlOut = (string) file_get_contents($htmlSource);
+check(!str_contains($htmlOut, '{Телефон}'), 'в HTML-документе нет кода отключённой переменной', $htmlOut);
+check(str_contains($htmlOut, 'Уважаемый'), 'включённые переменные подставлены');
+@unlink($htmlSource);
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 

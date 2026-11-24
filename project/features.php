@@ -356,6 +356,306 @@ function docgenScanTemplate(array $template): array
     return $info;
 }
 
+/**
+ * Отключённые переменные шаблона.
+ *
+ * Оператор может убрать код из документа: например, «{Полное наименование}»
+ * в бланке не нужно — тогда код вырезается целиком, а не подставляется
+ * пустым значением. Хранится по паре «шаблон + имя файла»: разовый DOCX
+ * из очереди не имеет id библиотеки, но у него есть имя.
+ */
+function docgenTemplateExcludedFile(): string
+{
+    return DOCGEN_SETTINGS_DIR . '/template-excluded.json';
+}
+
+function docgenTemplateExclusionKey(?string $templateId, ?string $fileName = null): string
+{
+    $id = trim((string) $templateId);
+    if ($id !== '' && $id !== '__upload__') {
+        return 'id:' . $id;
+    }
+    $name = trim((string) $fileName);
+    return $name !== '' ? 'file:' . mb_strtolower($name, 'UTF-8') : '';
+}
+
+/** @return list<string> имена отключённых переменных для шаблона */
+function docgenTemplateExcluded(string $key): array
+{
+    if ($key === '') {
+        return [];
+    }
+    $store = docgenReadJson(docgenTemplateExcludedFile(), []);
+    $list = $store['templates'][$key] ?? [];
+    if (!is_array($list)) {
+        return [];
+    }
+    return array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $list
+    ), static fn(string $name): bool => $name !== '')));
+}
+
+/** @param list<string> $names */
+function docgenSaveTemplateExcluded(string $key, array $names): void
+{
+    if ($key === '') {
+        return;
+    }
+    $store = docgenReadJson(docgenTemplateExcludedFile(), []);
+    if (!is_array($store['templates'] ?? null)) {
+        $store['templates'] = [];
+    }
+    $clean = array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $names
+    ), static fn(string $name): bool => $name !== '')));
+    if ($clean === []) {
+        unset($store['templates'][$key]);
+    } else {
+        $store['templates'][$key] = $clean;
+    }
+    $store['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson(docgenTemplateExcludedFile(), $store);
+}
+
+/** Отключённые переменные текущего шаблона: из запроса или из сохранённых настроек. */
+function docgenExcludedFromRequest(array $template): array
+{
+    if (isset($_POST['excluded_fields'])) {
+        $posted = trim((string) $_POST['excluded_fields']);
+        $raw = json_decode($posted, true);
+        if (!is_array($raw) && $posted !== '') {
+            // Принимаем и список строкой через запятую: так проще из формы.
+            $raw = array_map('trim', explode(',', $posted));
+        }
+        if (is_array($raw)) {
+            return array_values(array_unique(array_filter(array_map(
+                static fn($name): string => trim((string) $name),
+                $raw
+            ), static fn(string $name): bool => $name !== '')));
+        }
+    }
+    $key = docgenTemplateExclusionKey((string) ($template['id'] ?? ''), (string) ($template['name'] ?? ''));
+    return docgenTemplateExcluded($key);
+}
+
+/**
+ * Вырезать коды отключённых переменных из текста (HTML-шаблоны).
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedCodes(string $text, array $excluded): string
+{
+    foreach ($excluded as $name) {
+        $text = str_replace(['${' . $name . '}', '{' . $name . '}'], '', $text);
+    }
+    return $text;
+}
+
+/**
+ * Вырезать отключённые переменные из DOCX до подстановки значений.
+ *
+ * PHPWord заменил бы код пустой строкой, оставив абзац, пробелы и знаки
+ * препинания вокруг. Здесь код удаляется вместе с осиротевшими знаками:
+ * «(тел. {Телефон})» без телефона становится пустым, а не «(тел. )».
+ * Шаблон при этом не меняется — правка идёт на копии в пакете.
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedFromDocx(string $path, array $excluded): int
+{
+    if ($excluded === [] || !is_file($path)) {
+        return 0;
+    }
+    $zip = new ZipArchive();
+    if ($zip->open($path) !== true) {
+        return 0;
+    }
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    $removed = 0;
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $entry = $zip->getNameIndex($i);
+        if (!is_string($entry) || !preg_match('#^word/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$#', $entry)) {
+            continue;
+        }
+        $xml = $zip->getFromName($entry);
+        if (!is_string($xml) || $xml === '') {
+            continue;
+        }
+        $updated = docgenStripExcludedXml($xml, $excluded, $wordNs, $removed);
+        if ($updated !== null) {
+            $zip->addFromString($entry, $updated);
+        }
+    }
+    $zip->close();
+    return $removed;
+}
+
+/**
+ * Правка одной XML-части документа. Возвращает новый XML или null, когда
+ * менять нечего. Код может быть разбит Word на несколько w:t, поэтому
+ * работаем с текстом абзаца целиком и раскладываем результат обратно.
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedXml(string $xml, array $excluded, string $wordNs, int &$removed): ?string
+{
+    $dom = new DOMDocument();
+    $dom->preserveWhiteSpace = true;
+    $dom->formatOutput = false;
+    if (!@$dom->loadXML($xml, LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR)) {
+        return null;
+    }
+    $xpath = new DOMXPath($dom);
+    $xpath->registerNamespace('w', $wordNs);
+    $changed = false;
+    // Word часто режет «{Полное наименование}» на несколько w:t. Тогда ни в
+    // одном узле нет кода целиком, и построчная правка ничего не найдёт.
+    // Поэтому сначала собираем текст абзаца, вырезаем код и раскладываем
+    // результат обратно — в первый непустой прогон, остальные пустеют.
+    foreach ($xpath->query('//w:p') as $paragraph) {
+        $textNodes = [];
+        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+            $textNodes[] = $textNode;
+        }
+        if ($textNodes === []) {
+            continue;
+        }
+        $joined = '';
+        foreach ($textNodes as $textNode) {
+            $joined .= $textNode->textContent;
+        }
+        $next = docgenStripExcludedCodes($joined, $excluded);
+        if ($next === $joined) {
+            continue;
+        }
+        $removed += 1;
+        $changed = true;
+        $textNodes[0]->nodeValue = $next;
+        for ($index = 1; $index < count($textNodes); $index++) {
+            $textNodes[$index]->nodeValue = '';
+        }
+        // xml:space="preserve" сохраняет значимые пробелы по краям абзаца.
+        if (trim($next) === '' && $next !== '') {
+            $textNodes[0]->setAttribute('xml:space', 'preserve');
+        }
+    }
+    // Знаки препинания, оставшиеся без кода: «(тел. )» и «, ». Убираем их
+    // только в абзацах, где реально что-то вырезали, чтобы не трогать текст.
+    if ($changed) {
+        docgenTidyLeftovers($xpath, $wordNs, $excluded);
+    }
+    if (!$changed) {
+        return null;
+    }
+    return (string) $dom->saveXML();
+}
+
+/**
+ * Убрать пустые скобки и висящие запятые, которые остались после вырезания.
+ * Работает только с абзацами, где были отключённые коды.
+ *
+ * @param list<string> $excluded
+ */
+function docgenTidyLeftovers(DOMXPath $xpath, string $wordNs, array $excluded): void
+{
+    foreach ($xpath->query('//w:p') as $paragraph) {
+        $textNodes = [];
+        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+            $textNodes[] = $textNode;
+        }
+        if ($textNodes === []) {
+            continue;
+        }
+        $joined = '';
+        foreach ($textNodes as $textNode) {
+            $joined .= $textNode->textContent;
+        }
+        // Меняем только абзацы, где уже ничего не осталось от переменной.
+        if ($joined === '' || !preg_match('/[()\[\]«»,;:]/u', $joined)) {
+            continue;
+        }
+        $tidy = $joined;
+        $tidy = (string) preg_replace('/\(\s*\)/u', '', $tidy);
+        $tidy = (string) preg_replace('/\[\s*\]/u', '', $tidy);
+        $tidy = (string) preg_replace('/«\s*»/u', '', $tidy);
+        $tidy = (string) preg_replace('/[ \t]+([,;:])/u', '$1', $tidy);
+        $tidy = (string) preg_replace('/([,;:])\s*(?=[,;:])/u', '', $tidy);
+        // Знак препинания без кода остался в начале или в конце абзаца.
+        $tidy = (string) preg_replace('/^[ \t]*[,;:][ \t]*/u', '', $tidy);
+        $tidy = (string) preg_replace('/[ \t]*[,;:][ \t]*$/u', '', $tidy);
+        $tidy = (string) preg_replace('/([.!?])[ \t]+[,;:]/u', '$1', $tidy);
+        $tidy = (string) preg_replace('/[ \t]{2,}/u', ' ', $tidy);
+        $tidy = trim($tidy);
+        if ($tidy === $joined) {
+            continue;
+        }
+        // Возврат текста в первый w:t, остальные пустеют: так сохраняется
+        // оформление первого фрагмента и не появляются лишние разрывы.
+        $textNodes[0]->nodeValue = $tidy;
+        for ($index = 1; $index < count($textNodes); $index++) {
+            $textNodes[$index]->nodeValue = '';
+        }
+    }
+}
+
+/**
+ * Сохранить набор отключённых переменных для шаблона. Постоянный DOCX из
+ * библиотеки запоминается между запусками; разовый файл — по имени.
+ */
+function docgenSaveTemplateExcluding(): never
+{
+    $templateId = trim((string) ($_POST['template_id'] ?? ''));
+    $fileName = trim((string) ($_POST['template_name'] ?? ''));
+    $key = docgenTemplateExclusionKey($templateId, $fileName);
+    if ($key === '') {
+        sendJson(['ok' => false, 'error' => 'Не удалось определить шаблон: откройте его ещё раз.'], 422);
+    }
+    $raw = json_decode((string) ($_POST['excluded_fields'] ?? '[]'), true);
+    if (is_string($raw)) {
+        $raw = array_map('trim', explode(',', $raw));
+    }
+    if (!is_array($raw)) {
+        $raw = [];
+    }
+    $names = array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $raw
+    ), static fn(string $name): bool => $name !== '')));
+    if (count($names) > 200) {
+        sendJson(['ok' => false, 'error' => 'Слишком много отключённых переменных.'], 422);
+    }
+    docgenSaveTemplateExcluded($key, $names);
+    sendJson([
+        'ok' => true,
+        'key' => $key,
+        'excluded' => docgenTemplateExcluded($key),
+        'message' => $names === []
+            ? 'Отключённых переменных нет: все коды подставляются.'
+            : 'Отключено переменных: ' . count($names) . '. Их коды будут удалены из документа.',
+    ]);
+}
+
+/** Данные для раздела 3: все переменные шаблона и отметки об отключении. */
+function docgenTemplateVariablePayload(array $templateInfo, array $template): array
+{
+    $key = docgenTemplateExclusionKey((string) ($template['id'] ?? ''), (string) ($template['name'] ?? ''));
+    $excluded = docgenTemplateExcluded($key);
+    $fields = array_values((array) ($templateInfo['fields'] ?? []));
+    $excluded = array_values(array_intersect($excluded, $fields));
+    $result = [];
+    foreach ($fields as $name) {
+        $result[] = ['name' => (string) $name, 'excluded' => in_array((string) $name, $excluded, true)];
+    }
+    return [
+        'key' => $key,
+        'variables' => $result,
+        'excluded' => $excluded,
+        'templateName' => (string) ($template['name'] ?? ''),
+    ];
+}
+
 function docgenSanitizeHtml(string $html): string
 {
     // HTML templates are authored by the local operator. Strip executable content
@@ -2624,8 +2924,21 @@ function docgenConvertToPdf(array $inputPaths, string $outputDir, string $profil
 
 function docgenBuildDocumentSource(array $template, array $templateInfo, array $values, string $sourcePath): void
 {
+    // Отключённые оператором переменные не подставляются: код вырезается.
+    // Значения по ним уже отфильтрованы в docgenGenerate().
+    $excluded = (array) ($templateInfo['excluded'] ?? []);
     if ($template['type'] === 'docx') {
-        $processor = new \PhpOffice\PhpWord\TemplateProcessor((string) $template['path']);
+        if ($excluded !== []) {
+            // Правку делаем на копии: исходный шаблон остаётся нетронутым,
+            // а мусор вокруг кода (скобки, запятые) убираем до подстановки.
+            if (!copy((string) $template['path'], $sourcePath)) {
+                throw new RuntimeException('Не удалось скопировать шаблон для правки.');
+            }
+            docgenStripExcludedFromDocx($sourcePath, $excluded);
+            $processor = new \PhpOffice\PhpWord\TemplateProcessor($sourcePath);
+        } else {
+            $processor = new \PhpOffice\PhpWord\TemplateProcessor((string) $template['path']);
+        }
         $syntax = (string) ($templateInfo['syntax'] ?? 'phpword');
         if ($syntax === 'mixed') {
             throw new RuntimeException('В одном DOCX смешаны переменные {поле} и ${поле}. Оставьте один формат.');
@@ -2633,6 +2946,9 @@ function docgenBuildDocumentSource(array $template, array $templateInfo, array $
         $macroOpen = $syntax === 'filldocuments' ? '{' : '${';
         $processor->setMacroChars($macroOpen, '}');
         foreach ($values as $key => $value) {
+            if (in_array((string) $key, $excluded, true)) {
+                continue;
+            }
             $processor->setValue((string) $key, (string) $value);
         }
         $processor->saveAs($sourcePath);
@@ -2640,6 +2956,9 @@ function docgenBuildDocumentSource(array $template, array $templateInfo, array $
         return;
     }
     $html = docgenSanitizeHtml((string) ($template['content'] ?? file_get_contents((string) $template['path'])));
+    if ($excluded !== []) {
+        $html = docgenStripExcludedCodes($html, $excluded);
+    }
     $html = docgenReplaceCodes($html, $values, true);
     if (file_put_contents($sourcePath, $html, LOCK_EX) === false) {
         throw new RuntimeException('Не удалось записать HTML-документ.');
@@ -2707,6 +3026,14 @@ function docgenGenerate(): never
     if (empty($templateInfo['fields'])) {
         sendJson(['ok' => false, 'error' => 'В шаблоне не найдены коды полей.'], 422);
     }
+    // Отключённые переменные не требуют данных: их коды вырезаются из документа.
+    $excluded = docgenExcludedFromRequest($template);
+    $excluded = array_values(array_intersect($excluded, (array) $templateInfo['fields']));
+    $requiredFields = array_values(array_diff((array) $templateInfo['fields'], $excluded));
+    $templateInfo['excluded'] = $excluded;
+    if ($requiredFields === [] && $excluded !== []) {
+        sendJson(['ok' => false, 'error' => 'Все переменные шаблона отключены. Оставьте хотя бы одну или загрузите другой DOCX.'], 422);
+    }
     $overrides = json_decode((string) ($_POST['overrides'] ?? '{}'), true);
     if (!is_array($overrides)) {
         $overrides = [];
@@ -2746,7 +3073,7 @@ function docgenGenerate(): never
         $progress('documents', $processed, 'Карточка ' . $processed . '/' . $totalSteps . ' — подготовка документа', $cardLabel);
         $values = [];
         $missing = [];
-        foreach ($templateInfo['fields'] as $fieldName) {
+        foreach ($requiredFields as $fieldName) {
             $value = $fields[$fieldName] ?? '';
             if (!is_scalar($value) || trim((string) $value) === '') {
                 $missing[] = $fieldName;
@@ -3361,6 +3688,9 @@ function docgenAnalyze(): never
         $sourceKey = (string) ($_POST['source_key'] ?? '');
         $info['analysis'] = buildFieldAnalysis($info, $dataset['records'] ?? [], $sourceKey);
         $info['ok'] = true;
+        $info['templateName'] = (string) ($template['name'] ?? '');
+        // Раздел 3: все переменные шаблона и сохранённые отметки об отключении.
+        $info['variables'] = docgenTemplateVariablePayload($info, $template);
         sendJson($info);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
@@ -4805,7 +5135,7 @@ function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): 
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $postActions = ['template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -4867,6 +5197,8 @@ function docgenDispatch(string $action): void
             docgenTestSmtp();
         case 'smtp_last_diagnose':
             sendJson(docgenSmtpLastDiagnose());
+        case 'template_excluded':
+            docgenSaveTemplateExcluding();
         case 'dadata_settings':
             sendJson(docgenDadataPublicPayload());
         case 'save_dadata_settings':
