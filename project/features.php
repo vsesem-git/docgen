@@ -3628,6 +3628,218 @@ function docgenSmtpSettingsFromRequest(): array
     ], $password];
 }
 
+/**
+ * Прятать пароль в протоколе SMTP: PHPMailer скрывает только штатную
+ * авторизацию, а сам сервер может вернуть строку с логином.
+ */
+function docgenSmtpMaskSecrets(string $text, string $password, string $username = ''): string
+{
+    if ($password !== '' && strlen($password) >= 3) {
+        $text = str_replace([$password, base64_encode($password)], '[пароль скрыт]', $text);
+    }
+    // base64 от «логин\0логин\0пароль» и от пароля в разных кодировках AUTH.
+    if ($username !== '' && $password !== '') {
+        $text = str_replace(base64_encode("\0" . $username . "\0" . $password), '[пароль скрыт]', $text);
+        $text = str_replace(base64_encode($username . "\0" . $username . "\0" . $password), '[пароль скрыт]', $text);
+    }
+    return $text;
+}
+
+/**
+ * Сетевой слой до SMTP: DNS, TCP и старт TLS. Нужен, чтобы отличить
+ * «сервер не отвечает» от «сервер ответил, но TLS/авторизация не прошли»:
+ * в браузере видно только «Could not connect to SMTP host».
+ *
+ * @return list<array{step: string, ok: bool, detail: string}>
+ */
+function docgenSmtpNetworkSteps(string $host, int $port, string $encryption, float $timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS): array
+{
+    $steps = [];
+    $started = microtime(true);
+
+    if (preg_match('/^\[[0-9A-Fa-f:]+\]$/', $host) === 1) {
+        $steps[] = ['step' => 'DNS', 'ok' => true, 'detail' => 'адрес задан явно: ' . $host];
+        $ips = [trim($host, '[]')];
+    } else {
+        $ips = [];
+        try {
+            $resolved = @gethostbynamel($host);
+            if (is_array($resolved)) {
+                $ips = $resolved;
+            }
+            if ($ips === []) {
+                $records = @dns_get_record($host, DNS_AAAA);
+                if (is_array($records)) {
+                    foreach ($records as $record) {
+                        if (!empty($record['ipv6'])) {
+                            $ips[] = (string) $record['ipv6'];
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $error) {
+            $steps[] = ['step' => 'DNS', 'ok' => false, 'detail' => 'ошибка резолвера: ' . $error->getMessage()];
+        }
+        if ($ips === [] && $steps === []) {
+            $steps[] = ['step' => 'DNS', 'ok' => false, 'detail' => 'имя ' . $host . ' не разрешается в IP — проверьте написание и DNS контейнера'];
+        } elseif ($ips !== []) {
+            $steps[] = ['step' => 'DNS', 'ok' => true, 'detail' => $host . ' → ' . implode(', ', array_slice(array_unique($ips), 0, 4))];
+        }
+    }
+
+    // Простой TCP: виден errno, по которому можно отличить фильтр, отказ и таймаут.
+    $errno = 0;
+    $errstr = '';
+    $socket = @fsockopen($host, $port, $errno, $errstr, $timeout);
+    if (is_resource($socket)) {
+        $elapsed = microtime(true) - $started;
+        $banner = @fgets($socket, 512);
+        $steps[] = ['step' => 'TCP', 'ok' => true, 'detail' => sprintf('%s:%d открыт за %.2f с%s', $host, $port, $elapsed, $banner !== false ? '; приветствие: ' . trim($banner) : '')];
+        if ($encryption === 'ssl') {
+            // Порт 465 ждёт TLS сразу, до любого SMTP-диалога.
+            $context = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => true, 'peer_name' => $host]]);
+            $tls = @stream_socket_client('ssl://' . $host . ':' . $port, $tlsErrno, $tlsErrstr, $timeout, STREAM_CLIENT_CONNECT, $context);
+            if (is_resource($tls)) {
+                $steps[] = ['step' => 'TLS', 'ok' => true, 'detail' => 'согласование SSL/TLS на порту ' . $port . ' прошло' . (function_exists('stream_socket_get_name') ? '; узел: ' . (string) stream_socket_get_name($tls, true) : '')];
+                fclose($tls);
+            } else {
+                $steps[] = ['step' => 'TLS', 'ok' => false, 'detail' => 'SSL/TLS на порту ' . $port . ' не согласовался: ' . ($tlsErrstr !== '' ? $tlsErrstr : 'сервер не ответил на приветствие TLS')];
+            }
+        }
+        fclose($socket);
+    } else {
+        $explain = match (true) {
+            $errno === 110 || $errno === 10060 || stripos($errstr, 'timed out') !== false => 'таймаут: сервер или сеть не отвечают, возможно порт закрыт провайдером',
+            $errno === 111 || $errno === 10061 => 'соединение отклонено: на этом порту никто не слушает или порт не тот',
+            $errno === 113 || $errno === 101 => 'сеть недоступна из контейнера: проверьте маршрут и DNS',
+            default => 'соединение не открылось',
+        };
+        $steps[] = ['step' => 'TCP', 'ok' => false, 'detail' => sprintf('%s:%d — %s (%s%s)', $host, $port, $explain, $errstr !== '' ? $errstr : 'ошибка', $errno !== 0 ? ', errno ' . $errno : '')];
+    }
+    return $steps;
+}
+
+/**
+ * Полный журнал проверки SMTP для модалки: параметры, сетевой слой,
+ * полный диалог PHPMailer без пароля и подсказка по конкретной ошибке.
+ *
+ * @return array<string, mixed>
+ */
+function docgenSmtpDiagnose(array $settings, string $password): array
+{
+    $host = (string) ($settings['host'] ?? '');
+    $port = (int) ($settings['port'] ?? 587);
+    $encryption = (string) ($settings['encryption'] ?? 'tls');
+    $username = (string) ($settings['username'] ?? '');
+    $fromEmail = (string) ($settings['fromEmail'] ?? '');
+
+    $transcript = '';
+    $phpmailerError = '';
+    $smtpError = [];
+    $ok = false;
+    $connectStarted = microtime(true);
+    try {
+        $mailer = docgenBuildMailer($settings, $password);
+        // Только для этой проверки: полный диалог и собственная функция вывода.
+        $mailer->SMTPDebug = 3;
+        $mailer->Debugoutput = static function (string $line, int $level) use (&$transcript): void {
+            $transcript .= rtrim($line) . "\n";
+        };
+        $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+        $smtp = $mailer->getSMTPInstance();
+        $smtp->Timelimit = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
+        $ok = (bool) $mailer->smtpConnect();
+        $smtpError = (array) $smtp->getError();
+        if ($ok) {
+            $mailer->smtpClose();
+        }
+        $phpmailerError = trim((string) $mailer->ErrorInfo);
+    } catch (Throwable $error) {
+        $phpmailerError = trim($error->getMessage());
+    }
+    $connectMs = (int) round((microtime(true) - $connectStarted) * 1000);
+
+    $transcript = docgenSmtpMaskSecrets(docgenSmaskTranscript($transcript), $password, $username);
+    if ($phpmailerError !== '') {
+        $phpmailerError = docgenSmtpMaskSecrets($phpmailerError, $password, $username);
+    }
+    $steps = docgenSmtpNetworkSteps($host, $port, $encryption);
+    return [
+        'ok' => $ok,
+        'phpmailer' => $phpmailerError,
+        'summary' => $ok
+            ? 'Соединение с SMTP установлено, сервер принял параметры авторизации.'
+            : docgenSmtpExplain($phpmailerError, $encryption, $port, $steps),
+        'steps' => $steps,
+        'transcript' => $transcript !== '' ? $transcript : 'PHPMailer не успел начать диалог.',
+        'smtpError' => [
+            'error' => docgenSmtpMaskSecrets((string) ($smtpError['error'] ?? ''), $password, $username),
+            'detail' => docgenSmtpMaskSecrets((string) ($smtpError['detail'] ?? ''), $password, $username),
+            'code' => (string) ($smtpError['smtp_code'] ?? ''),
+            'codeEx' => (string) ($smtpError['smtp_code_ex'] ?? ''),
+        ],
+        'server' => $host . ':' . $port,
+        'elapsedMs' => $connectMs,
+        'context' => [
+            'PHP' => PHP_VERSION,
+            'SAPI' => PHP_SAPI,
+            'шифрование' => $encryption === 'ssl' ? 'SSL/TLS (implicit, 465)' : ($encryption === 'tls' ? 'STARTTLS (587)' : 'без шифрования'),
+            'логин' => $username !== '' ? $username : 'без авторизации',
+            'пароль' => $password !== '' ? 'задан, в журнале скрыт' : 'не задан',
+            'отправитель' => $fromEmail,
+            'таймаут' => DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS . ' с',
+            'openssl' => extension_loaded('openssl') ? 'доступен' : 'НЕ ЗАГРУЖЕН',
+            'проверка сертификата' => 'включена при подключении PHPMailer',
+        ],
+    ];
+}
+
+/** Полный диалог без пароля: он маскируется отдельной функцией. */
+function docgenSmaskTranscript(string $transcript): string
+{
+    return (string) preg_replace('/CLIENT -> SERVER: [A-Za-z0-9+\/=]{16,}/', 'CLIENT -> SERVER: [base64 скрыт]', $transcript);
+}
+
+/** Понятная причина вместо технического текста PHPMailer. */
+function docgenSmtpExplain(string $error, string $encryption, int $port, array $steps = []): string
+{
+    $errorText = mb_strtolower($error, 'UTF-8');
+    // Порт открыт на уровне TCP, но SMTP-диалог не начался: так ведут себя
+    // фильтр провайдера, прокси или не-SMTP сервис на этом порту.
+    $tcpOpen = false;
+    foreach ($steps as $step) {
+        if (($step['step'] ?? '') === 'TCP') {
+            $tcpOpen = (bool) ($step['ok'] ?? false);
+        }
+    }
+    if ($tcpOpen && stripos($error, 'Could not connect to SMTP host') !== false) {
+        return 'TCP-соединение с ' . $port . ' открылось, но SMTP-диалог не начался: сервер не прислал приветствие 220 или оборвал связь. Часто это фильтр провайдера, прокси или не SMTP-сервис на этом порту — проверьте порт и шифрование.';
+    }
+    if (stripos($error, 'Could not connect to SMTP host') !== false) {
+        if ($encryption === 'ssl' && $port !== 465) {
+            return 'Не удалось открыть SSL/TLS-соединение. Для SSL обычно нужен порт 465, для STARTTLS — 587. Проверьте порт и режим шифрования.';
+        }
+        if ($encryption === 'tls' && $port === 465) {
+            return 'Порт 465 ждёт SSL/TLS сразу, а выбрано STARTTLS. Смените шифрование на SSL/TLS или порт на 587.';
+        }
+        return 'Сервер не открыл соединение: проверьте адрес, порт и доступность порта из контейнера (провайдер может блокировать исходящий SMTP).';
+    }
+    if (stripos($error, 'certificate') !== false || stripos($error, 'subjectAltName') !== false) {
+        return 'Сертификат сервера не совпадает с именем: укажите в поле «SMTP-сервер» каноническое имя из сертификата.';
+    }
+    // PHPMailer пишет и «Could not authenticate», и «Authentication failed».
+    if (stripos($error, 'authenticat') !== false || stripos($error, '535') !== false || stripos($error, '534') !== false) {
+        return 'Сервер не принял логин или пароль. Для mail.ru нужен пароль для внешнего приложения, а не пароль от почты.';
+    }
+    if (stripos($error, 'timeout') !== false || stripos($error, 'timed out') !== false) {
+        return 'Сервер не ответил за ' . DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS . ' секунд: порт закрыт, сеть медленная или адрес неверный.';
+    }
+    if ($errorText === '') {
+        return 'Соединение не установлено, но PHPMailer не оставил текста ошибки — смотрите журнал ниже.';
+    }
+    return 'Соединение не установлено: ' . mb_substr($error, 0, 300, 'UTF-8');
+}
+
 function docgenTestSmtp(): never
 {
     try {
@@ -3646,22 +3858,19 @@ function docgenTestSmtp(): never
             $override = docgenSmtpAccount($accountId);
             $overridePassword = docgenSmtpAccountSecret($accountId);
         }
-        $mailer = docgenBuildMailer($override, $overridePassword);
-        // Bound only this connectivity probe; sending from the queue is unchanged.
-        $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
-        $mailer->getSMTPInstance()->Timelimit = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
-        if ($mailer->smtpConnect()) {
-            $mailer->smtpClose();
-            sendJson(['ok' => true, 'message' => 'Соединение с SMTP установлено, сервер принял параметры авторизации.']);
-        }
-        $detail = trim((string) $mailer->ErrorInfo);
-        $hint = ' Проверьте адрес и порт из контейнера: для порта 587 выбирайте STARTTLS, для 465 — SSL/TLS; провайдер также может блокировать исходящий SMTP-порт.';
-        if (stripos($detail, 'subjectAltName') !== false || stripos($detail, 'certificate') !== false) {
-            $hint .= ' Сертификат выдан на другое имя: укажите в поле SMTP-сервер каноническое имя из сертификата вместо алиаса.';
-        }
-        sendJson(['ok' => false, 'error' => 'Не удалось подключиться к SMTP-серверу.' . ($detail !== '' ? ' ' . mb_substr($detail, 0, 400, 'UTF-8') : '') . $hint], 502);
+        $settings = $override === null ? docgenSmtpSettings() : array_merge(docgenSmtpDefaults(), $override);
+        $password = (string) ($overridePassword ?? (string) (docgenSmtpSecret()['password'] ?? ''));
+        $diagnostics = docgenSmtpDiagnose($settings, $password);
+        $diagnostics['error'] = $diagnostics['ok'] ? '' : (string) $diagnostics['summary'];
+        sendJson($diagnostics, $diagnostics['ok'] ? 200 : 502);
     } catch (Throwable $e) {
-        sendJson(['ok' => false, 'error' => 'Проверка SMTP не прошла: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
+        sendJson([
+            'ok' => false,
+            'error' => 'Проверка SMTP не прошла: ' . mb_substr(docgenSmtpMaskSecrets($e->getMessage(), (string) ($overridePassword ?? '')), 0, 800, 'UTF-8'),
+            'summary' => 'Проверка не запустилась.',
+            'steps' => [],
+            'transcript' => '',
+        ], 502);
     }
 }
 

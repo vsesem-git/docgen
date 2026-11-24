@@ -1040,6 +1040,20 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .queue-preview-tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:4px 2px;color:var(--muted);font-size:12px;font-weight:700;text-decoration:none;cursor:pointer}
 .queue-preview-tab:not(.active):hover{background:transparent;color:#174a7e;text-decoration:underline;text-underline-offset:2px}
 .queue-preview-tab.active{border-bottom-color:var(--brand);color:#123b63}
+.smtp-log-summary{margin:0 0 12px}
+.smtp-log-summary .smtp-log-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.smtp-log-badge{border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
+.smtp-log-badge.ok{background:#e8f6ee;color:#1b7f4b}
+.smtp-log-badge.bad{background:#fdecea;color:#b42318}
+.smtp-log-hint{margin:0;font-size:12.5px;color:#5b6b7f}
+.smtp-log-steps{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:6px}
+.smtp-log-steps li{display:flex;gap:9px;align-items:flex-start;padding:7px 9px;border:1px solid #e3ebf4;border-radius:7px;font-size:12.5px;background:#fbfdff}
+.smtp-log-steps .step-name{font-weight:650;min-width:42px;color:#173b60}
+.smtp-log-steps li.bad{border-color:#f3c9c4;background:#fff8f7}
+.smtp-log-transcript{margin:0;border:1px solid var(--line);border-radius:8px;background:#0f2233;color:#d9e8f5;padding:11px 12px;max-height:38vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.smtp-log-context{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;margin:10px 0 0;font-size:12.5px}
+.smtp-log-context dt{color:#5b6b7f}
+.smtp-log-context dd{margin:0;overflow-wrap:anywhere}
 .queue-text-preview{grid-column:1;grid-row:2/4;margin:0;border:1px solid var(--line);border-radius:8px;background:#fbfdff;padding:13px 14px;height:56vh;min-height:390px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 "Segoe UI",system-ui,sans-serif;color:#24394f}
 .queue-text-preview.empty{color:var(--bad);font-weight:650;background:#fff7f6;border-color:#efc1bc}
 .queue-text-hint{display:block;margin-top:5px;font-size:11.5px;border-radius:7px;padding:6px 8px;font-weight:650}
@@ -1585,6 +1599,19 @@ body.modal-open{overflow:hidden}
   <section class="modal manager-modal" role="dialog" aria-modal="true" aria-labelledby="queueManagerModalTitle">
     <div class="modal-head"><div><h2 id="queueManagerModalTitle">Менеджер очереди писем</h2><div class="modal-subtitle">Пачки в расписании и ручной очереди, лимиты SMTP-ящиков и ошибки отправки</div></div><button type="button" class="modal-close" id="queueManagerModalClose" aria-label="Закрыть менеджер очереди">×</button></div>
     <div class="modal-main"><iframe id="queueManagerFrame" title="Менеджер очереди писем"></iframe></div>
+  </section>
+</div>
+<div class="modal-backdrop" id="smtpLogModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="smtpLogTitle">
+    <div class="modal-head"><div><h2 id="smtpLogTitle">Журнал проверки SMTP</h2><div class="modal-subtitle" id="smtpLogSubtitle"></div></div><button type="button" class="modal-close" id="smtpLogClose" aria-label="Закрыть журнал проверки">×</button></div>
+    <div class="modal-main">
+      <div class="smtp-log-summary"><div class="smtp-log-head"><span class="smtp-log-badge" id="smtpLogBadge">Проверка</span><strong id="smtpLogHeadline"></strong></div><p class="smtp-log-hint" id="smtpLogHint"></p></div>
+      <ul class="smtp-log-steps" id="smtpLogSteps"></ul>
+      <div class="small-muted" style="margin:0 0 5px">Полный диалог с сервером (пароль скрыт)</div>
+      <pre class="smtp-log-transcript" id="smtpLogTranscript"></pre>
+      <dl class="smtp-log-context" id="smtpLogContext"></dl>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="smtpLogFeedback">Скопируйте журнал, если нужно показать администратору.</span><div class="right"><button type="button" class="btn-ghost" id="smtpLogCopyBtn">Скопировать журнал</button><button type="button" class="btn-primary" id="smtpLogCloseBtn">Закрыть</button></div></div>
   </section>
 </div>
 <div class="modal-backdrop" id="queueModal" hidden>
@@ -3135,6 +3162,29 @@ async function deleteSmtpAccount() {
     $('smtpFeedback').textContent='SMTP-ящик удалён.';showToast('SMTP-ящик удалён.','success');
   } catch(e) {$('smtpFeedback').textContent=e.message||'Не удалось удалить ящик.';showToast(e.message||'Не удалось удалить SMTP-ящик.','error');}
 }
+function openSmtpLog(diagnostics) {
+  const log=diagnostics||{};
+  const ok=Boolean(log.ok);
+  const bad=$('smtpLogBadge');
+  bad.textContent=ok?'Успешно':'Ошибка';
+  bad.className='smtp-log-badge '+(ok?'ok':'bad');
+  $('smtpLogSubtitle').textContent=[log.server||'', log.context?.['шифрование']||'', log.elapsedMs?`${log.elapsedMs} мс`:''].filter(Boolean).join(' · ');
+  $('smtpLogHeadline').textContent=log.summary||(ok?'Соединение проверено.':'Проверка не прошла.');
+  $('smtpLogHint').textContent=ok?'Пароль и диалог с сервером скрыты. Сервер принял параметры авторизации.':'Ниже — сетевые шаги и полный диалог: по ним видно, на каком этапе всё остановилось.';
+  const steps=Array.isArray(log.steps)?log.steps:[];
+  $('smtpLogSteps').innerHTML=steps.length?steps.map(step=>`<li class="${step.ok?'good':'bad'}"><span class="step-name">${esc(step.step||'')}</span><span>${step.ok?'✓':'✕'} ${esc(step.detail||'')}</span></li>`).join(''):'<li><span class="step-name">Сеть</span><span>Сетевые шаги недоступны.</span></li>';
+  const smtpError=log.smtpError||{};
+  const errorLine=[smtpError.error,smtpError.detail,smtpError.code&&`код ${smtpError.code}`].filter(Boolean).join(' · ');
+  $('smtpLogTranscript').textContent=[log.transcript||'PHPMailer не оставил журнала.',errorLine?`\nSMTP: ${errorLine}`:''].join('');
+  const context=Object.entries(log.context||{});
+  $('smtpLogContext').innerHTML=context.map(([key,value])=>`<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('');
+  $('smtpLogFeedback').textContent=ok?'Проверка ничего не сохранила.':'Журнал можно скопировать целиком.';
+  $('smtpLogModal').hidden=false;document.body.classList.add('modal-open');
+  $('smtpLogCloseBtn').focus();
+}
+function closeSmtpLog() {
+  $('smtpLogModal').hidden=true;document.body.classList.remove('modal-open');
+}
 async function testSmtp() {
   const button=$('testSmtpBtn');
   if(button.disabled)return;
@@ -3145,10 +3195,34 @@ async function testSmtp() {
   button.disabled=true;button.textContent='Проверяем…';
   $('smtpFeedback').textContent='Подключаемся к SMTP-серверу…';
   try {
-    const payload=await requestJson('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false)},20000);
-    $('smtpFeedback').textContent=payload.message||'Соединение проверено.';showToast(payload.message||'SMTP доступен.','success');
-  } catch(e) {$('smtpFeedback').textContent=e.message||'Ошибка SMTP.';showToast(e.message||'Ошибка SMTP.','error');}
-  finally {button.disabled=false;button.textContent='Проверить SMTP';}
+    // Ошибка 502 всё равно несёт журнал, поэтому читаем тело до проверки ok.
+    const response=await fetchSmtpTest();
+    const payload=await response.json().catch(()=>({}));
+    if(payload.ok){
+      $('smtpFeedback').textContent=payload.summary||payload.message||'Соединение проверено.';
+      showToast(payload.summary||'SMTP доступен.','success');
+      openSmtpLog(payload);
+      return;
+    }
+    const summary=payload.summary||payload.error||'Проверка SMTP не прошла.';
+    $('smtpFeedback').textContent=summary;
+    showToast(summary+' Открыт журнал проверки.','error');
+    openSmtpLog(payload);
+  } catch(e) {
+    $('smtpFeedback').textContent=e.message||'Ошибка SMTP.';
+    showToast(e.message||'Ошибка SMTP.','error');
+    openSmtpLog({ok:false,summary:e.message||'Проверка не дошла до сервера.',steps:[],transcript:'',context:{}});
+  } finally {button.disabled=false;button.textContent='Проверить SMTP';}
+}
+async function fetchSmtpTest() {
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),30000);
+  try {
+    return await fetch('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false),signal:controller.signal});
+  } catch(e) {
+    if(e.name==='AbortError')throw new Error('Сервер не ответил за 30 с: SMTP-сервер недоступен или сеть контейнера блокирует соединение.');
+    throw e;
+  } finally {clearTimeout(timer);}
 }
 function updateDadataState() {
   const count=Object.keys(managerChecks||{}).length;
@@ -3541,6 +3615,18 @@ $('letterDesignFileInput').addEventListener('change',()=>{
 });
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
+$('smtpLogClose').addEventListener('click',closeSmtpLog);
+$('smtpLogCloseBtn').addEventListener('click',closeSmtpLog);
+$('smtpLogModal').addEventListener('click',event=>{if(event.target===$('smtpLogModal'))closeSmtpLog();});
+$('smtpLogCopyBtn').addEventListener('click',async()=>{
+  const text=[$('smtpLogTitle').textContent,$('smtpLogHeadline').textContent,$('smtpLogSteps').innerText,$('smtpLogTranscript').textContent,$('smtpLogContext').innerText].join('\n');
+  try { await navigator.clipboard.writeText(text); $('smtpLogFeedback').textContent='Журнал скопирован.'; }
+  catch(e) {
+    const area=document.createElement('textarea');area.value=text;document.body.appendChild(area);area.select();
+    try{document.execCommand('copy');$('smtpLogFeedback').textContent='Журнал скопирован.';}catch{ $('smtpLogFeedback').textContent='Браузер не дал скопировать: выделите текст вручную.'; }
+    area.remove();
+  }
+});
 $('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);
 $('deleteSmtpAccountBtn').addEventListener('click',deleteSmtpAccount);
 $('smtpAccountSelect').addEventListener('change',()=>applySmtpAccountToForm($('smtpAccountSelect').value));
@@ -3566,7 +3652,7 @@ $('smtpEncryption').addEventListener('change',()=>{
   if(encryption==='ssl'&&port==='587')$('smtpPort').value='465';
   if(encryption==='tls'&&port==='465')$('smtpPort').value='587';
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueManagerModal').hidden)closeQueueManager();else if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('smtpLogModal').hidden)closeSmtpLog();else if(!$('queueManagerModal').hidden)closeQueueManager();else if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
 $('dropTemplate').addEventListener('click',()=>templateInput.click());
 $('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
 templateInput.addEventListener('change',()=>analyzeUpload(templateInput.files?.[0]));

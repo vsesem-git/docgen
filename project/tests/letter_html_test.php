@@ -266,6 +266,54 @@ docgenAssignBatchAccount($queueBatch, $accA);
 check(docgenReadQueueItem($queueIds[0])['smtpAccountId'] === $accA, 'ящик можно сменить до отправки');
 check(docgenCronItemAccountId(docgenReadQueueItem($queueIds[0])) === $accA, 'лимит и поток считаются по выбранному ящику');
 
+// 12. Диагностика SMTP: журнал для модалки, пароль скрыт, причины понятны.
+$smtpPassword = 'S3cret-Pa55word';
+$secretTranscript = "CLIENT -> SERVER: AUTH PLAIN " . base64_encode("\0user@mail.ru\0" . $smtpPassword) . "\n"
+    . "CLIENT -> SERVER: " . base64_encode($smtpPassword) . "\n"
+    . "SERVER -> CLIENT: 535 auth failed for " . $smtpPassword . "\n";
+$masked = docgenSmtpMaskSecrets(docgenSmaskTranscript($secretTranscript), $smtpPassword, 'user@mail.ru');
+check(strpos($masked, $smtpPassword) === false, 'журнал SMTP не содержит пароля');
+check(strpos($masked, base64_encode($smtpPassword)) === false, 'журнал SMTP не содержит base64 пароля');
+check(strpos($masked, base64_encode("\0user@mail.ru\0" . $smtpPassword)) === false, 'журнал SMTP не содержит AUTH PLAIN строки');
+check(strpos($masked, '535 auth failed') !== false, 'ответ сервера в журнале сохранён');
+check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'ssl', 587), '465') !== false, 'SSL на 587 подсказывает 465');
+check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'tls', 465), 'SSL/TLS') !== false, 'STARTTLS на 465 подсказывает SSL');
+check(strpos(docgenSmtpExplain('SMTP Error: Could not authenticate.', 'tls', 587), 'внешнего приложения') !== false, 'ошибка входа объяснена про пароль приложения');
+check(strpos(docgenSmtpExplain('certificate verify failed', 'tls', 587), 'сертификат') !== false, 'ошибка сертификата объяснена');
+check(strpos(docgenSmtpExplain('Connection timed out', 'tls', 587), 'не ответил') !== false, 'таймаут объяснён');
+$openTcp = [['step' => 'TCP', 'ok' => true, 'detail' => 'открыт']];
+check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'tls', 587, $openTcp), 'SMTP-диалог не начался') !== false, 'открытый порт без приветствия объяснён отдельно');
+$closedTcp = [['step' => 'TCP', 'ok' => false, 'detail' => 'закрыт']];
+check(strpos(docgenSmtpExplain('Could not connect to SMTP host.', 'tls', 587, $closedTcp), 'не открыл соединение') !== false, 'закрытый порт объяснён как неподключение');
+
+$diagSteps = docgenSmtpNetworkSteps('127.0.0.1', 9, 'tls');
+check(count($diagSteps) >= 2, 'диагностика сети возвращает DNS и TCP');
+check($diagSteps[0]['step'] === 'DNS' && isset($diagSteps[0]['detail']), 'шаг DNS описан');
+$hasTlsStep = false;
+foreach (docgenSmtpNetworkSteps('127.0.0.1', 9, 'ssl') as $step) {
+    if ($step['step'] === 'TLS') {
+        $hasTlsStep = true;
+    }
+}
+check($hasTlsStep, 'для SSL добавлен шаг TLS');
+$hasTlsStep = false;
+foreach (docgenSmtpNetworkSteps('127.0.0.1', 9, 'none') as $step) {
+    if ($step['step'] === 'TLS') {
+        $hasTlsStep = true;
+    }
+}
+check(!$hasTlsStep, 'без шифрования шага TLS нет');
+
+$diagnostics = docgenSmtpDiagnose([
+    'host' => '127.0.0.1', 'port' => 9, 'encryption' => 'tls', 'username' => 'user@mail.ru',
+    'fromEmail' => 'user@mail.ru', 'fromName' => '', 'replyTo' => '',
+], $smtpPassword);
+check($diagnostics['ok'] === false, 'диагностика недоступного сервера — not ok');
+check(trim((string) $diagnostics['summary']) !== '', 'диагностика даёт понятную причину');
+check(strpos((string) $diagnostics['transcript'], $smtpPassword) === false, 'в полном журнале нет пароля');
+check(array_key_exists('PHP', (array) $diagnostics['context']) && isset($diagnostics['context']['openssl']), 'в журнале есть окружение PHP/openssl');
+check(isset($diagnostics['elapsedMs']) && $diagnostics['elapsedMs'] >= 0, 'в журнале есть время попытки');
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 
