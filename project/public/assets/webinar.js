@@ -22,13 +22,24 @@ const el = {};
   'help-dialog', 'open-help', 'editorial-dialog', 'editorial-heading', 'editorial-date',
   'editorial-feedback', 'editorial-save', 'editorial-clear', 'ed-file_title', 'ed-benefit',
   'ed-audience', 'ed-with_whom', 'ed-intro_suffix', 'ed-topics', 'monitor-dialog', 'open-monitor',
-  'monitor-state', 'monitor-last', 'monitor-next', 'monitor-note', 'monitor-telegram',
+  'monitor-state', 'monitor-last', 'monitor-next', 'monitor-note', 'monitor-times', 'monitor-telegram',
   'monitor-toggle', 'monitor-check-now', 'monitor-feedback', 'telegram-form', 'telegram-token',
   'telegram-connect', 'telegram-test', 'telegram-disconnect', 'telegram-env-note', 'pair-box',
   'pair-bot', 'pair-code', 'pair-remaining', 'layout-dialog', 'open-layout', 'layout-name',
   'layout-size', 'layout-source', 'layout-drop', 'layout-file', 'layout-feedback', 'layout-reset',
   'toast', 'toast-icon', 'toast-text', 'toast-close'
-].forEach(id => { el[id] = document.getElementById(id); });
+].forEach(id => {
+  const node = document.getElementById(id);
+  if (node) {
+    el[id] = node;
+    return;
+  }
+  // Не найденный в разметке элемент раньше ронял панель с «Cannot read
+  // properties of undefined» при первом же обращении. Подставляем пустой
+  // контейнер и сообщаем в консоль — остальной интерфейс продолжает работать.
+  console.warn('webinar.js: в разметке нет элемента #' + id);
+  el[id] = document.createElement('div');
+});
 
 const state = {
   catalog: boot.catalog || null,

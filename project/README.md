@@ -104,6 +104,7 @@ sudo systemctl restart docgen.service
 - `docs/letter-design-template.html` — пример HTML-дизайна письма (анонс вебинара, табличная вёрстка 680px, preheader, кнопка-ссылка, отписка).
 - `tests/letter_html_test.php` — автономные проверки письма и дизайна (`php tests/letter_html_test.php`, хранилище во временной папке).
 - `tests/webinar_test.php` — автономные проверки генератора вебинаров (`php tests/webinar_test.php`): сверка разбора и текста 16 документов с эталоном, ZIP-структура, редактура, уведомления и слоты МСК.
+- `tests/webinar_ui_test.php` — сверка интерфейса (`php tests/webinar_ui_test.php`): каждый id, к которому обращается `webinar.js`, есть в списке инициализации и в разметке, а каждое вызываемое действие API обрабатывается страницей. Ловит ошибки вида «Cannot read properties of undefined».
 - `features.php` и `index.php` — приложение и API; `public/index.php` — тонкий web-entrypoint. Остальные файлы проекта недоступны напрямую через web-root.
 - Вне web-root хранятся правки карточек, шаблоны, очередь, файлы PDF/DOCX, SMTP-настройки/секреты, API-ключ DaData, результаты сверки руководителей, пользовательские разделы/колонки/импортированные строки (`table_data.json`), временные XLSX-файлы импорта и до 10 резервных копий перед Excel-импортом.
 
