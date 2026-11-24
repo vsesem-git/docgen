@@ -256,12 +256,20 @@ function docgenTemplateList(): array
         'type' => 'docx',
         'sample' => true,
     ]];
+    $letters = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
     foreach (docgenUserTemplateIndex() as $template) {
+        $own = isset($letters[$template['id']]) && is_array($letters[$template['id']]);
         $templates[] = [
             'id' => $template['id'],
             'name' => $template['name'],
             'type' => $template['type'],
             'sample' => false,
+            'size' => (int) @filesize($template['path']),
+            'createdAt' => $template['createdAt'],
+            'updatedAt' => $template['updatedAt'],
+            // The manager shows which templates already keep their own letter.
+            'ownLetter' => $own,
+            'hasHtmlDesign' => $own && trim((string) ($letters[$template['id']]['htmlPattern'] ?? '')) !== '',
         ];
     }
     return $templates;
@@ -629,6 +637,23 @@ function docgenSaveTemplateLetterSettings(string $templateId, array $fields, str
         'updatedAt' => date(DATE_ATOM),
     ]);
     docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+}
+
+/** Copy one template's saved letter to another (used by «Сохранить как…»). */
+function docgenCopyTemplateLetterSettings(string $fromId, string $toId): bool
+{
+    if ($fromId === '' || $toId === '' || $fromId === $toId) {
+        return false;
+    }
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    if (!isset($store[$fromId]) || !is_array($store[$fromId])) {
+        return false;
+    }
+    $copy = $store[$fromId];
+    $copy['updatedAt'] = date(DATE_ATOM);
+    $store[$toId] = $copy;
+    docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+    return true;
 }
 
 function docgenCleanupTemplateLetters(string $templateId): void
@@ -2960,6 +2985,123 @@ function docgenResolveTemplateFromId(string $id): array
     return docgenResolveTemplate();
 }
 
+/** Rename a saved template without touching its file or its letter. */
+function docgenRenameTemplate(): never
+{
+    $id = trim((string) ($_POST['id'] ?? ''));
+    $name = trim((string) ($_POST['name'] ?? ''));
+    if (mb_strlen($name, 'UTF-8') > 180) {
+        sendJson(['ok' => false, 'error' => 'Название шаблона — не более 180 символов.'], 422);
+    }
+    if ($name === '') {
+        sendJson(['ok' => false, 'error' => 'Укажите название шаблона.'], 422);
+    }
+    $found = null;
+    foreach (docgenUserTemplateIndex() as $item) {
+        if ($item['id'] === $id) {
+            $found = $item;
+            break;
+        }
+    }
+    if (!$found) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
+    }
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    $renamed = false;
+    foreach ($raw as $index => $item) {
+        if (is_array($item) && (string) ($item['id'] ?? '') === $id) {
+            $raw[$index]['name'] = $name;
+            $raw[$index]['updatedAt'] = date(DATE_ATOM);
+            $renamed = true;
+        }
+    }
+    if (!$renamed) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден в списке.'], 404);
+    }
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => 'Не удалось переименовать шаблон: ' . $e->getMessage()], 500);
+    }
+    sendJson(['ok' => true, 'id' => $id, 'name' => $name, 'templates' => docgenTemplateList()]);
+}
+
+/** «Сохранить как…»: a copy of the document under a new name, letter included. */
+function docgenCopyTemplate(): never
+{
+    $sourceId = trim((string) ($_POST['source_id'] ?? ''));
+    $name = trim((string) ($_POST['name'] ?? ''));
+    if ($name === '' || mb_strlen($name, 'UTF-8') > 180) {
+        sendJson(['ok' => false, 'error' => 'Укажите название копии (не более 180 символов).'], 422);
+    }
+    if ($sourceId === 'sample-docx') {
+        // The built-in sample is a normal DOCX file: copy it like any other.
+        $source = ['id' => 'sample-docx', 'name' => 'Письмо-пример.docx', 'type' => 'docx', 'path' => SAMPLE_TEMPLATE];
+    } else {
+        $source = null;
+        foreach (docgenUserTemplateIndex() as $item) {
+            if ($item['id'] === $sourceId) {
+                $source = $item;
+                break;
+            }
+        }
+        if (!$source) {
+            sendJson(['ok' => false, 'error' => 'Исходный шаблон не найден. Обновите список.'], 404);
+        }
+    }
+    docgenEnsureDir(DOCGEN_TEMPLATES_DIR);
+    $id = bin2hex(random_bytes(16));
+    $extension = $source['type'] === 'docx' ? 'docx' : 'html';
+    $path = DOCGEN_TEMPLATES_DIR . '/' . $id . '.' . $extension;
+    try {
+        if ($source['type'] === 'docx') {
+            if (!copy((string) $source['path'], $path)) {
+                sendJson(['ok' => false, 'error' => 'Не удалось скопировать DOCX-файл шаблона.'], 500);
+            }
+            validateDocxPath($path);
+        } else {
+            $content = (string) file_get_contents((string) $source['path']);
+            if (file_put_contents($path, $content, LOCK_EX) === false) {
+                sendJson(['ok' => false, 'error' => 'Не удалось скопировать HTML-шаблон.'], 500);
+            }
+            @chmod($path, 0600);
+        }
+    } catch (Throwable $e) {
+        @unlink($path);
+        sendJson(['ok' => false, 'error' => 'Копия не создана: ' . $e->getMessage()], 422);
+    }
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    $raw[] = [
+        'id' => $id,
+        'name' => $name,
+        'type' => $source['type'],
+        'createdAt' => date(DATE_ATOM),
+        'updatedAt' => date(DATE_ATOM),
+    ];
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+        $letterCopied = false;
+        if ($sourceId !== 'sample-docx') {
+            $letterCopied = docgenCopyTemplateLetterSettings($sourceId, $id);
+        }
+        $info = docgenScanTemplate(docgenResolveTemplateFromId($id));
+    } catch (Throwable $e) {
+        @unlink($path);
+        sendJson(['ok' => false, 'error' => 'Копия не создана: ' . $e->getMessage()], 500);
+    }
+    $notice = $letterCopied
+        ? 'Письмо и HTML-дизайн скопированы вместе с шаблоном.'
+        : 'У копии общие настройки письма: сохраните их, когда будете готовы.';
+    sendJson([
+        'ok' => true,
+        'template' => ['id' => $id, 'name' => $name, 'type' => $source['type']],
+        'templates' => docgenTemplateList(),
+        'info' => $info,
+        'letterCopied' => $letterCopied,
+        'notice' => $notice,
+    ]);
+}
+
 function docgenDeleteTemplate(): never
 {
     $id = trim((string) ($_POST['id'] ?? ''));
@@ -2984,6 +3126,72 @@ function docgenDeleteTemplate(): never
     $raw = array_values(array_filter($raw, static fn($item): bool => !is_array($item) || (string) ($item['id'] ?? '') !== $id));
     docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
     sendJson(['ok' => true, 'templates' => docgenTemplateList()]);
+}
+
+/**
+ * Replace the file of a saved DOCX template. The template id, its name and its
+ * letter (design included) stay untouched; the new file must still be a DOCX.
+ */
+function docgenReplaceTemplateFile(): never
+{
+    $id = trim((string) ($_POST['id'] ?? ''));
+    $found = null;
+    foreach (docgenUserTemplateIndex() as $item) {
+        if ($item['id'] === $id) {
+            $found = $item;
+            break;
+        }
+    }
+    if (!$found) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
+    }
+    if ($found['type'] !== 'docx') {
+        sendJson(['ok' => false, 'error' => 'Для HTML-шаблона используйте HTML-редактор.'], 422);
+    }
+    try {
+        $uploaded = uploadedTemplatePath();
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    if ($uploaded === null) {
+        sendJson(['ok' => false, 'error' => 'Выберите новый DOCX-файл.'], 422);
+    }
+    $backup = $found['path'] . '.bak';
+    try {
+        if (!copy($found['path'], $backup)) {
+            sendJson(['ok' => false, 'error' => 'Не удалось сохранить копию текущего файла перед заменой.'], 500);
+        }
+        if (!copy($uploaded, $found['path'])) {
+            sendJson(['ok' => false, 'error' => 'Не удалось заменить DOCX-файл шаблона.'], 500);
+        }
+        @chmod($found['path'], 0600);
+        validateDocxPath($found['path']);
+    } catch (Throwable $e) {
+        if (is_file($backup)) {
+            @copy($backup, $found['path']);
+        }
+        @unlink($backup);
+        sendJson(['ok' => false, 'error' => 'Файл не заменён: ' . $e->getMessage()], 422);
+    }
+    @unlink($backup);
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    foreach ($raw as $index => $item) {
+        if (is_array($item) && (string) ($item['id'] ?? '') === $id) {
+            $raw[$index]['updatedAt'] = date(DATE_ATOM);
+        }
+    }
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+        $info = docgenScanTemplate(docgenResolveTemplateFromId($id));
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => 'Файл заменён, но шаблон не перечитан: ' . $e->getMessage()], 500);
+    }
+    sendJson([
+        'ok' => true,
+        'templates' => docgenTemplateList(),
+        'info' => $info,
+        'notice' => 'DOCX-файл заменён. Письмо и HTML-дизайн этого шаблона сохранены.',
+    ]);
 }
 
 function docgenTemplateContent(): never
@@ -3756,7 +3964,7 @@ function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): 
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $postActions = ['save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -3770,6 +3978,12 @@ function docgenDispatch(string $action): void
             sendJson(['ok' => true, 'templates' => docgenTemplateList()]);
         case 'save_template':
             docgenSaveTemplate();
+        case 'rename_template':
+            docgenRenameTemplate();
+        case 'copy_template':
+            docgenCopyTemplate();
+        case 'replace_template_file':
+            docgenReplaceTemplateFile();
         case 'delete_template':
             docgenDeleteTemplate();
         case 'template_content':

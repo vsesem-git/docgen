@@ -158,6 +158,43 @@ try {
     check(true, 'empty letter refused');
 }
 
+// 8. Template manager: names, copies and the letter that travels with them.
+$managerId = bin2hex(random_bytes(16));
+$copyId = bin2hex(random_bytes(16));
+docgenWriteJson(DOCGEN_TEMPLATE_INDEX, [
+    ['id' => $managerId, 'name' => 'Вебинар 11.12.2028', 'type' => 'html', 'createdAt' => '', 'updatedAt' => ''],
+]);
+file_put_contents(DOCGEN_TEMPLATES_DIR . '/' . $managerId . '.html', '<p>{Регион}</p>');
+$list = docgenTemplateList();
+$own = null;
+foreach ($list as $entry) {
+    if ($entry['id'] === $managerId) {
+        $own = $entry;
+    }
+}
+check($own !== null && $own['name'] === 'Вебинар 11.12.2028', 'template list shows the saved name');
+check($own !== null && $own['ownLetter'] === false, 'template without its own letter is marked');
+docgenSaveTemplateLetterSettings($managerId, [
+    'filenamePattern' => 'x', 'toPattern' => 'a@b.c', 'ccPattern' => '', 'subjectPattern' => 'Своя тема',
+    'bodyPattern' => 'Текст', 'htmlPattern' => '<p>Дизайн</p>', 'htmlTextPattern' => '',
+], 'default');
+$marked = null;
+foreach (docgenTemplateList() as $entry) {
+    if ($entry['id'] === $managerId) {
+        $marked = $entry;
+    }
+}
+check($marked !== null && $marked['ownLetter'] === true && $marked['hasHtmlDesign'] === true, 'own letter and design are marked in the list');
+check(docgenCopyTemplateLetterSettings($managerId, $copyId) === true, 'letter copied to another template');
+$copied = docgenTemplateLetterSettings($copyId);
+check($copied['own'] === true && $copied['subjectPattern'] === 'Своя тема' && $copied['htmlPattern'] === '<p>Дизайн</p>', 'copy keeps subject, text and design');
+check(docgenCopyTemplateLetterSettings($managerId, $managerId) === false, 'copying to itself is refused');
+check(docgenCopyTemplateLetterSettings($copyId, bin2hex(random_bytes(16))) === true, 'copy works from any template with own letter');
+$fresh = docgenTemplateLetterSettings(bin2hex(random_bytes(16)));
+check($fresh['own'] === false, 'template without a copy still inherits defaults');
+docgenCleanupTemplateLetters($copyId);
+docgenCleanupTemplateLetters($managerId);
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 

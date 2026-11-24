@@ -1096,6 +1096,21 @@ body.modal-open{overflow:hidden}
 .modal-head h2{font-size:17px;margin:0 0 3px;color:#173b60}.modal-subtitle{color:var(--muted);font-size:12px}
 .modal-close{font-size:21px;line-height:1;padding:5px 10px;border:1px solid var(--line);background:#fff;color:var(--muted)}
 .modal-main{overflow:auto;padding:17px 20px 20px}
+.template-picker-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.template-picker-row select{flex:1 1 240px;min-width:0}
+.template-name-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:10px}
+.template-name-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-bottom:1px}
+.template-manager-modal{width:min(900px,100%)}
+.template-manager-list{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
+.template-row{border:1px solid var(--line);border-radius:11px;padding:12px 13px;background:#fbfdff}
+.template-row.current{border-color:#b9d3ea;background:#f4f9ff}
+.template-row-head{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.template-row-title{font-weight:700;color:#173b60;font-size:14px;word-break:break-word}
+.template-row-meta{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 9px}
+.template-row input[type=text]{width:100%;min-height:36px;border:1px solid #cbd7e3;border-radius:7px;padding:7px 9px;font-size:12.5px}
+.template-row-actions{display:flex;gap:7px;flex-wrap:wrap}
+.template-row-actions .btn{padding:6px 9px;font-size:12px;border-radius:7px}
+.template-manager-new{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px}
 .modal-hint{border:1px solid #c9d9ea;border-radius:9px;background:#f8fbff;color:#39536f;padding:10px 12px;font-size:12px;margin-bottom:15px}
 .modal-section{margin:0 0 18px}
 .modal-section h3{font-size:13px;margin:0 0 9px;color:#234765}
@@ -1197,7 +1212,20 @@ body.modal-open{overflow:hidden}
     <div class="card">
       <div class="card-head"><span class="step">2</span><h2>Шаблон DOCX или HTML</h2></div>
       <div class="card-body">
-        <div class="field" style="margin-bottom:10px"><label for="templateSelect">Выбрать сохранённый шаблон</label><select id="templateSelect"><option value="sample-docx">Загрузка шаблонов…</option></select></div>
+        <div class="field" style="margin-bottom:10px"><label for="templateSelect">Выбрать сохранённый шаблон</label>
+          <div class="template-picker-row">
+            <select id="templateSelect"><option value="sample-docx">Загрузка шаблонов…</option></select>
+            <button type="button" class="btn-ghost btn-small" id="openTemplateManager" title="Переименовать, копировать, заменить файл или удалить шаблон">Менеджер шаблонов</button>
+          </div>
+          <div class="template-name-row">
+            <div class="field" style="margin:0;flex:1 1 260px;min-width:0"><label for="templateNameInput">Имя выбранного шаблона</label><input id="templateNameInput" type="text" maxlength="180" autocomplete="off" placeholder="Например: Вебинар 11.12.2028 · тарифы"><span class="small-muted" style="display:block;margin-top:4px">Своё имя вместо названия файла. «Сохранить как копию» создаёт отдельный шаблон с этим именем.</span></div>
+            <div class="template-name-actions">
+              <button type="button" class="btn-primary btn-small" id="templateRenameBtn">Сохранить имя</button>
+              <button type="button" class="btn-ghost btn-small" id="templateSaveAsBtn">Сохранить как копию…</button>
+            </div>
+          </div>
+          <div class="small-muted" id="templateNameFeedback" aria-live="polite" style="margin-top:6px"></div>
+        </div>
         <div class="dz loaded" id="dropTemplate" tabindex="0" role="button" aria-label="Загрузить DOCX шаблон">
           <div class="dz-icon"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
           <div class="dz-title">Загрузить DOCX для текущей работы</div>
@@ -1474,6 +1502,25 @@ body.modal-open{overflow:hidden}
       <div id="backupImportList"></div>
     </div>
     <div class="modal-actions"><span class="small-muted" id="backupImportModalFeedback">Ничего не меняется до подтверждения.</span><div class="right"><button type="button" class="btn-ghost" id="backupImportCancelBtn">Отмена</button><button type="button" class="btn-primary" id="confirmBackupImportBtn">Восстановить выбранные файлы</button></div></div>
+  </section>
+</div>
+<div class="modal-backdrop" id="templateManagerModal" hidden>
+  <section class="modal template-manager-modal" role="dialog" aria-modal="true" aria-labelledby="templateManagerTitle">
+    <div class="modal-head"><div><h2 id="templateManagerTitle">Менеджер шаблонов</h2><div class="modal-subtitle">Переименуйте шаблон, сохраните копию под своим именем, замените DOCX-файл или удалите шаблон. У каждого шаблона своё письмо и HTML-дизайн.</div></div><button type="button" class="modal-close" id="templateManagerClose" aria-label="Закрыть менеджер шаблонов">×</button></div>
+    <div class="modal-main">
+      <div class="notice" style="margin:0 0 14px"><span>🗂️</span><div>Название — это ваша подпись шаблона, например «Вебинар 11.12.2028 · тарифы». Исходный файл при переименовании не меняется. При замене DOCX-файла письмо, получатели и HTML-дизайн этого шаблона сохраняются.</div></div>
+      <div id="templateManagerList" class="template-manager-list"></div>
+      <div class="template-manager-new">
+        <div class="field" style="margin:0;flex:1 1 260px;min-width:0"><label for="templateManagerNewName">Новый шаблон: своё имя</label><input id="templateManagerNewName" type="text" maxlength="180" autocomplete="off" placeholder="Например: Вебинар 2029 · вода"></div>
+        <div class="template-name-actions">
+          <button type="button" class="btn-ghost btn-small" id="templateManagerUploadBtn">Загрузить DOCX и сохранить</button>
+          <button type="button" class="btn-ghost btn-small" id="templateManagerHtmlBtn">Новый HTML-шаблон</button>
+        </div>
+      </div>
+      <input type="file" id="templateManagerUploadInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+      <input type="file" id="templateManagerReplaceInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="templateManagerFeedback" aria-live="polite">Действия применяются только к выбранной строке.</span><div class="right"><button type="button" class="btn-ghost" id="templateManagerDone">Закрыть</button></div></div>
   </section>
 </div>
 <div class="modal-backdrop" id="htmlTemplateModal" hidden>
@@ -2166,6 +2213,7 @@ function applyTemplateLibrary(templates) {
   if(!templateLibrary.some(item=>item.id==='sample-docx'))templateLibrary.unshift({id:'sample-docx',name:'Письмо-пример.docx',type:'docx'});
   renderTemplateOptions();
   if(templateId)templateSelect.value=templateId;
+  syncTemplateNameInput();
 }
 function renderTemplateOptions() {
   templateSelect.innerHTML=templateLibrary.map(item=>`<option value="${esc(item.id)}">${esc(item.name)} · ${item.type==='html'?'HTML → PDF':'DOCX → PDF'}</option>`).join('');
@@ -2192,6 +2240,8 @@ function setTemplateInfo(info, mode='saved', file=null, id='') {
   $('saveUploadedTemplate').disabled=mode!=='upload';
   $('editHtmlTemplate').disabled=info.type!=='html' || mode==='upload';
   $('createHtmlTemplate').disabled=false;
+  syncTemplateNameInput(true);
+  $('templateNameFeedback').textContent='';
   // Each saved template keeps its own letter; switching templates must reload it.
   loadLetterTemplate()
     .then(()=>updateLetterNotice())
@@ -2256,7 +2306,7 @@ async function saveUploadToLibrary(quiet) {
   const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
   const payload=await response.json();
   if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить шаблон.');
-  templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
+  applyTemplateLibrary(payload.templates||templateLibrary);
   templateInput.value='';
   if(!quiet) setTemplateInfo(payload.info,'saved',null,payload.template.id);
   return {id:payload.template.id,info:payload.info};
@@ -2363,7 +2413,7 @@ async function saveHtmlTemplate() {
     const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
     const payload=await response.json();
     if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить HTML-шаблон.');
-    templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
+    applyTemplateLibrary(payload.templates||templateLibrary);
     setTemplateInfo(payload.info,'saved',null,payload.template.id);closeHtmlEditor();showToast('HTML-шаблон сохранён.','success');
   } catch(e) { $('htmlTemplateFeedback').textContent=e.message||'Ошибка сохранения.';showToast(e.message||'Ошибка сохранения шаблона.','error'); }
   finally {button.disabled=false;button.textContent=editingHtmlTemplateId?'Сохранить изменения':'Сохранить шаблон';}
@@ -2828,6 +2878,180 @@ async function saveLetterTemplate() {
     showToast(e.message||'Ошибка сохранения шаблона письма.','error');
   } finally {button.disabled=false;button.textContent='Сохранить письмо для этого шаблона';}
 }
+// --- Template manager: name, copy, replace file, delete -------------------
+const templateManagerState = {replaceId:'', pendingUpload:null};
+function templateKindLabel(item) {
+  return item.type==='html' ? 'HTML-шаблон → PDF' : 'DOCX → PDF';
+}
+function templateLetterBadges(item) {
+  if(item.sample) return '<span class="pill">встроенный пример · общее письмо</span>';
+  const parts=[];
+  parts.push(item.ownLetter?'<span class="pill ok">своё письмо</span>':'<span class="pill">общее письмо</span>');
+  if(item.hasHtmlDesign) parts.push('<span class="pill ok">HTML-дизайн</span>');
+  if(item.size) parts.push(`<span class="pill">${Math.max(1,Math.round(Number(item.size)/1024))} КБ</span>`);
+  if(item.updatedAt) parts.push(`<span class="pill" title="Изменён">${esc(String(item.updatedAt).slice(0,10))}</span>`);
+  return parts.join('');
+}
+function renderTemplateManager() {
+  const list=$('templateManagerList');if(!list)return;
+  list.innerHTML=templateLibrary.map(item=>{
+    const current=item.id===templateId;
+    const editable=!item.sample;
+    return `<article class="template-row${current?' current':''}" data-template-row="${esc(item.id)}">
+      <div class="template-row-head"><div><div class="template-row-title">${esc(item.name)}</div><div class="small-muted">${esc(templateKindLabel(item))}${current?' · выбран сейчас':''}</div></div><div class="template-row-meta">${templateLetterBadges(item)}</div></div>
+      ${editable?`<input type="text" maxlength="180" value="${esc(item.name)}" data-template-name-input="${esc(item.id)}" aria-label="Новое имя шаблона ${esc(item.name)}">
+      <div class="template-row-actions">
+        <button type="button" class="btn-primary" data-template-action="rename" data-id="${esc(item.id)}">Сохранить имя</button>
+        <button type="button" class="btn-ghost" data-template-action="copy" data-id="${esc(item.id)}">Сохранить как копию…</button>
+        ${item.type==='html'?`<button type="button" class="btn-ghost" data-template-action="edit" data-id="${esc(item.id)}">Редактировать HTML</button>`:`<button type="button" class="btn-ghost" data-template-action="replace" data-id="${esc(item.id)}">Заменить DOCX…</button>`}
+        <button type="button" class="btn-ghost" data-template-action="select" data-id="${esc(item.id)}">Выбрать</button>
+        <button type="button" class="btn danger" data-template-action="delete" data-id="${esc(item.id)}">Удалить</button>
+      </div>`:`<div class="template-row-actions"><button type="button" class="btn-ghost" data-template-action="select" data-id="${esc(item.id)}">Выбрать пример</button></div>`}
+    </article>`;
+  }).join('');
+  list.querySelectorAll('[data-template-action]').forEach(button=>{
+    button.addEventListener('click',()=>runTemplateAction(button.dataset.templateAction,button.dataset.id));
+  });
+}
+function templateManagerMessage(text,error) {
+  const feedback=$('templateManagerFeedback');
+  if(feedback){feedback.textContent=text;feedback.style.color=error?'var(--bad)':'';}
+  if(text) showToast(text,error?'error':'success');
+}
+function refreshTemplateRow() {
+  renderTemplateManager();
+  syncTemplateNameInput(true);
+}
+function templateNameInputValue() { return $('templateNameInput')?.value.trim()||''; }
+function selectedTemplateName() {
+  const selected=templateLibrary.find(item=>item.id===templateId);
+  return selected?.name||'Письмо-пример.docx';
+}
+function syncTemplateNameInput(force) {
+  const input=$('templateNameInput');if(!input)return;
+  if(force||document.activeElement!==input) input.value=selectedTemplateName();
+  const isSample=templateId==='sample-docx';
+  input.disabled=templateId==='__upload__'||isSample;
+  $('templateRenameBtn').disabled=templateId==='__upload__'||isSample;
+  $('templateSaveAsBtn').disabled=templateId==='__upload__';
+}
+async function saveTemplateName() {
+  if(!templateId||templateId==='__upload__'){ $('templateNameFeedback').textContent='Сначала сохраните DOCX в библиотеку — у разового файла нет имени в списке.'; return; }
+  if(templateId==='sample-docx'){ $('templateNameFeedback').textContent='У встроенного примера имя не меняется. Используйте «Сохранить как копию…».'; return; }
+  const name=templateNameInputValue();
+  if(!name){ $('templateNameFeedback').textContent='Введите имя шаблона.'; return; }
+  const button=$('templateRenameBtn');button.disabled=true;
+  try {
+    const fd=new FormData();fd.append('id',templateId);fd.append('name',name);
+    const payload=await requestJson('?action=rename_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+    applyTemplateLibrary(payload.templates);
+    $('templateNameFeedback').textContent='Имя сохранено: '+name;
+    if(!$('templateManagerModal').hidden) refreshTemplateRow();
+    showToast('Имя шаблона сохранено.','success');
+  } catch(e) {
+    $('templateNameFeedback').textContent=e.message||'Не удалось сохранить имя.';
+    showToast(e.message||'Не удалось сохранить имя.','error');
+  } finally {button.disabled=false;syncTemplateNameInput(true);}
+}
+async function saveTemplateAsCopy(sourceId, suggestedName) {
+  const baseName=suggestedName||templateNameInputValue()||selectedTemplateName();
+  const name=window.prompt('Новое имя копии шаблона:',baseName+' · копия');
+  if(name===null)return null;
+  if(!name.trim()){showToast('Имя копии не может быть пустым.','error');return null;}
+  try {
+    const fd=new FormData();fd.append('source_id',sourceId);fd.append('name',name.trim());
+    const payload=await requestJson('?action=copy_template',{method:'POST',headers:csrfHeaders(),body:fd},30000);
+    applyTemplateLibrary(payload.templates);
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);
+    syncTemplateNameInput(true);
+    if(!$('templateManagerModal').hidden) renderTemplateManager();
+    showToast('Копия создана: '+payload.template.name,'success');
+    if(payload.notice)showToast(payload.notice,'info');
+    return payload.template;
+  } catch(e) { showToast(e.message||'Не удалось создать копию.','error'); return null; }
+}
+async function runTemplateAction(action,id) {
+  if(action==='select'){ await selectTemplate(id); if(!$('templateManagerModal').hidden) renderTemplateManager(); return; }
+  if(action==='edit'){ try { await selectTemplate(id); await editHtmlTemplate(); } catch(e){ showToast(e.message||'Не удалось открыть редактор.','error'); } return; }
+  if(action==='rename'){
+    const input=document.querySelector(`[data-template-name-input="${id}"]`);
+    const name=input?.value.trim()||'';
+    if(!name){ templateManagerMessage('Введите имя шаблона.',true); return; }
+    try {
+      const fd=new FormData();fd.append('id',id);fd.append('name',name);
+      const payload=await requestJson('?action=rename_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+      applyTemplateLibrary(payload.templates);
+      if(id===templateId)syncTemplateNameInput(true);
+      renderTemplateManager();
+      templateManagerMessage('Имя сохранено: '+name);
+    } catch(e) { templateManagerMessage(e.message||'Не удалось переименовать шаблон.',true); }
+    return;
+  }
+  if(action==='copy'){ await saveTemplateAsCopy(id); return; }
+  if(action==='replace'){
+    templateManagerState.replaceId=id;
+    $('templateManagerReplaceInput').value='';
+    $('templateManagerReplaceInput').click();
+    return;
+  }
+  if(action==='delete'){
+    const item=templateLibrary.find(row=>row.id===id);
+    const label=item?.name||'шаблон';
+    if(!window.confirm(`Удалить шаблон «${label}» вместе с его письмом и HTML-дизайном? Документ и настройки будут потеряны.`))return;
+    if(!window.confirm('Подтвердите удаление: отменить его будет нельзя.'))return;
+    try {
+      const fd=new FormData();fd.append('id',id);
+      const payload=await requestJson('?action=delete_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+      applyTemplateLibrary(payload.templates);
+      if(id===templateId){ await selectTemplate('sample-docx'); }
+      renderTemplateManager();
+      templateManagerMessage('Шаблон «'+label+'» удалён.');
+    } catch(e) { templateManagerMessage(e.message||'Не удалось удалить шаблон.',true); }
+  }
+}
+async function replaceTemplateFile(file) {
+  const id=templateManagerState.replaceId;
+  if(!id||!file)return;
+  if(!window.confirm(`Заменить DOCX-файл шаблона «${selectedTemplateNameFor(id)}»? Имя, письмо и HTML-дизайн сохранятся, файл станет новым.`))return;
+  try {
+    const fd=new FormData();fd.append('id',id);fd.append('template',file);
+    const payload=await requestJson('?action=replace_template_file',{method:'POST',headers:csrfHeaders(),body:fd},60000);
+    applyTemplateLibrary(payload.templates);
+    if(id===templateId) setTemplateInfo(payload.info,'saved',null,id);
+    renderTemplateManager();
+    templateManagerMessage(payload.notice||'Файл шаблона заменён.');
+  } catch(e) { templateManagerMessage(e.message||'Не удалось заменить файл шаблона.',true); }
+  finally { templateManagerState.replaceId=''; }
+}
+function selectedTemplateNameFor(id) {
+  return templateLibrary.find(item=>item.id===id)?.name||'шаблон';
+}
+function openTemplateManager() {
+  renderTemplateManager();
+  $('templateManagerFeedback').textContent='Действия применяются только к выбранной строке.';
+  $('templateManagerModal').hidden=false;document.body.classList.add('modal-open');
+  $('templateManagerClose').focus();
+}
+function closeTemplateManager() {
+  $('templateManagerModal').hidden=true;document.body.classList.remove('modal-open');
+  syncTemplateNameInput(true);
+}
+async function uploadTemplateFromManager(file) {
+  if(!file)return;
+  const name=($('templateManagerNewName').value.trim()||file.name.replace(/\.docx$/i,'')).slice(0,180);
+  const button=$('templateManagerUploadBtn');button.disabled=true;button.textContent='Сохраняем…';
+  try {
+    const fd=new FormData();fd.append('type','docx');fd.append('name',name);fd.append('template',file);
+    const payload=await requestJson('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd},60000);
+    applyTemplateLibrary(payload.templates);
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);
+    $('templateManagerNewName').value='';
+    syncTemplateNameInput(true);
+    renderTemplateManager();
+    templateManagerMessage('Шаблон «'+payload.template.name+'» добавлен в библиотеку.');
+  } catch(e) { templateManagerMessage(e.message||'Не удалось сохранить DOCX.',true); }
+  finally {button.disabled=false;button.textContent='Загрузить DOCX и сохранить';$('templateManagerUploadInput').value='';}
+}
 async function copyLetterDefaults() {
   if(!window.confirm('Заменить поля общими настройками? Несохранённые изменения этого шаблона будут потеряны.'))return;
   try { await loadLetterTemplate(); $('letterFeedback').textContent='Показаны значения по умолчанию (без сохранения).'; }
@@ -3253,6 +3477,17 @@ $('backupImportCancelBtn').addEventListener('click',closeBackupImportModal);
 $('confirmBackupImportBtn').addEventListener('click',confirmConfigBackupImport);
 $('backupImportModal').addEventListener('click',event=>{if(event.target===$('backupImportModal'))closeBackupImportModal();});
 $('addTableSectionBtn').addEventListener('click',addTableSection);
+$('templateRenameBtn').addEventListener('click',saveTemplateName);
+$('templateNameInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();saveTemplateName();}});
+$('templateSaveAsBtn').addEventListener('click',()=>saveTemplateAsCopy(templateId));
+$('openTemplateManager').addEventListener('click',openTemplateManager);
+$('templateManagerClose').addEventListener('click',closeTemplateManager);
+$('templateManagerDone').addEventListener('click',closeTemplateManager);
+$('templateManagerModal').addEventListener('click',event=>{if(event.target===$('templateManagerModal'))closeTemplateManager();});
+$('templateManagerUploadBtn').addEventListener('click',()=>{$('templateManagerUploadInput').value='';$('templateManagerUploadInput').click();});
+$('templateManagerUploadInput').addEventListener('change',()=>uploadTemplateFromManager($('templateManagerUploadInput').files?.[0]));
+$('templateManagerReplaceInput').addEventListener('change',()=>replaceTemplateFile($('templateManagerReplaceInput').files?.[0]));
+$('templateManagerHtmlBtn').addEventListener('click',()=>{closeTemplateManager();openHtmlEditor();});
 $('saveLetterTemplateBtn').addEventListener('click',saveLetterTemplate);
 $('letterVariableList').addEventListener('click',event=>{
   const button=event.target.closest('[data-var]');
