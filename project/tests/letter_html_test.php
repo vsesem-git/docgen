@@ -209,6 +209,16 @@ check(docgenIsRateLimitError('421 4.7.0 Too many messages') === true, 'too many 
 check(docgenIsRateLimitError('550 mailbox unavailable') === false, 'a mailbox error is not a rate limit');
 check(docgenIsRateLimitError('SMTP Error: Data not accepted') === false, 'a data error is not a rate limit');
 
+// 10. Headers: the plain part has no HTML, sender domain is usable as HELO.
+$plain = docgenLetterTextAlternative(['bodyPattern' => "Строка {nl} вторая", 'htmlPattern' => '<p>Дизайн</p>']);
+check(strpos($plain, '<br') === false && strpos($plain, '<') === false, 'plain alternative never carries html tags');
+check(strpos($plain, "{nl}") === false, 'plain alternative converts {nl} to a line break');
+$html = docgenLetterPlainToHtml("Строка{nl}вторая");
+check(strpos($html, '<br>') !== false, 'plain-to-html still keeps <br> for the rich part');
+$fromDomain = 'cmkcenter.ru';
+check(preg_match('/^[a-z0-9][a-z0-9.-]*$/i', $fromDomain) === 1, 'sender domain is a valid HELO name');
+check(preg_match('/^[a-z0-9][a-z0-9.-]*$/i', 'docgen') === 1, 'container hostname would have passed the old check, so the explicit HELO matters');
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 

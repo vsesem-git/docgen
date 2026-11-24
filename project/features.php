@@ -3479,6 +3479,11 @@ function docgenBuildMailer(?array $override = null, ?string $overridePassword = 
             $nonce = md5(uniqid('docgen', true));
         }
         $mailer->MessageID = '<' . $nonce . '@' . $fromDomain . '>';
+        // HELO/EHLO must be a real FQDN that resolves to this server's IP.
+        // Without it PHPMailer sends the container hostname ("docgen"), which
+        // SpamAssassin flags as SPF_HELO_NONE and some receivers reject.
+        $mailer->Helo = $fromDomain;
+        $mailer->Hostname = $fromDomain;
     }
     $mailer->isSMTP();
     $mailer->Host = $host;
