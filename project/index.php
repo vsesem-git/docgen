@@ -1371,6 +1371,39 @@ body.modal-open{overflow:hidden}
   <div class="progress-wrap" id="managerCheckProgress"><span class="spinner"></span><span id="managerCheckProgressText">Сверяем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelManagerCheckBtn">Остановить после текущего пакета</button></div>
   <div class="progress-wrap" id="dadataRefreshProgress"><span class="spinner"></span><span id="dadataRefreshProgressText">Загружаем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelDadataRefreshBtn">Остановить после текущего пакета</button></div>
   <div class="download-result" id="downloadResult" hidden></div>
+  <section class="settings-card" id="sendPolicyCard">
+    <details>
+      <summary><strong>Отправка без блокировок: лимиты mail.ru и поведение «как вручную»</strong><span class="settings-state">важно перед рассылкой</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>🛡️</span><div>Официальные письма по одному адресату отправляются через ваш SMTP-ящик. Почтовый сервис оценивает не только текст, но и темп: ровный поток «письмо в минуту круглосуточно» похож на рассылку. Ниже — что выставлено в приложении и что стоит проверить на стороне mail.ru.</div></div>
+        <div class="table-tools-grid">
+          <section class="table-tool-box">
+            <h3>Что уже делает приложение</h3>
+            <ul class="small-muted" style="margin:0;padding-left:18px;line-height:1.6">
+              <li><b>Темп.</b> Отправка не чаще 1 письма в минуту на ящик (максимум 6), между письмами добавляется случайная пауза — поток не выглядит ровным.</li>
+              <li><b>Окно и дни.</b> Отправка по расписанию идёт только в рабочие часы (по умолчанию 09:00–18:00), по выходным можно отключить совсем.</li>
+              <li><b>Дневной лимит.</b> Свой потолок на ящик; в менеджере очереди видно «отправлено сегодня из N».</li>
+              <li><b>Реакция на лимит.</b> На ответ сервиса «слишком часто» (421 4.7.0) ящик ставится на паузу 30 минут, письмо остаётся в расписании, а не помечается ошибкой.</li>
+              <li><b>Оформление.</b> У письма есть текстовая версия, папка «Отправленные» на сервисе показывает его как обычное письмо, а не рассылку.</li>
+            </ul>
+          </section>
+          <section class="table-tool-box">
+            <h3>Что настроить у mail.ru</h3>
+            <ul class="small-muted" style="margin:0;padding-left:18px;line-height:1.6">
+              <li><b>Отправляйте с корпоративного домена</b> (например, <code>@ваш-домен.ru</code>), а не с личного <code>@mail.ru</code>: у домена выше лимиты и есть Postmaster.</li>
+              <li><b>SPF, DKIM и DMARC</b> в DNS домена обязательны, DKIM включён в почтовом сервисе. Без них письма фильтруются ещё до чтения.</li>
+              <li><b>PTR (обратная зона)</b> IP вашего релея должна совпадать с именем сервера — это проверяют при доставке.</li>
+              <li><b>Не превышайте 30 адресатов</b> в одном письме (официальный лимит mail.ru) и не делайте «скрытую копию» на десятки адресов.</li>
+              <li><b>Прогрев.</b> Новый ящик/домен: 10–20 писем в день в первую неделю, дальше +15–20% в день, а не сразу вся пачка.</li>
+              <li><b>Postmaster.</b> Зарегистрируйте домен и следите за жалобами и попаданиями в спам.</li>
+            </ul>
+          </section>
+        </div>
+        <div class="notice warn" style="margin-top:14px"><span>⚠️</span><div>Официальный лимит mail.ru для одного письма — <b>не более 30 получателей</b>. Суточные цифры сервис не публикует. При ошибке <code>421 4.7.0 ratelimit exceeded</code> подождите 15–60 минут и продолжайте меньшими порциями: это временное ограничение скорости, а не отказ в доступе. Для действительно больших объёмов используйте отдельный сервис рассылок — личный ящик для этого не предназначен.</div></div>
+        <div class="small-muted" style="margin-top:10px">Лимиты и окно задаются в <button type="button" class="link-button" data-open-manager>менеджере очереди</button> → «Настройки рассылки».</div>
+      </div>
+    </details>
+  </section>
   <section class="settings-card" id="smtpCard">
     <details id="smtpDetails">
       <summary><strong>Настройки SMTP</strong><span class="settings-state" id="smtpState">Не настроено</span></summary>

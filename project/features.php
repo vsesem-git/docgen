@@ -1995,13 +1995,44 @@ function docgenBatchItems(string $batchId): array
     return array_values(array_filter($items, static fn(array $item): bool => ($item['batchId'] ?? '') === $batchId));
 }
 
+/** Mailbox limit: 1–6 letters per minute (Mail.ru blocks faster streams). */
+function docgenClampPerMinute(int $value): int
+{
+    return max(1, min(6, $value));
+}
+
+/** Daily cap per mailbox: 0 means "no local cap", 1–300 otherwise. */
+function docgenClampDailyCap(int $value): int
+{
+    return max(0, min(300, $value));
+}
+
+/**
+ * Mailing settings. Besides the per-minute limit this keeps the "human"
+ * shaping that makes a stream of letters look like normal operator work:
+ * a daily cap, a sending window, jitter between letters and a pause after
+ * the provider's rate-limit reply (Mail.ru answers 421 4.7.0).
+ */
 function docgenMailingSettings(): array
 {
     $settings = docgenReadJson(DOCGEN_MAILING_SETTINGS_FILE, []);
     $limits = is_array($settings['accountLimits'] ?? null) ? $settings['accountLimits'] : [];
+    $start = (string) ($settings['windowStart'] ?? '09:00');
+    $end = (string) ($settings['windowEnd'] ?? '18:00');
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $start) !== 1) {
+        $start = '09:00';
+    }
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $end) !== 1) {
+        $end = '18:00';
+    }
     return [
-        'lettersPerMinute' => max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1))),
+        'lettersPerMinute' => docgenClampPerMinute((int) ($settings['lettersPerMinute'] ?? 1)),
         'accountLimits' => $limits,
+        'dailyCap' => docgenClampDailyCap((int) ($settings['dailyCap'] ?? 0)),
+        'windowStart' => $start,
+        'windowEnd' => $end,
+        'jitterSeconds' => max(0, min(300, (int) ($settings['jitterSeconds'] ?? 20))),
+        'weekdaysOnly' => !empty($settings['weekdaysOnly']),
     ];
 }
 
@@ -2012,13 +2043,10 @@ function docgenCronAccountLimit(string $accountId, ?array $settings = null): int
     if (array_key_exists($accountId, $limits)) {
         $raw = (string) $limits[$accountId];
         if (ctype_digit($raw)) {
-            $limit = (int) $raw;
-            if ($limit >= 1 && $limit <= 60) {
-                return $limit;
-            }
+            return docgenClampPerMinute((int) $raw);
         }
     }
-    return max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1)));
+    return docgenClampPerMinute((int) ($settings['lettersPerMinute'] ?? 1));
 }
 
 function docgenMailingAccounts(): array
@@ -2030,6 +2058,10 @@ function docgenMailingAccounts(): array
         $accounts[] = array_merge($account, [
             'limit' => docgenCronAccountLimit($id, $settings),
             'limitCustom' => array_key_exists($id, (array) ($settings['accountLimits'] ?? [])),
+            // Quota visible next to the limit so the operator sees how much of
+            // today's allowance this mailbox has already used.
+            'dailyCap' => (int) ($settings['dailyCap'] ?? 0),
+            'sentToday' => docgenCronSentToday($id),
         ]);
     }
     return $accounts;
@@ -2039,9 +2071,29 @@ function docgenSaveMailingSettings(): never
 {
     $raw = (string) ($_POST['lettersPerMinute'] ?? '1');
     $perMinute = (int) $raw;
-    if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 60) {
-        sendJson(['ok' => false, 'error' => 'Укажите от 1 до 60 писем в минуту.'], 422);
+    // Mail.ru counts a stream faster than ~1 letter per minute as mass mailing;
+    // 6 is a hard ceiling, the UI explains the safe values.
+    if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 6) {
+        sendJson(['ok' => false, 'error' => 'Укажите от 1 до 6 писем в минуту: почтовые сервисы считают быстрый поток массовой рассылкой.'], 422);
     }
+    $dailyRaw = (string) ($_POST['dailyCap'] ?? '0');
+    if (!ctype_digit($dailyRaw) || (int) $dailyRaw > 300) {
+        sendJson(['ok' => false, 'error' => 'Дневной лимит: 0 (без локального ограничения) или от 1 до 300.'], 422);
+    }
+    $dailyCap = (int) $dailyRaw;
+    $windowStart = trim((string) ($_POST['windowStart'] ?? '09:00'));
+    $windowEnd = trim((string) ($_POST['windowEnd'] ?? '18:00'));
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $windowStart) !== 1 || preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $windowEnd) !== 1) {
+        sendJson(['ok' => false, 'error' => 'Окно отправки указывается как ЧЧ:ММ, например 09:00 и 18:00.'], 422);
+    }
+    if (strtotime('today ' . $windowEnd) <= strtotime('today ' . $windowStart)) {
+        sendJson(['ok' => false, 'error' => 'Конец окна отправки должен быть позже начала (в пределах одного дня).'], 422);
+    }
+    $jitterRaw = (string) ($_POST['jitterSeconds'] ?? '20');
+    if (!ctype_digit($jitterRaw) || (int) $jitterRaw > 300) {
+        sendJson(['ok' => false, 'error' => 'Случайная задержка между письмами: от 0 до 300 секунд.'], 422);
+    }
+    $jitter = (int) $jitterRaw;
     $existingLimits = docgenMailingSettings()['accountLimits'];
     $limits = $existingLimits;
     if (array_key_exists('accountLimits', $_POST)) {
@@ -2058,13 +2110,21 @@ function docgenSaveMailingSettings(): never
             }
             $text = (string) $value;
             $limit = (int) $text;
-            if (!ctype_digit($text) || $limit < 1 || $limit > 60) {
-                sendJson(['ok' => false, 'error' => 'Для каждого ящика укажите от 1 до 60 писем в минуту.'], 422);
+            if (!ctype_digit($text) || $limit < 1 || $limit > 6) {
+                sendJson(['ok' => false, 'error' => 'Для каждого ящика укажите от 1 до 6 писем в минуту.'], 422);
             }
             $limits[$accountId] = $limit;
         }
     }
-    $settings = ['lettersPerMinute' => $perMinute, 'accountLimits' => $limits];
+    $settings = [
+        'lettersPerMinute' => $perMinute,
+        'accountLimits' => $limits,
+        'dailyCap' => $dailyCap,
+        'windowStart' => $windowStart,
+        'windowEnd' => $windowEnd,
+        'jitterSeconds' => $jitter,
+        'weekdaysOnly' => !empty($_POST['weekdaysOnly']),
+    ];
     try {
         docgenWriteJson(DOCGEN_MAILING_SETTINGS_FILE, $settings);
     } catch (Throwable $e) {
@@ -3619,6 +3679,13 @@ function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, ar
         $current['lastError'] = '';
         $current['reviewedAt'] = date(DATE_ATOM);
         docgenSaveQueueItem($current);
+        // Manual and scheduled letters share the provider quota, so both are
+        // counted against the mailbox daily cap.
+        try {
+            docgenCronCountSent(docgenCronItemAccountId($current), 1);
+        } catch (Throwable $ignored) {
+            // Counting must never turn a sent letter into a failure.
+        }
         return ['ok' => true, 'item' => $current];
     } catch (Throwable $e) {
         try {
@@ -3672,7 +3739,21 @@ function docgenSendQueueItem(): never
         $result = docgenDeliverPreparedItem($meta, $dir, $pdfPath, $to, $cc);
         sendJson(['ok' => true, 'item' => $result['item'], 'message' => 'Письмо отправлено одному адресату/группе получателей.']);
     } catch (Throwable $e) {
-        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
+        $message = mb_substr($e->getMessage(), 0, 800, 'UTF-8');
+        if (docgenIsRateLimitError($message)) {
+            // Put the mailbox on hold so the scheduler does not keep pushing.
+            try {
+                docgenCronNoteRateLimit(docgenCronItemAccountId($meta), $message);
+            } catch (Throwable $ignored) {
+            }
+            sendJson([
+                'ok' => false,
+                'error' => 'Почтовый сервис ответил «слишком часто» (лимит отправки). Автоотправка этого ящика приостановлена на 30 минут, письмо можно повторить позже. Подождите 15–60 минут и не отправляйте подряд.',
+                'rateLimited' => true,
+                'pauseSeconds' => docgenCronRateLimitPauseSeconds(),
+            ], 429);
+        }
+        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . $message], 502);
     }
 }
 /** Per-mailbox clock: restore the first run from the old global state file. */
@@ -3790,6 +3871,99 @@ function docgenCronRefreshBatch(string $batchId): array
     return ['id' => $batchId, 'status' => $batch['status'], 'sent' => $sent, 'failed' => $failed];
 }
 
+/** Current time in the server's timezone, used for the sending window. */
+function docgenNowMinutes(): int
+{
+    $now = getdate();
+    return ((int) $now['hours']) * 60 + (int) $now['minutes'];
+}
+
+function docgenClockMinutes(string $hhmm): int
+{
+    [$hours, $minutes] = array_map('intval', explode(':', $hhmm));
+    return $hours * 60 + $minutes;
+}
+
+/**
+ * May the scheduler send right now? Outside the configured window letters wait
+ * for the next working period instead of arriving at 3 a.m., and on weekends
+ * nothing is sent when weekdaysOnly is checked. Manual one-by-one sending from
+ * the review card is never blocked — the operator decides that himself.
+ */
+function docgenCronWithinWindow(?array $settings = null): array
+{
+    $settings = $settings ?? docgenMailingSettings();
+    $now = docgenNowMinutes();
+    $start = docgenClockMinutes((string) $settings['windowStart']);
+    $end = docgenClockMinutes((string) $settings['windowEnd']);
+    if ($now < $start || $now >= $end) {
+        return [false, 'Вне окна отправки ' . $settings['windowStart'] . '–' . $settings['windowEnd'] . ' — письма ждут следующего рабочего периода.'];
+    }
+    if (!empty($settings['weekdaysOnly']) && (int) date('N') >= 6) {
+        return [false, 'Выходной день: отправка по расписанию выключена до понедельника.'];
+    }
+    return [true, ''];
+}
+
+/** Letters sent by this mailbox since local midnight (shared send state). */
+function docgenCronSentToday(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $day = (string) ($state['sentDay'] ?? '');
+    if ($day !== date('Y-m-d')) {
+        return 0;
+    }
+    return max(0, (int) ($state['sentToday'] ?? 0));
+}
+
+function docgenCronCountSent(string $accountId, int $sent): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $today = date('Y-m-d');
+    $count = ((string) ($state['sentDay'] ?? '') === $today ? (int) ($state['sentToday'] ?? 0) : 0) + $sent;
+    $state['sentDay'] = $today;
+    $state['sentToday'] = $count;
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+/**
+ * After the provider answers 421 4.7.0 / "too many messages" the mailbox is
+ * put on hold: hammering it would extend the block and hurt the sender
+ * reputation. 30 minutes is the conservative end of Mail.ru's rate-limit pause.
+ */
+function docgenCronRateLimitPauseSeconds(): int
+{
+    return 1800;
+}
+
+function docgenCronNoteRateLimit(string $accountId, string $message): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $state['pauseUntil'] = time() + docgenCronRateLimitPauseSeconds();
+    $state['pauseReason'] = mb_substr($message, 0, 400, 'UTF-8');
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+/** Seconds left of a rate-limit hold (0 when the mailbox may send again). */
+function docgenCronPauseRemaining(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $until = (int) ($state['pauseUntil'] ?? 0);
+    return max(0, $until - time());
+}
+
+/** True when a delivery error means "now is too fast" rather than "bad letter". */
+function docgenIsRateLimitError(string $message): bool
+{
+    return preg_match('/\b421\b|4\.7\.0|ratelimit|rate limit|too many (messages|letters)|превышен лимит|слишком много/i', $message) === 1;
+}
+
 /** Send one mailbox's due letters at its own pace. */
 function docgenCronSendAccount(string $accountId): array
 {
@@ -3806,16 +3980,44 @@ function docgenCronSendAccount(string $accountId): array
     }
     try {
         docgenCronRecoverStale($accountId);
-        $limit = docgenCronAccountLimit($accountId);
+        // A rate-limit hold wins over everything: sending into a 421 extends it.
+        $pauseLeft = docgenCronPauseRemaining($accountId);
+        if ($pauseLeft > 0) {
+            $result['reason'] = 'rate_limit_pause';
+            $result['pauseLeft'] = $pauseLeft;
+            return $result;
+        }
+        $mailing = docgenMailingSettings();
+        [$inWindow, $windowReason] = docgenCronWithinWindow($mailing);
+        if (!$inWindow) {
+            $result['reason'] = 'outside_window';
+            $result['window'] = $windowReason;
+            return $result;
+        }
+        $limit = docgenCronAccountLimit($accountId, $mailing);
+        $dailyCap = (int) ($mailing['dailyCap'] ?? 0);
+        if ($dailyCap > 0) {
+            $alreadySent = docgenCronSentToday($accountId);
+            if ($alreadySent >= $dailyCap) {
+                $result['reason'] = 'daily_cap';
+                $result['sentToday'] = $alreadySent;
+                return $result;
+            }
+            $limit = min($limit, $dailyCap - $alreadySent);
+        }
         $due = array_slice(docgenCronDueItems($accountId), 0, $limit);
         if (!$due) {
             $result['reason'] = 'no_due';
             return $result;
         }
         $lastSendAt = docgenCronAccountLastSend($accountId);
+        // Random gap on top of the fixed interval: an exactly periodic stream is
+        // the clearest bot signature, so each letter waits a little longer.
+        $jitterMax = (int) ($mailing['jitterSeconds'] ?? 0);
         $affected = [];
         foreach ($due as $index => $item) {
-            $target = $lastSendAt + ($index + 1) * (60.0 / $limit);
+            $gap = 60.0 / $limit + ($jitterMax > 0 ? random_int(0, $jitterMax) : 0);
+            $target = $lastSendAt + $gap;
             $wait = $target - microtime(true);
             if ($wait > 0) {
                 if ($wait > 65) {
@@ -3845,13 +4047,30 @@ function docgenCronSendAccount(string $accountId): array
                     $result['sent']++;
                 } catch (Throwable $e) {
                     $result['failed']++;
+                    if (docgenIsRateLimitError($e->getMessage())) {
+                        // The provider said "too fast": hold this mailbox and stop
+                        // the run instead of burning the rest of the batch.
+                        docgenCronNoteRateLimit($accountId, $e->getMessage());
+                        $result['reason'] = 'rate_limit';
+                        $result['pauseLeft'] = docgenCronRateLimitPauseSeconds();
+                        // The letter stays retryable, it is not a bad address.
+                        try {
+                            $again = docgenReadQueueItem((string) $item['id']);
+                            $again['status'] = 'scheduled';
+                            $again['lastError'] = 'Почтовый сервис ответил «слишком часто» (лимит). Отправка приостановлена на 30 минут, письмо осталось в расписании.';
+                            docgenSaveQueueItem($again);
+                        } catch (Throwable $ignored) {
+                        }
+                        break;
+                    }
                 }
             }
             $lastSendAt = microtime(true);
-            docgenWriteJson(docgenCronAccountPath($accountId, 'state.json'), [
-                'lastSendAt' => $lastSendAt,
-                'updatedAt' => date(DATE_ATOM),
-            ]);
+            $statePath = docgenCronAccountPath($accountId, 'state.json');
+            $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+            $state['lastSendAt'] = $lastSendAt;
+            $state['updatedAt'] = date(DATE_ATOM);
+            docgenWriteJson($statePath, $state);
         }
         foreach (array_keys($affected) as $affectedBatchId) {
             $info = docgenCronRefreshBatch((string) $affectedBatchId);

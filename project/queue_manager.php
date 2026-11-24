@@ -45,12 +45,17 @@ a{color:var(--brand)}.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:ce
   <section class="card">
     <h2>Настройки рассылки</h2>
     <div class="grid">
-      <div class="field"><label for="lettersPerMinute">Лимит по умолчанию (1–60)</label><input id="lettersPerMinute" type="number" min="1" max="60" value="1"></div>
-      <div class="field"><label>&nbsp;</label><button class="btn primary" id="saveMailingBtn" type="button">Сохранить лимиты</button><span class="feedback" id="mailingFeedback"></span></div>
+      <div class="field"><label for="lettersPerMinute">Писем в минуту (1–6)</label><input id="lettersPerMinute" type="number" min="1" max="6" value="1"></div>
+      <div class="field"><label for="dailyCap">Дневной лимит на ящик</label><input id="dailyCap" type="number" min="0" max="300" value="0"><span class="hint" style="display:block;margin-top:4px">0 — без локального ограничения. Для mail.ru ставьте 30–50: сверх этого сервис включает свои лимиты сам.</span></div>
+      <div class="field"><label for="windowStart">Окно отправки: с</label><input id="windowStart" type="time" value="09:00"></div>
+      <div class="field"><label for="windowEnd">по</label><input id="windowEnd" type="time" value="18:00"></div>
+      <div class="field"><label for="jitterSeconds">Случайная задержка между письмами, сек</label><input id="jitterSeconds" type="number" min="0" max="300" value="20"><span class="hint" style="display:block;margin-top:4px">К фиксированному интервалу добавляется случайная пауза: ровные до секунды интервалы — признак робота.</span></div>
+      <div class="field"><label>&nbsp;</label><label class="hint" style="display:flex;gap:7px;align-items:center"><input id="weekdaysOnly" type="checkbox" style="width:auto;height:auto"> Только по рабочим дням</label></div>
+      <div class="field"><label>&nbsp;</label><button class="btn primary" id="saveMailingBtn" type="button">Сохранить настройки</button><span class="feedback" id="mailingFeedback"></span></div>
     </div>
     <h3 style="font-size:13px;margin:16px 0 8px;color:#173b60">Лимит для каждого SMTP-ящика</h3>
     <div class="grid" id="mailingAccounts">Загружаем ящики…</div>
-    <p class="hint">Лимит задаётся отдельно для каждого уникального ящика. Разные ящики отправляют независимо: у каждого свой поток и свой лимит писем в минуту. Ящик без собственного значения использует лимит по умолчанию. Планировщик запускается раз в минуту; автоотправка включается только для пакетов, где оператор явно поставил галочку и выбрал «в расписание».</p>
+    <p class="hint">Лимит задаётся отдельно для каждого ящика. Разные ящики отправляют независимо: у каждого свой поток и свой лимит. Ящик без собственного значения использует значение по умолчанию. Планировщик запускается раз в минуту; автоотправка включается только для пачек, где оператор явно поставил галочку и выбрал «в расписание». Руководство по безопасной отправке через mail.ru — в <a href="index.php#sendPolicyCard">блоке «Отправка без блокировок»</a> на главной странице.</p>
   </section>
   <section class="card">
     <h2>Пачки писем</h2>
@@ -121,21 +126,37 @@ function renderMailingAccounts(accounts){
   $('mailingAccounts').innerHTML=accounts.length?accounts.map(account=>{
     const id=String(account.id||'');
     const label=`${account.label||'Ящик'} · ${account.fromEmail||'без адреса'}${account.limitCustom?' · свой лимит':''}`;
-    return `<div class="field"><label for="limit-${esc(id)}">${esc(label)}</label><input id="limit-${esc(id)}" data-account-limit="${esc(id)}" type="number" min="1" max="60" value="${Number(account.limit||1)}"></div>`;
+    const sent=Number(account.sentToday||0), cap=Number(account.dailyCap||0);
+    const quota=cap>0?`отправлено сегодня ${sent} из ${cap}`:`отправлено сегодня ${sent}, локального суточного лимита нет`;
+    return `<div class="field"><label for="limit-${esc(id)}">${esc(label)}</label><input id="limit-${esc(id)}" data-account-limit="${esc(id)}" type="number" min="1" max="6" value="${Number(account.limit||1)}"><span class="hint" style="display:block;margin-top:4px">${esc(quota)}. Писем в минуту.</span></div>`;
   }).join(''):'<p class="muted">SMTP-ящики ещё не настроены.</p>';
 }
 $('saveMailingBtn').addEventListener('click',async()=>{
   const fd=new FormData();fd.append('lettersPerMinute',$('lettersPerMinute').value.trim());
   document.querySelectorAll('[data-account-limit]').forEach(input=>fd.append('accountLimits['+input.dataset.accountLimit+']',input.value.trim()));
-  try{const payload=await post('save_mailing_settings',fd,'Лимиты сохранены.');$('lettersPerMinute').value=payload.settings.lettersPerMinute;renderMailingAccounts(payload.accounts||[]);$('mailingFeedback').textContent='Сохранено.';}
+  fd.append('dailyCap',$('dailyCap').value.trim()||'0');
+  fd.append('windowStart',$('windowStart').value||'09:00');
+  fd.append('windowEnd',$('windowEnd').value||'18:00');
+  fd.append('jitterSeconds',$('jitterSeconds').value.trim()||'0');
+  if($('weekdaysOnly').checked)fd.append('weekdaysOnly','1');
+  try{const payload=await post('save_mailing_settings',fd,'Настройки рассылки сохранены.');applyMailingForm(payload);$('mailingFeedback').textContent='Сохранено.';}
   catch(e){$('mailingFeedback').textContent=e.message;}
 });
+function applyMailingForm(payload){
+  const settings=payload.settings||{};
+  $('lettersPerMinute').value=settings.lettersPerMinute||1;
+  $('dailyCap').value=Number(settings.dailyCap||0);
+  $('windowStart').value=settings.windowStart||'09:00';
+  $('windowEnd').value=settings.windowEnd||'18:00';
+  $('jitterSeconds').value=Number(settings.jitterSeconds??20);
+  $('weekdaysOnly').checked=Boolean(settings.weekdaysOnly);
+  renderMailingAccounts(payload.accounts||[]);
+}
 async function loadMailingSettings(){
   const response=await fetch('?action=mailing_settings',{cache:'no-store'});
   const payload=await response.json();
-  if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось загрузить лимиты.');
-  $('lettersPerMinute').value=payload.settings.lettersPerMinute;
-  renderMailingAccounts(payload.accounts||[]);
+  if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось загрузить настройки рассылки.');
+  applyMailingForm(payload);
 }
 (async()=>{
   try{await loadMailingSettings();await load();}

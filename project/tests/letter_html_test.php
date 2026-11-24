@@ -195,6 +195,20 @@ check($fresh['own'] === false, 'template without a copy still inherits defaults'
 docgenCleanupTemplateLetters($copyId);
 docgenCleanupTemplateLetters($managerId);
 
+// 9. Sending policy: window, daily cap, jitter and the provider 421 answer.
+check(docgenClampPerMinute(0) === 1 && docgenClampPerMinute(60) === 6 && docgenClampPerMinute(1) === 1, 'per-minute limit is capped at 1..6');
+check(docgenClampDailyCap(-5) === 0 && docgenClampDailyCap(5000) === 300 && docgenClampDailyCap(40) === 40, 'daily cap is capped at 0..300');
+check(docgenClockMinutes('09:30') === 570 && docgenClockMinutes('18:00') === 1080, 'HH:MM is read as minutes');
+$outside = ['windowStart' => '00:00', 'windowEnd' => '00:01', 'weekdaysOnly' => false];
+[$inside,] = docgenCronWithinWindow(['windowStart' => '00:00', 'windowEnd' => '23:59'] + $outside);
+check($inside === true, 'wide window is always open');
+[$closed, $reason] = docgenCronWithinWindow(['windowStart' => '03:00', 'windowEnd' => '03:01'] + $outside);
+check(in_array($closed, [true, false], true) && ($closed || $reason !== ''), 'narrow window reports a reason when closed');
+check(docgenIsRateLimitError('SMTP Error: Could not send. 421 4.7.0 ratelimit exceeded') === true, '421 is recognised as a rate limit');
+check(docgenIsRateLimitError('421 4.7.0 Too many messages') === true, 'too many messages is a rate limit');
+check(docgenIsRateLimitError('550 mailbox unavailable') === false, 'a mailbox error is not a rate limit');
+check(docgenIsRateLimitError('SMTP Error: Data not accepted') === false, 'a data error is not a rate limit');
+
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 
