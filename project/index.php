@@ -709,6 +709,13 @@ function generateDocuments(): never
     if (!is_array($overrides)) {
         $overrides = [];
     }
+    // Отключённые переменные: их коды вырезаются, значения не требуются.
+    $excluded = docgenExcludedFromRequest($template);
+    $excluded = array_values(array_intersect($excluded, (array) $templateInfo['fields']));
+    $requiredFields = array_values(array_diff((array) $templateInfo['fields'], $excluded));
+    if ($requiredFields === [] && $excluded !== []) {
+        sendJson(['ok' => false, 'error' => 'Все переменные шаблона отключены. Оставьте хотя бы одну или загрузите другой DOCX.'], 422);
+    }
     $workRoot = __DIR__ . '/../docgen_demo_storage/tmp';
     if (!is_dir($workRoot) && !mkdir($workRoot, 0700, true) && !is_dir($workRoot)) {
         sendJson(['ok' => false, 'error' => 'Не удалось создать временную папку для обработки.'], 500);
@@ -746,7 +753,7 @@ function generateDocuments(): never
 
         $values = [];
         $missing = [];
-        foreach ($templateInfo['fields'] as $variable) {
+        foreach ($requiredFields as $variable) {
             if (array_key_exists($variable, $rowOverrides) && trim((string) $rowOverrides[$variable]) !== '') {
                 $values[$variable] = trim((string) $rowOverrides[$variable]);
             } elseif (array_key_exists($variable, $fields) && trim((string) $fields[$variable]) !== '') {
@@ -765,12 +772,24 @@ function generateDocuments(): never
         }
 
         try {
-            $processor = new TemplateProcessor($template['path']);
+            $docxPath = $jobDir . '/doc_' . str_pad((string) (++$counter), 4, '0', STR_PAD_LEFT) . '.docx';
+            if ($excluded !== []) {
+                // Код вырезаем на копии: исходный шаблон не меняется.
+                if (!copy($template['path'], $docxPath)) {
+                    throw new RuntimeException('Не удалось скопировать шаблон для правки.');
+                }
+                docgenStripExcludedFromDocx($docxPath, $excluded);
+                $processor = new TemplateProcessor($docxPath);
+            } else {
+                $processor = new TemplateProcessor($template['path']);
+            }
             $processor->setMacroChars($macroOpen, '}');
             foreach ($values as $key => $value) {
+                if (in_array((string) $key, $excluded, true)) {
+                    continue;
+                }
                 $processor->setValue($key, $value);
             }
-            $docxPath = $jobDir . '/doc_' . str_pad((string) (++$counter), 4, '0', STR_PAD_LEFT) . '.docx';
             $processor->saveAs($docxPath);
             unset($processor);
 
@@ -910,6 +929,8 @@ if ($action === 'analyze') {
         $info['analysis'] = buildFieldAnalysis($info, $dataset['records'] ?? [], $sourceKey);
         $info['ok'] = true;
         $info['templateName'] = $template['name'];
+        // Раздел 3: все переменные шаблона и сохранённые отметки об отключении.
+        $info['variables'] = docgenTemplateVariablePayload($info, $template);
         sendJson($info);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
@@ -939,6 +960,7 @@ $sampleInfo['analysis'] = buildFieldAnalysis($sampleInfo, loadDataset()['records
 $sampleInfo['type'] = 'docx';
 $sampleInfo['templateId'] = 'sample-docx';
 $sampleInfo['templateName'] = 'Письмо-пример.docx';
+$sampleInfo['variables'] = docgenTemplateVariablePayload($sampleInfo, ['id' => 'sample-docx', 'name' => 'Письмо-пример.docx']);
 
 ?><!doctype html>
 <html lang="ru">
@@ -965,6 +987,8 @@ button,input,select{font:inherit}
 .app-header .sub{display:flex;align-items:center;gap:8px;color:#cfe3f5;font-size:13px}
 .app-header .sub svg{flex:none}
 .header-badge{border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.1);border-radius:999px;padding:7px 12px;color:#e9f4ff;white-space:nowrap;font-size:12px;font-weight:650}.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.logout-button{padding:7px 10px;border:1px solid rgba(255,255,255,.38);border-radius:8px;background:rgba(255,255,255,.08);color:#fff;font-size:12px}.logout-button:hover{background:rgba(255,255,255,.16)}
+.webinar-button{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border:1px solid rgba(255,255,255,.5);border-radius:8px;background:#fff;color:#0e4f8a;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap}
+.webinar-button:hover{background:#e8f2ff;border-color:#fff}.webinar-button svg{flex:none}
 main{max-width:1480px;margin:0 auto;padding:22px 24px 48px}
 .notice{border:1px solid #c9d9ea;border-radius:10px;background:#f8fbff;color:#39536f;padding:11px 14px;margin-bottom:16px;display:flex;gap:10px;align-items:flex-start}
 .notice strong{color:#173b60}
@@ -1015,9 +1039,60 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .mapping-head strong{font-size:13px}.mapping-body{padding:0 14px 12px;display:flex;gap:7px;flex-wrap:wrap}
 .map-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;background:#fafcff;font-size:11.5px;color:var(--muted)}
 .map-chip b{color:var(--ink);font-weight:650}.map-chip .state{font-size:10.5px;font-weight:750;color:var(--ok)}.map-chip.manual{background:#fff9ec;border-color:#f0d9a8}.map-chip.manual .state{color:var(--warn)}
+.var-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:7px;margin:11px 0 0}
+.var-row{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdff;font-size:12.5px}
+.var-row.off{background:#fdf6f5;border-color:#eec9c4}
+.var-row label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;flex:1;min-width:0}
+.var-row input{width:auto;height:auto;margin:2px 0 0;flex:none}
+.var-name{font-weight:650;color:var(--ink);overflow-wrap:anywhere}
+.var-state{font-size:11px;color:var(--muted);display:block}
+.var-row.off .var-name{text-decoration:line-through;color:#9a5a52}
+.var-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.var-tools .small-muted{flex:1;min-width:200px}
 .var-chip{cursor:pointer;background:#fff;border:1px solid #bfd2e6;border-radius:7px;padding:5px 9px;font-size:11.5px;color:#174a7e;font-family:inherit}
 .var-chip:hover,.var-chip:focus-visible{background:#eaf3fc;border-color:var(--brand);outline:none}
 .letter-vars{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.letter-context{display:flex;align-items:center;gap:9px;flex-wrap:wrap;border:1px solid #cfe0ef;background:#f5faff;border-radius:9px;padding:9px 12px;margin:0 0 12px;font-size:12.5px;color:#31516d}
+.letter-context-label{font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+.letter-context b{font-size:14px;color:#123b63}
+.letter-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px;border-bottom:1px solid var(--line);padding-bottom:0}
+.letter-tab{background:transparent;border:1px solid transparent;border-bottom:0;border-radius:9px 9px 0 0;padding:9px 14px;color:var(--muted);font-weight:650;font-size:12.5px;margin-bottom:-1px}
+.letter-tab:hover{background:#f1f7fd;color:#174a7e}
+.letter-tab.active{background:#fff;border-color:var(--line);border-bottom:1px solid #fff;color:#123b63;box-shadow:0 -2px 0 var(--brand) inset}
+.letter-tab .tab-mark{color:var(--ok);font-size:10px;margin-left:3px}
+.letter-pane{animation:none}
+.letter-design-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px;margin:0 0 4px}
+.letter-html-editor{height:44vh;min-height:320px}
+.letter-design-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px}
+.letter-text-row{margin-top:14px}
+.letter-plain-notice{display:block;margin-top:6px;font-size:12px;border-radius:7px;padding:6px 9px;font-weight:650}
+.letter-plain-notice.warn{background:#fff6e8;border:1px solid #f0d9a8;color:#8a5a00}
+.letter-plain-notice.ok{background:#eef9f2;border:1px solid #b7e0c7;color:#1b6b41}
+.queue-preview-switch{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:-4px 0 2px}
+.queue-preview-tab{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:4px 2px;color:var(--muted);font-size:12px;font-weight:700;text-decoration:none;cursor:pointer}
+.queue-preview-tab:not(.active):hover{background:transparent;color:#174a7e;text-decoration:underline;text-underline-offset:2px}
+.queue-preview-tab.active{border-bottom-color:var(--brand);color:#123b63}
+.smtp-log-summary{margin:0 0 12px}
+.smtp-log-summary .smtp-log-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.smtp-log-badge{border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
+.smtp-log-badge.ok{background:#e8f6ee;color:#1b7f4b}
+.smtp-log-badge.bad{background:#fdecea;color:#b42318}
+.smtp-log-hint{margin:0;font-size:12.5px;color:#5b6b7f}
+.smtp-log-steps{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:6px}
+.smtp-log-steps li{display:flex;gap:9px;align-items:flex-start;padding:7px 9px;border:1px solid #e3ebf4;border-radius:7px;font-size:12.5px;background:#fbfdff}
+.smtp-log-steps .step-name{font-weight:650;min-width:42px;color:#173b60}
+.smtp-log-steps li.bad{border-color:#f3c9c4;background:#fff8f7}
+.smtp-log-transcript{margin:0;border:1px solid var(--line);border-radius:8px;background:#0f2233;color:#d9e8f5;padding:11px 12px;max-height:38vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.smtp-log-context{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;margin:10px 0 0;font-size:12.5px}
+.smtp-log-context dt{color:#5b6b7f}
+.smtp-log-context dd{margin:0;overflow-wrap:anywhere}
+.queue-text-preview{grid-column:1;grid-row:2/4;margin:0;border:1px solid var(--line);border-radius:8px;background:#fbfdff;padding:13px 14px;height:56vh;min-height:390px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 "Segoe UI",system-ui,sans-serif;color:#24394f}
+.queue-text-preview.empty{color:var(--bad);font-weight:650;background:#fff7f6;border-color:#efc1bc}
+.queue-text-hint{display:block;margin-top:5px;font-size:11.5px;border-radius:7px;padding:6px 8px;font-weight:650}
+.queue-text-hint.warn{background:#fff6e8;border:1px solid #f0d9a8;color:#8a5a00}
+.letter-badge{display:inline-flex;padding:2px 7px;border-radius:999px;background:#e6f2f3;color:#1a6b70;font-size:10px;font-weight:800;letter-spacing:.3px}
+.letter-text-row .field textarea{min-height:80px}
+@media(max-width:900px){.letter-design-grid{grid-template-columns:1fr}.letter-html-editor{height:34vh;min-height:240px}}
 .legend{display:flex;align-items:center;gap:8px;margin:0 0 9px;color:var(--muted);font-size:12px;flex-wrap:wrap}
 .table-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
 .table-wrap{overflow:auto;max-height:63vh;min-height:280px}
@@ -1059,7 +1134,7 @@ tbody tr.manager-position-mismatch td:nth-child(4){background:#fff7e8!important;
 .progress-wrap.show{display:flex}.progress-main{display:flex;align-items:center;gap:10px;flex:1}.mini-log{margin-left:auto;max-width:min(620px,55vw);max-height:76px;overflow:auto;border-left:1px solid #b7d4ef;padding-left:11px;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#466783;white-space:pre-wrap}.mini-log:empty{display:none}.spinner{width:16px;height:16px;border-radius:50%;border:2px solid #b7d4ef;border-top-color:var(--brand);animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .toast{position:fixed;right:22px;bottom:22px;z-index:30;max-width:min(520px,calc(100vw - 36px));padding:12px 16px;border-radius:10px;background:#183a58;color:white;box-shadow:0 8px 24px rgba(0,0,0,.22);display:none;font-size:13px}
-.toast.show{display:block}.toast.error{background:#9f2e28}.toast.success{background:#0b7048}
+.toast.show{display:block}.toast.error{background:#9f2e28}.toast.success{background:#0b7048}.toast.info{background:#8a5a00}
 .download-result{border:1px solid #b4d8c5;background:#f1fbf5;border-radius:9px;padding:10px 13px;margin:-3px 0 13px;color:#205e43;font-size:12.5px}
 .download-result a{color:#0e6844;font-weight:750;text-underline-offset:2px;margin-left:5px}
 .modal-backdrop{position:fixed;inset:0;z-index:40;background:rgba(10,27,45,.56);display:flex;align-items:center;justify-content:center;padding:18px}
@@ -1069,6 +1144,21 @@ body.modal-open{overflow:hidden}
 .modal-head h2{font-size:17px;margin:0 0 3px;color:#173b60}.modal-subtitle{color:var(--muted);font-size:12px}
 .modal-close{font-size:21px;line-height:1;padding:5px 10px;border:1px solid var(--line);background:#fff;color:var(--muted)}
 .modal-main{overflow:auto;padding:17px 20px 20px}
+.template-picker-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.template-picker-row select{flex:1 1 240px;min-width:0}
+.template-name-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:10px}
+.template-name-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-bottom:1px}
+.template-manager-modal{width:min(900px,100%)}
+.template-manager-list{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
+.template-row{border:1px solid var(--line);border-radius:11px;padding:12px 13px;background:#fbfdff}
+.template-row.current{border-color:#b9d3ea;background:#f4f9ff}
+.template-row-head{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.template-row-title{font-weight:700;color:#173b60;font-size:14px;word-break:break-word}
+.template-row-meta{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 9px}
+.template-row input[type=text]{width:100%;min-height:36px;border:1px solid #cbd7e3;border-radius:7px;padding:7px 9px;font-size:12.5px}
+.template-row-actions{display:flex;gap:7px;flex-wrap:wrap}
+.template-row-actions .btn{padding:6px 9px;font-size:12px;border-radius:7px}
+.template-manager-new{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px}
 .modal-hint{border:1px solid #c9d9ea;border-radius:9px;background:#f8fbff;color:#39536f;padding:10px 12px;font-size:12px;margin-bottom:15px}
 .modal-section{margin:0 0 18px}
 .modal-section h3{font-size:13px;margin:0 0 9px;color:#234765}
@@ -1120,6 +1210,8 @@ body.modal-open{overflow:hidden}
 .queue-section{padding:15px 16px 17px}.queue-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}.queue-head h2{font-size:16px;margin:0 0 3px;color:#173b60}.queue-head p{font-size:12px;color:var(--muted);margin:0;max-width:820px}.queue-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.queue-list{display:grid;gap:9px}.queue-empty{padding:28px 15px;text-align:center;color:var(--muted);border:1px dashed #cbd7e3;border-radius:9px;background:#fbfdff}
 .batch-review{border:1px solid var(--line);border-radius:9px;background:#fff;overflow:hidden}.batch-review>summary{padding:11px 13px;cursor:pointer;background:#fbfdff;font-weight:650;color:#173b60}.batch-review-body{padding:11px 13px;border-top:1px solid var(--line)}
 .batch-review-item{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:7px 9px;border:1px solid #e3ebf4;border-radius:7px;margin-bottom:6px;font-size:12.5px}.batch-review-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.batch-account-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px;padding:9px 10px;border:1px dashed #c3d5e6;border-radius:8px;background:#f7fbff}
+.batch-account-row select{border:1px solid #cbd7e3;border-radius:7px;padding:6px 9px;font:inherit;min-width:220px;background:#fff}
 .queue-item{border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 13px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 14px;align-items:center}.queue-item:hover{border-color:#b4c8db}.queue-item-main{min-width:0}.queue-item-title{font-weight:750;color:#173b60;overflow-wrap:anywhere}.queue-item-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}.queue-item-address{font-size:11.5px;margin-top:5px;overflow-wrap:anywhere}.queue-item-error{color:var(--bad);font-size:11.5px;margin-top:4px}.queue-item-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}.status-label{display:inline-flex;border-radius:999px;padding:4px 9px;font-size:10.5px;font-weight:750;background:#eef2f7;color:#586d82;white-space:nowrap}.status-label.queued{background:var(--warn-bg);color:#8b5b00}.status-label.sent{background:var(--ok-bg);color:var(--ok)}.status-label.failed,.status-label.sending{background:var(--bad-bg);color:var(--bad)}
 .manager-modal{width:min(1440px,100%);height:calc(100vh - 36px)}.manager-modal .modal-head{padding:12px 16px}.manager-modal .modal-main{padding:0;flex:1;min-height:0;background:#f2f6fb}.manager-modal iframe{display:block;width:100%;height:100%;border:0;background:#f2f6fb}
 .queue-modal{width:min(1180px,100%)}.queue-review-main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);gap:12px 16px}.queue-preview-toolbar{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap}.pdf-preview-frame{grid-column:1;grid-row:2/4;width:100%;height:56vh;min-height:390px;border:1px solid var(--line);border-radius:8px;background:#eaf0f5}.queue-edit-grid{grid-column:2;grid-row:2;display:grid;grid-template-columns:1fr;gap:10px;align-content:start}.queue-edit-grid .span2{grid-column:1/-1}.queue-edit-grid textarea,.queue-edit-grid input{width:100%;border:1px solid #cbd7e3;border-radius:7px;padding:8px;font:inherit;font-size:12.5px}.review-confirm{grid-column:2;grid-row:3;border:1px solid #c9d9ea;border-radius:8px;background:#f8fbff;padding:10px;font-size:12px}.review-confirm label{display:flex;gap:7px;align-items:flex-start;font-weight:700;color:#284761}.review-confirm input{margin:2px 0 0;accent-color:var(--brand)}.review-confirm .small-muted{display:block;margin:5px 0 0 22px}
@@ -1133,7 +1225,7 @@ body.modal-open{overflow:hidden}
   .modal-actions{align-items:stretch;flex-direction:column}.modal-actions .right{justify-content:flex-end}
   .settings-grid,.html-editor-grid,.queue-review-main,.table-tools-grid{grid-template-columns:1fr}
   .table-inline-form{flex-direction:column}.table-inline-form button{width:100%}
-  .settings-grid .span2,.queue-preview-toolbar,.pdf-preview-frame,.queue-edit-grid,.review-confirm{grid-column:1;grid-row:auto}
+  .settings-grid .span2,.queue-preview-toolbar,.pdf-preview-frame,.queue-edit-grid,.review-confirm,.queue-preview-switch,.queue-text-preview{grid-column:1;grid-row:auto}.queue-text-preview{height:44vh;min-height:280px}
   .pdf-preview-frame{height:44vh;min-height:280px}.html-code-editor{height:38vh;min-height:250px}.preview-column{min-height:270px}.preview-column iframe{min-height:250px}
   .queue-head{display:block}.queue-tools{justify-content:flex-start;margin-top:9px}.queue-item{grid-template-columns:1fr}.queue-item-actions{justify-content:flex-start}
 }
@@ -1149,11 +1241,11 @@ body.modal-open{overflow:hidden}
         Выберите адресатов и шаблон DOCX или HTML; письма формируются в PDF и отправляются по одному
       </div>
     </div>
-    <div class="header-actions"><div class="header-badge">ТЕСТ · XLSX · DOCX · PDF · SMTP</div><?php if (docgenAuthHash() !== ''): ?><form method="post" action="?action=logout"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(docgenCsrfToken(), ENT_QUOTES, 'UTF-8') ?>"><button class="logout-button" type="submit">Выйти</button></form><?php endif; ?></div>
+    <div class="header-actions"><a class="webinar-button" href="webinar.php" title="Генератор программ вебинаров ЦМК по расписанию «Кодекса»"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3v5h5M8.5 12h7m-7 4h7"/></svg>Генератор вебинаров</a><div class="header-badge">ТЕСТ · XLSX · DOCX · PDF · SMTP</div><?php if (docgenAuthHash() !== ''): ?><form method="post" action="?action=logout"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(docgenCsrfToken(), ENT_QUOTES, 'UTF-8') ?>"><button class="logout-button" type="submit">Выйти</button></form><?php endif; ?></div>
   </div>
 </header>
 <main>
-  <details class="notice help-accordion"><summary><span aria-hidden="true">🧭</span> Как пользоваться тестовым приложением</summary><div><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Чтобы обновить данные организаций, нажмите «Обновить через DaData» для отмеченных записей: в диалоге сопоставьте поля DaData с колонками книги или создайте новые, проверьте список «было → стало» и только затем нажмите «Сохранить карточки».</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему и текст с кодами полей; список доступных кодов приведён под полями.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>В панели инструментов подтвердите ящик «От кого» (по умолчанию он из шаблона письма) и нажмите «Сформировать PDF и подготовить очередь». Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В аккордеоне пачки проверьте письма, подтвердите проверку и выберите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></details>
+  <details class="notice help-accordion"><summary><span aria-hidden="true">🧭</span> Как пользоваться тестовым приложением</summary><div><ol><li>Выберите набор и регион; найдите нужные организации поиском и отметьте записи вручную.</li><li>Если нужно сравнить руководителя с ЕГРЮЛ, вручную запустите «Сверить руководителей по ИНН» для отмеченных записей; автоматических запросов к DaData нет.</li><li>Чтобы обновить данные организаций, нажмите «Обновить через DaData» для отмеченных записей: в диалоге сопоставьте поля DaData с колонками книги или создайте новые, проверьте список «было → стало» и только затем нажмите «Сохранить карточки».</li><li>Выберите сохранённый DOCX/HTML-шаблон, загрузите DOCX или создайте HTML-шаблон во встроенном редакторе. В блоке «Шаблон письма» задайте имя вложения, получателей, тему, текст и при необходимости HTML-дизайн письма — это письмо сохранится отдельно для выбранного шаблона.</li><li>Откройте карточку адресата, проверьте данные и предложенные формы ФИО/должности; пустые поля заполните явно. Неизвестные значения не подставляются автоматически.</li><li>Нажмите «Сформировать PDF и подготовить очередь»: очередь писем создаётся без выбора ящика — сначала видно, сколько писем и кому. Для DOCX сохраняются также DOCX-файлы; на каждую запись создаётся отдельная очередь с PDF.</li><li>В карточке письма проверьте PDF-вложение, HTML-дизайн и текстовую версию: письмо уходит как multipart/alternative, поэтому текстовая версия обязательна.</li><li>В аккордеоне пачки проверьте письма, выберите ящик «Из какого ящика отправлять», подтвердите проверку и нажмите «поставить в ручную очередь» или, при необходимости, «в расписание (автоотправка)». Дальше пачки видны в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>; ручная отправка по одному остаётся основной.</li></ol><div style="margin-top:7px"><strong>Адреса:</strong> поле «Основной email» становится получателем, «Доп./старые email» — копией (CC); проверьте, не устарели ли адреса. SMTP-настройки вводятся в приложении, пароль хранится в приватном каталоге вне web-root и не отображается повторно. Склонение — только предложение для ручной проверки.</div></details>
 
   <section class="top-grid">
     <div class="card">
@@ -1170,7 +1262,20 @@ body.modal-open{overflow:hidden}
     <div class="card">
       <div class="card-head"><span class="step">2</span><h2>Шаблон DOCX или HTML</h2></div>
       <div class="card-body">
-        <div class="field" style="margin-bottom:10px"><label for="templateSelect">Выбрать сохранённый шаблон</label><select id="templateSelect"><option value="sample-docx">Загрузка шаблонов…</option></select></div>
+        <div class="field" style="margin-bottom:10px"><label for="templateSelect">Выбрать сохранённый шаблон</label>
+          <div class="template-picker-row">
+            <select id="templateSelect"><option value="sample-docx">Загрузка шаблонов…</option></select>
+            <button type="button" class="btn-ghost btn-small" id="openTemplateManager" title="Переименовать, копировать, заменить файл или удалить шаблон">Менеджер шаблонов</button>
+          </div>
+          <div class="template-name-row">
+            <div class="field" style="margin:0;flex:1 1 260px;min-width:0"><label for="templateNameInput">Имя выбранного шаблона</label><input id="templateNameInput" type="text" maxlength="180" autocomplete="off" placeholder="Например: Вебинар 11.12.2028 · тарифы"><span class="small-muted" style="display:block;margin-top:4px">Своё имя вместо названия файла. «Сохранить как копию» создаёт отдельный шаблон с этим именем.</span></div>
+            <div class="template-name-actions">
+              <button type="button" class="btn-primary btn-small" id="templateRenameBtn">Сохранить имя</button>
+              <button type="button" class="btn-ghost btn-small" id="templateSaveAsBtn">Сохранить как копию…</button>
+            </div>
+          </div>
+          <div class="small-muted" id="templateNameFeedback" aria-live="polite" style="margin-top:6px"></div>
+        </div>
         <div class="dz loaded" id="dropTemplate" tabindex="0" role="button" aria-label="Загрузить DOCX шаблон">
           <div class="dz-icon"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
           <div class="dz-title">Загрузить DOCX для текущей работы</div>
@@ -1243,27 +1348,66 @@ body.modal-open{overflow:hidden}
   </section>
 
   <section class="settings-card" id="letterTemplateCard">
-    <details>
-      <summary><strong>Шаблон письма: имя файла, получатели, текст</strong><span class="settings-state" id="letterState">Общие настройки</span></summary>
+    <details id="letterDetails">
+      <summary><strong>Шаблон письма: имя файла, получатели, текст</strong><span class="settings-state" id="letterState">Письмо выбранного шаблона</span></summary>
       <div class="settings-body">
-        <div class="notice" style="margin:0 0 14px"><span>✉️</span><div>Эти настройки общие для всех DOCX/HTML-шаблонов. В полях можно писать текст и коды вида <b>{Фамилия И.О.}</b> — они заменятся данными выбранной записи. Нажмите переменную ниже, чтобы вставить её в последнее редактируемое поле. Получатели, тема и текст всегда можно исправить вручную в карточке письма перед отправкой; автоматической рассылки нет.</div></div>
-        <div class="settings-grid">
-          <div class="field span2"><label for="letterFilenamePattern">Имя вложенного файла без расширения</label><input id="letterFilenamePattern" type="text" maxlength="300" placeholder="{Регион} — {Фамилия И.О.} — {ИНН}" autocomplete="off"></div>
-          <div class="field"><label for="letterToPattern">Кому (основной получатель)</label><input id="letterToPattern" type="text" maxlength="1000" placeholder="{Основной email}" autocomplete="off"></div>
-          <div class="field"><label for="letterCcPattern">Копия (CC)</label><input id="letterCcPattern" type="text" maxlength="1000" placeholder="{Доп./старые email}" autocomplete="off"></div>
-          <div class="field"><label for="letterSubjectPattern">Тема письма</label><input id="letterSubjectPattern" type="text" maxlength="500" placeholder="Документ — {Регион}" autocomplete="off"></div>
-          <div class="field"><label for="letterAccountSelect">От кого — ящик по умолчанию</label><select id="letterAccountSelect"></select><span class="small-muted" style="display:block;margin-top:4px">Итоговый ящик выбирается в панели инструментов перед формированием очереди.</span></div>
-          <div class="field span2"><label for="letterBodyPattern">Текст письма</label><textarea id="letterBodyPattern" rows="4" placeholder="Добрый день.{nl}{nl}Направляем документ во вложении."></textarea></div>
+        <div class="notice" style="margin:0 0 14px"><span>✉️</span><div>Письмо настраивается отдельно для каждого шаблона: загрузили DOCX «о новых инвестпрограммах» и HTML-дизайн — у этого шаблона свои имя файла, получатели, тема и текст. Шаблоны без собственной копии показывают общие значения; изменить их здесь — значит сохранить копию только для них. В полях работают коды вида <b>{Фамилия И.О.}</b>; нажмите переменную, чтобы вставить её в последнее редактируемое поле.</div></div>
+        <div class="letter-context">
+          <span class="letter-context-label">Редактируется письмо шаблона</span>
+          <b id="letterTemplateName">—</b>
+          <span class="pill" id="letterSourceBadge">общие настройки</span>
+          <span class="small-muted" id="letterContextHint"></span>
+        </div>
+        <div class="letter-tabs" role="tablist" aria-label="Письмо шаблона">
+          <button type="button" class="letter-tab active" role="tab" aria-selected="true" data-letter-tab="main" id="letterTabMain">Имя файла, получатели, тема и текст</button>
+          <button type="button" class="letter-tab" role="tab" aria-selected="false" data-letter-tab="design" id="letterTabDesign"><span id="letterDesignMark" class="tab-mark" hidden>●</span> HTML-дизайн письма</button>
+        </div>
+        <div class="letter-pane" data-letter-pane="main">
+          <div class="settings-grid">
+            <div class="field span2"><label for="letterFilenamePattern">Имя вложенного файла без расширения</label><input id="letterFilenamePattern" type="text" maxlength="300" placeholder="{Регион} — {Фамилия И.О.} — {ИНН}" autocomplete="off"></div>
+            <div class="field"><label for="letterToPattern">Кому (основной получатель)</label><input id="letterToPattern" type="text" maxlength="1000" placeholder="{Основной email}" autocomplete="off"></div>
+            <div class="field"><label for="letterCcPattern">Копия (CC)</label><input id="letterCcPattern" type="text" maxlength="1000" placeholder="{Доп./старые email}" autocomplete="off"></div>
+            <div class="field"><label for="letterSubjectPattern">Тема письма</label><input id="letterSubjectPattern" type="text" maxlength="500" placeholder="Документ — {Регион}" autocomplete="off"></div>
+            <div class="field"><label for="letterAccountSelect">От кого — ящик по умолчанию</label><select id="letterAccountSelect"></select><span class="small-muted" style="display:block;margin-top:4px">Итоговый ящик выбирается в панели инструментов перед формированием очереди.</span></div>
+          </div>
+        </div>
+        <div class="letter-pane" data-letter-pane="design" hidden>
+          <div class="notice" style="margin:0 0 12px"><span>🎨</span><div>HTML-дизайн становится <b>телом письма</b> (шапка, кнопки, подвал как в рассылке), а PDF/DOCX — вложением. Вставьте полный код письма: работают те же коды <b>{Регион}</b>, <b>{Фамилия И.О.}</b>. Отправка всегда идёт как <b>multipart/alternative</b>: рядом с HTML уходит текстовая версия, иначе письмо получат с пустым или обрезанным текстом в клиентах без HTML. Если поле ниже пустое, текстовая версия будет собрана из HTML — проверьте её в карточке письма. Внешние картинки и скрипты не загружаются.</div></div>
+          <div class="letter-design-grid">
+            <div>
+              <label class="editor-label" for="letterHtmlPattern">HTML + CSS дизайна письма</label>
+              <textarea id="letterHtmlPattern" spellcheck="false" class="html-code-editor letter-html-editor" placeholder="&lt;!DOCTYPE html&gt;…" aria-label="HTML-код дизайна письма"></textarea>
+              <div class="letter-design-tools">
+                <label class="btn-ghost btn-small" for="letterDesignFileInput" style="display:inline-block">Загрузить HTML-файл</label>
+                <input type="file" id="letterDesignFileInput" accept=".html,.htm,text/html" hidden>
+                <button type="button" class="btn-ghost btn-small" id="letterDesignSampleBtn">Вставить пример письма</button>
+                <button type="button" class="btn-ghost btn-small" id="letterDesignClearBtn">Очистить дизайн</button>
+                <label class="small-muted"><input type="checkbox" id="letterDesignPreviewFill"> Подставить данные первой отмеченной записи</label>
+                <span class="small-muted" id="letterDesignFeedback" aria-live="polite"></span>
+              </div>
+            </div>
+            <div class="preview-column">
+              <div class="editor-label">Предпросмотр тела письма</div>
+              <iframe id="letterDesignPreview" title="Предпросмотр HTML-дизайна письма" sandbox></iframe>
+            </div>
+          </div>
+        </div>
+        <div class="settings-grid letter-text-row">
+          <div class="field span2"><label for="letterBodyPattern">Текст письма (текстовая версия письма)</label><textarea id="letterBodyPattern" rows="4" placeholder="Добрый день.{nl}{nl}Направляем документ во вложении."></textarea><span class="small-muted" style="display:block;margin-top:4px">При HTML-дизайне это текстовая версия того же письма — она обязательна для корректной отправки. Оставьте пустой, чтобы собрать её из HTML.</span><span class="letter-plain-notice warn" id="letterPlainNotice" hidden></span></div>
+          <div class="field span2"><label for="letterHtmlTextPattern">Отдельная текстовая версия для HTML-дизайна (необязательно)</label><textarea id="letterHtmlTextPattern" rows="3" placeholder="Текстовая версия письма, если она отличается от обычного текста."></textarea></div>
         </div>
         <div style="margin-top:12px"><b class="small-muted">Доступные переменные (нажмите, чтобы вставить)</b><div id="letterVariableList" class="letter-vars"></div><span class="small-muted" style="display:block;margin-top:5px">Список собран из колонок текущей книги и переменных загруженного шаблона. Неизвестные коды остаются как текст; приложение не угадывает значения.</span></div>
-        <div class="settings-actions"><button class="btn-primary" id="saveLetterTemplateBtn" type="button">Сохранить шаблон письма</button><span class="small-muted" id="letterFeedback" aria-live="polite"></span></div>
+        <div class="settings-actions">
+          <button class="btn-primary" id="saveLetterTemplateBtn" type="button">Сохранить письмо для этого шаблона</button>
+          <button class="btn-ghost" id="copyLetterDefaultsBtn" type="button" hidden>Скопировать общие настройки</button>
+          <span class="small-muted" id="letterFeedback" aria-live="polite"></span>
+        </div>
       </div>
     </details>
   </section>
 
   <section class="toolbar">
     <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
-    <label class="small-muted" for="smtpAccountForRun">Ящик для отправки</label><select id="smtpAccountForRun" aria-label="Ящик для отправки"></select>
     <button class="btn-ghost" id="checkManagersBtn" type="button" disabled>Сверить руководителей по ИНН</button>
     <button class="btn-ghost" id="refreshFromDadataBtn" type="button" disabled>Обновить через DaData</button>
     <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
@@ -1276,6 +1420,40 @@ body.modal-open{overflow:hidden}
   <div class="progress-wrap" id="managerCheckProgress"><span class="spinner"></span><span id="managerCheckProgressText">Сверяем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelManagerCheckBtn">Остановить после текущего пакета</button></div>
   <div class="progress-wrap" id="dadataRefreshProgress"><span class="spinner"></span><span id="dadataRefreshProgressText">Загружаем данные DaData…</span><button class="btn-ghost btn-small" type="button" id="cancelDadataRefreshBtn">Остановить после текущего пакета</button></div>
   <div class="download-result" id="downloadResult" hidden></div>
+  <section class="settings-card" id="sendPolicyCard">
+    <details>
+      <summary><strong>Отправка без блокировок: лимиты mail.ru и поведение «как вручную»</strong><span class="settings-state">важно перед рассылкой</span></summary>
+      <div class="settings-body">
+        <div class="notice" style="margin:0 0 14px"><span>🛡️</span><div>Официальные письма по одному адресату отправляются через ваш SMTP-ящик. Почтовый сервис оценивает не только текст, но и темп: ровный поток «письмо в минуту круглосуточно» похож на рассылку. Ниже — что выставлено в приложении и что стоит проверить на стороне mail.ru.</div></div>
+        <div class="table-tools-grid">
+          <section class="table-tool-box">
+            <h3>Что уже делает приложение</h3>
+            <ul class="small-muted" style="margin:0;padding-left:18px;line-height:1.6">
+              <li><b>Темп.</b> Отправка не чаще 1 письма в минуту на ящик (максимум 6), между письмами добавляется случайная пауза — поток не выглядит ровным.</li>
+              <li><b>Окно и дни.</b> Отправка по расписанию идёт только в рабочие часы (по умолчанию 09:00–18:00), по выходным можно отключить совсем.</li>
+              <li><b>Дневной лимит.</b> Свой потолок на ящик; в менеджере очереди видно «отправлено сегодня из N».</li>
+              <li><b>Реакция на лимит.</b> На ответ сервиса «слишком часто» (421 4.7.0) ящик ставится на паузу 30 минут, письмо остаётся в расписании, а не помечается ошибкой.</li>
+              <li><b>Оформление.</b> У письма есть текстовая версия, папка «Отправленные» на сервисе показывает его как обычное письмо, а не рассылку.</li>
+            </ul>
+          </section>
+          <section class="table-tool-box">
+            <h3>Что настроить у mail.ru</h3>
+            <ul class="small-muted" style="margin:0;padding-left:18px;line-height:1.6">
+              <li><b>Отправляйте с корпоративного домена</b> (например, <code>@ваш-домен.ru</code>), а не с личного <code>@mail.ru</code>: у домена выше лимиты и есть Postmaster.</li>
+              <li><b>SPF, DKIM и DMARC</b> в DNS домена обязательны, DKIM включён в почтовом сервисе. Без них письма фильтруются ещё до чтения.</li>
+              <li><b>PTR (обратная зона)</b> IP вашего релея должна совпадать с именем сервера — это проверяют при доставке.</li>
+              <li><b>Не превышайте 30 адресатов</b> в одном письме (официальный лимит mail.ru) и не делайте «скрытую копию» на десятки адресов.</li>
+              <li><b>Прогрев.</b> Новый ящик/домен: 10–20 писем в день в первую неделю, дальше +15–20% в день, а не сразу вся пачка.</li>
+              <li><b>Postmaster.</b> Зарегистрируйте домен и следите за жалобами и попаданиями в спам.</li>
+            </ul>
+          </section>
+        </div>
+        <div class="notice" style="margin-top:14px"><span>✅</span><div><b>Что показал тест mail-tester (10/10).</b> SPF, DKIM (2048), DMARC (p=quarantine), rDNS и 20 черных списков — чисто, письмо не спам. В отчёте остались только подсказки, которые к официальной переписке не относятся: нет HTML-версии (у вас письмо с HTML-дизайном — включите его во вкладке «HTML-дизайн письма»), нет изображений и нет <code>List-Unsubscribe</code>. Заголовок отписки нужен только для массовых рассылок: у официального письма отписки нет, и добавлять её не следует. В шапке отчёта исправлена одна реальная вещь — HELO теперь отправляется доменом отправителя (<code>cmkcenter.ru</code>), а не именем контейнера <code>docgen</code>: SpamAssassin больше не отмечает <code>SPF_HELO_NONE</code>.</div></div>
+        <div class="notice warn" style="margin-top:14px"><span>⚠️</span><div>Официальный лимит mail.ru для одного письма — <b>не более 30 получателей</b>. Суточные цифры сервис не публикует. При ошибке <code>421 4.7.0 ratelimit exceeded</code> подождите 15–60 минут и продолжайте меньшими порциями: это временное ограничение скорости, а не отказ в доступе. Для действительно больших объёмов используйте отдельный сервис рассылок — личный ящик для этого не предназначен.</div></div>
+        <div class="small-muted" style="margin-top:10px">Лимиты и окно задаются в <button type="button" class="link-button" data-open-manager>менеджере очереди</button> → «Настройки рассылки».</div>
+      </div>
+    </details>
+  </section>
   <section class="settings-card" id="smtpCard">
     <details id="smtpDetails">
       <summary><strong>Настройки SMTP</strong><span class="settings-state" id="smtpState">Не настроено</span></summary>
@@ -1328,7 +1506,7 @@ body.modal-open{overflow:hidden}
     </div>
   </section>
   <section class="queue-section" id="emailQueue">
-    <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Откройте аккордеон, проверьте письма и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" data-open-manager>Менеджер очереди</button><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
+    <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Сначала формируется очередь писем, потом — на этом экране — выбирается ящик, из которого пачка пойдёт: откройте аккордеон, проверьте письма, выберите отправителя и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" data-open-manager>Менеджер очереди</button><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
     <div id="queueList" class="queue-list"><div class="empty-state">Загружаем очередь…</div></div>
   </section>
 </main>
@@ -1409,6 +1587,25 @@ body.modal-open{overflow:hidden}
     <div class="modal-actions"><span class="small-muted" id="backupImportModalFeedback">Ничего не меняется до подтверждения.</span><div class="right"><button type="button" class="btn-ghost" id="backupImportCancelBtn">Отмена</button><button type="button" class="btn-primary" id="confirmBackupImportBtn">Восстановить выбранные файлы</button></div></div>
   </section>
 </div>
+<div class="modal-backdrop" id="templateManagerModal" hidden>
+  <section class="modal template-manager-modal" role="dialog" aria-modal="true" aria-labelledby="templateManagerTitle">
+    <div class="modal-head"><div><h2 id="templateManagerTitle">Менеджер шаблонов</h2><div class="modal-subtitle">Переименуйте шаблон, сохраните копию под своим именем, замените DOCX-файл или удалите шаблон. У каждого шаблона своё письмо и HTML-дизайн.</div></div><button type="button" class="modal-close" id="templateManagerClose" aria-label="Закрыть менеджер шаблонов">×</button></div>
+    <div class="modal-main">
+      <div class="notice" style="margin:0 0 14px"><span>🗂️</span><div>Название — это ваша подпись шаблона, например «Вебинар 11.12.2028 · тарифы». Исходный файл при переименовании не меняется. При замене DOCX-файла письмо, получатели и HTML-дизайн этого шаблона сохраняются.</div></div>
+      <div id="templateManagerList" class="template-manager-list"></div>
+      <div class="template-manager-new">
+        <div class="field" style="margin:0;flex:1 1 260px;min-width:0"><label for="templateManagerNewName">Новый шаблон: своё имя</label><input id="templateManagerNewName" type="text" maxlength="180" autocomplete="off" placeholder="Например: Вебинар 2029 · вода"></div>
+        <div class="template-name-actions">
+          <button type="button" class="btn-ghost btn-small" id="templateManagerUploadBtn">Загрузить DOCX и сохранить</button>
+          <button type="button" class="btn-ghost btn-small" id="templateManagerHtmlBtn">Новый HTML-шаблон</button>
+        </div>
+      </div>
+      <input type="file" id="templateManagerUploadInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+      <input type="file" id="templateManagerReplaceInput" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="templateManagerFeedback" aria-live="polite">Действия применяются только к выбранной строке.</span><div class="right"><button type="button" class="btn-ghost" id="templateManagerDone">Закрыть</button></div></div>
+  </section>
+</div>
 <div class="modal-backdrop" id="htmlTemplateModal" hidden>
   <section class="modal html-editor-modal" role="dialog" aria-modal="true" aria-labelledby="htmlEditorTitle">
     <div class="modal-head"><div><h2 id="htmlEditorTitle">HTML-редактор шаблона</h2><div class="modal-subtitle">Коды полей пишите в фигурных скобках, например {Регион} или {ФИО ДП}. Итог будет сформирован в PDF.</div></div><button type="button" class="modal-close" id="htmlEditorClose" aria-label="Закрыть редактор">×</button></div>
@@ -1436,19 +1633,43 @@ body.modal-open{overflow:hidden}
     <div class="modal-main"><iframe id="queueManagerFrame" title="Менеджер очереди писем"></iframe></div>
   </section>
 </div>
+<div class="modal-backdrop" id="smtpLogModal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="smtpLogTitle">
+    <div class="modal-head"><div><h2 id="smtpLogTitle">Журнал проверки SMTP</h2><div class="modal-subtitle" id="smtpLogSubtitle"></div></div><button type="button" class="modal-close" id="smtpLogClose" aria-label="Закрыть журнал проверки">×</button></div>
+    <div class="modal-main">
+      <div class="smtp-log-summary"><div class="smtp-log-head"><span class="smtp-log-badge" id="smtpLogBadge">Проверка</span><strong id="smtpLogHeadline"></strong></div><p class="smtp-log-hint" id="smtpLogHint"></p></div>
+      <ul class="smtp-log-steps" id="smtpLogSteps"></ul>
+      <div id="smtpLogPortsBox" hidden>
+        <div class="small-muted" style="margin:0 0 5px">Какие порты реально открываются из этого контейнера</div>
+        <ul class="smtp-log-steps" id="smtpLogPorts"></ul>
+      </div>
+      <div class="small-muted" style="margin:0 0 5px">Полный диалог с сервером (пароль скрыт)</div>
+      <pre class="smtp-log-transcript" id="smtpLogTranscript"></pre>
+      <dl class="smtp-log-context" id="smtpLogContext"></dl>
+    </div>
+    <div class="modal-actions"><span class="small-muted" id="smtpLogFeedback">Скопируйте журнал, если нужно показать администратору.</span><div class="right"><button type="button" class="btn-ghost" id="smtpLogReloadBtn">Последний журнал с сервера</button><button type="button" class="btn-ghost" id="smtpLogCopyBtn">Скопировать журнал</button><button type="button" class="btn-primary" id="smtpLogCloseBtn">Закрыть</button></div></div>
+  </section>
+</div>
 <div class="modal-backdrop" id="queueModal" hidden>
   <section class="modal queue-modal" role="dialog" aria-modal="true" aria-labelledby="queueModalTitle">
     <div class="modal-head"><div><h2 id="queueModalTitle">Проверка письма</h2><div class="modal-subtitle" id="queueItemLabel"></div></div><button type="button" class="modal-close" id="queueModalClose" aria-label="Закрыть предпросмотр">×</button></div>
     <div class="modal-main queue-review-main">
       <div class="queue-preview-toolbar"><a id="queuePdfDownload" class="link-button" href="#" target="_blank" rel="noopener">Открыть PDF отдельно</a><a id="queueDocxDownload" class="link-button" href="#" target="_blank" rel="noopener" hidden>Скачать DOCX</a><span class="small-muted" id="queueItemStatus"></span></div>
-      <iframe id="queuePdfFrame" title="Предпросмотр PDF" class="pdf-preview-frame"></iframe>
+      <div class="queue-preview-switch" role="tablist" aria-label="Что проверяем в письме">
+        <button type="button" class="link-button queue-preview-tab active" data-queue-preview="pdf" role="tab" aria-selected="true">PDF-вложение</button>
+        <button type="button" class="link-button queue-preview-tab" data-queue-preview="design" role="tab" aria-selected="false" id="queueDesignTab" hidden>HTML-дизайн письма</button>
+        <button type="button" class="link-button queue-preview-tab" data-queue-preview="text" role="tab" aria-selected="false" id="queueTextTab">Текстовая версия</button>
+        <span class="small-muted" id="queuePreviewHint">Проверьте вложение и обе версии письма (multipart/alternative).</span>
+      </div>
+      <iframe id="queuePreviewFrame" title="Предпросмотр письма" class="pdf-preview-frame"></iframe>
+      <pre id="queueTextPreview" class="queue-text-preview" hidden></pre>
       <div class="queue-edit-grid">
         <div class="modal-field"><label for="queueTo">Кому (основной адрес)</label><textarea id="queueTo" rows="2" placeholder="name@example.org"></textarea></div>
         <div class="modal-field"><label for="queueCc">Копия (дополнительные/старые email)</label><textarea id="queueCc" rows="2" placeholder="copy@example.org"></textarea><span id="queueEmailSource" class="small-muted"></span></div>
         <div class="modal-field span2"><label for="queueSubject">Тема</label><input id="queueSubject" type="text"></div>
-        <div class="modal-field span2"><label for="queueBody">Текст письма</label><textarea id="queueBody" rows="5"></textarea></div>
+        <div class="modal-field span2"><label for="queueBody">Текстовая версия письма (multipart/alternative)</label><textarea id="queueBody" rows="5"></textarea><span class="queue-text-hint warn" id="queueTextHint" hidden>Для письма с HTML-дизайном текстовая версия обязательна. Без неё отправка и автоотправка блокируются — заполните её здесь или в блоке «Шаблон письма».</span></div>
       </div>
-      <div class="review-confirm"><label><input id="queueReviewedCheck" type="checkbox"> Я проверил(а) PDF, адресата, CC, тему и текст этого письма.</label><span class="small-muted">Отправка выполнится только для этого одного письма.</span></div>
+      <div class="review-confirm"><label><input id="queueReviewedCheck" type="checkbox"> Я проверил(а) PDF, адресата, CC, тему, HTML-дизайн и текстовую версию этого письма.</label><span class="small-muted">Отправка выполнится только для этого одного письма.</span></div>
     </div>
     <div class="modal-actions"><span class="small-muted" id="queueActionFeedback">Письмо ещё не отправлено.</span><div class="right"><button type="button" class="btn-ghost" id="queueModalCancel">Закрыть</button><button type="button" class="btn-ghost" id="saveQueueItemBtn">Сохранить правки</button><button type="button" class="btn-primary" id="sendQueueItemBtn" disabled>Отправить это письмо</button></div></div>
   </section>
@@ -1470,17 +1691,22 @@ let editingHtmlTemplateId = '';
 let queueItems = [];
 let reviewBatches = [];
 let activeQueueItemId = '';
+let activeQueuePreview = 'pdf';
 let smtpPasswordConfigured = false;
 let smtpAccounts = [];
 let smtpAccountId = '';
-let queueAccountId = '';
-let queueAccountTouched = false;
 let letterSettings = null;
+let letterOwn = false;
+let letterTemplateKey = '';
 let letterActiveField = '';
+let letterDesignMode = 'main';
+let letterSampleData = null;
 const LETTER_FIELDS = {
   letterFilenamePattern: 'filenamePattern', letterToPattern: 'toPattern', letterCcPattern: 'ccPattern',
-  letterSubjectPattern: 'subjectPattern', letterBodyPattern: 'bodyPattern'
+  letterSubjectPattern: 'subjectPattern', letterBodyPattern: 'bodyPattern',
+  letterHtmlPattern: 'htmlPattern', letterHtmlTextPattern: 'htmlTextPattern'
 };
+const LETTER_HTML_IDS = ['letterHtmlPattern','letterBodyPattern','letterHtmlTextPattern'];
 let dadataConfigured = false;
 let managerChecks = {};
 let managerCheckRunning = false;
@@ -1536,9 +1762,15 @@ async function requestJson(url, options, timeoutMs) {
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+const toastQueue=[];
 function showToast(text, kind='') {
-  const el=$('toast'); el.textContent=text; el.className='toast show '+kind;
-  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className='toast',5500);
+  const el=$('toast');
+  toastQueue.push({text:String(text||''),kind:kind||''});
+  // A save can produce two messages (result + notice): show them in turn
+  // instead of the second one silently replacing the first.
+  if(el.className.includes('show'))return;
+  const next=()=>{const item=toastQueue.shift();if(!item)return;el.textContent=item.text;el.className='toast show '+item.kind;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{el.className='toast';setTimeout(next,220);},item.kind==='info'?7000:5500);};
+  next();
 }
 function renderExcelImportPreview(payload) {
   const target=$('excelImportPreviewContent');
@@ -1954,6 +2186,10 @@ function getUnmappedFields() {
   if (!records.length) return [];
   return (templateInfo.fields||[]).filter(name=>records.some(record=>!fieldValue(record,name).trim()));
 }
+function templateExcludedSet() {
+  const raw=Array.isArray(templateInfo.excluded)?templateInfo.excluded:[];
+  return new Set(raw.map(name=>String(name)));
+}
 function updateMapping() {
   const fields=templateInfo.fields||[];
   renderLetterVariables();
@@ -1963,14 +2199,58 @@ function updateMapping() {
     return;
   }
   const records=activeSourceRecords();
+  const excluded=templateExcludedSet();
   const counts=fields.map(name=>records.filter(record=>fieldValue(record,name).trim()).length);
-  $('mappingBody').innerHTML=fields.map((name,index)=>{
+  const chips=fields.map((name,index)=>{
     const count=counts[index], complete=records.length>0&&count===records.length;
     const state=complete?'колонка книги':(count?`частично · ${count}/${records.length}`:'ручное поле');
     return `<span class="map-chip ${complete?'':'manual'}"><b>${esc(name)}</b><span class="state">${state}</span></span>`;
-  }).join('')+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`;
-  if (counts.some(count=>count<records.length)) {
+  }).join('');
+  const rows=fields.map(name=>{
+    const off=excluded.has(name);
+    return `<div class="var-row ${off?'off':''}"><label><input type="checkbox" data-var-exclude="${esc(name)}" ${off?'checked':''}><span><span class="var-name">${'{'+esc(name)+'}'}</span><span class="var-state">${off?'код будет удалён из документа':'подставляется значением из данных'}</span></span></label></div>`;
+  }).join('');
+  const offCount=fields.filter(name=>excluded.has(name)).length;
+  $('mappingBody').innerHTML=chips+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`
+    +'<div style="width:100%;margin-top:12px"><b class="small-muted">Отключить заполнение отдельных переменных</b><span class="small-muted" style="display:block;margin-top:3px">Снимите отметку — код не будет заменяться значением, а удалится из документа вместе с пустыми скобками и запятыми. Сам шаблон не меняется.</span></div>'
+    +`<div class="var-list">${rows}</div>`
+    +`<div class="var-tools"><span class="small-muted" id="varExcludeFeedback">${offCount?(offCount+' отключено · значения по ним не требуются'):'Все переменные подставляются'}</span><button type="button" class="btn-ghost btn-small" id="varExcludeAllBtn">Отключить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeNoneBtn">Включить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeSaveBtn">Сохранить для шаблона</button></div>`;
+  const list=$('mappingBody').querySelector('.var-list');
+  list?.querySelectorAll('[data-var-exclude]').forEach(box=>box.addEventListener('change',()=>{
+    const set=new Set([...list.querySelectorAll('[data-var-exclude]')].filter(item=>item.checked).map(item=>item.dataset.varExclude));
+    setVarExcluded(set);
+  }));
+  $('varExcludeAllBtn')?.addEventListener('click',()=>setVarExcluded(new Set(fields)));
+  $('varExcludeNoneBtn')?.addEventListener('click',()=>setVarExcluded(new Set()));
+  $('varExcludeSaveBtn')?.addEventListener('click',()=>saveVarExcluded());
+  if (counts.some((count,index)=>records.length>0&&count<records.length&&!excluded.has(fields[index]))) {
     $('mappingBody').insertAdjacentHTML('beforeend','<span class="small-muted" style="width:100%;color:#8b5b00">Незаполненные значения нужно проверить в карточке записи или задать в янтарных ячейках. Неизвестные данные автоматически не угадываются.</span>');
+  }
+}
+function setVarExcluded(set) {
+  const fields=templateInfo.fields||[];
+  templateInfo.excluded=fields.filter(name=>set.has(name));
+  updateMapping();
+}
+async function saveVarExcluded() {
+  const feedback=$('varExcludeFeedback');
+  if(feedback)feedback.textContent='Сохраняем…';
+  const fd=new FormData();
+  fd.append('template_id',templateId==='__upload__'?'':templateId);
+  fd.append('template_name',templateInfo.templateName||'');
+  fd.append('excluded_fields',JSON.stringify(templateInfo.excluded||[]));
+  try {
+    const response=await fetch('?action=template_excluded',{method:'POST',headers:csrfHeaders(),body:fd});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить настройку.');
+    if(payload.excluded)templateInfo.excluded=payload.excluded;
+    updateMapping();
+    const target=$('varExcludeFeedback');
+    if(target)target.textContent=payload.message||'Сохранено.';
+    showToast(payload.message||'Настройка переменных сохранена.','success');
+  } catch(e) {
+    if(feedback)feedback.textContent=e.message||'Ошибка сохранения.';
+    showToast(e.message||'Не удалось сохранить настройку переменных.','error');
   }
 }
 function statusBadge(record) {
@@ -2073,6 +2353,14 @@ function populateSources() {
   sourceSelect.value='all';
   updateRegionOptions(false);
 }
+function applyTemplateLibrary(templates) {
+  if(!Array.isArray(templates))return;
+  templateLibrary=templates;
+  if(!templateLibrary.some(item=>item.id==='sample-docx'))templateLibrary.unshift({id:'sample-docx',name:'Письмо-пример.docx',type:'docx'});
+  renderTemplateOptions();
+  if(templateId)templateSelect.value=templateId;
+  syncTemplateNameInput();
+}
 function renderTemplateOptions() {
   templateSelect.innerHTML=templateLibrary.map(item=>`<option value="${esc(item.id)}">${esc(item.name)} · ${item.type==='html'?'HTML → PDF':'DOCX → PDF'}</option>`).join('');
 }
@@ -2098,6 +2386,12 @@ function setTemplateInfo(info, mode='saved', file=null, id='') {
   $('saveUploadedTemplate').disabled=mode!=='upload';
   $('editHtmlTemplate').disabled=info.type!=='html' || mode==='upload';
   $('createHtmlTemplate').disabled=false;
+  syncTemplateNameInput(true);
+  $('templateNameFeedback').textContent='';
+  // Each saved template keeps its own letter; switching templates must reload it.
+  loadLetterTemplate()
+    .then(()=>updateLetterNotice())
+    .catch(e=>{ $('letterFeedback').textContent=e.message||'Не удалось загрузить письмо шаблона.'; });
   updateMapping(); renderTable();
 }
 async function loadTemplates() {
@@ -2153,17 +2447,27 @@ function resetToSample() {
   setTemplateInfo(SAMPLE_TEMPLATE_INFO,'saved',null,'sample-docx');
   showToast('Выбран шаблон-пример DOCX.');
 }
+async function saveUploadToLibrary(quiet) {
+  const fd=new FormData();fd.append('type','docx');fd.append('name',templateFile.name.replace(/\.docx$/i,'')||'Шаблон DOCX');fd.append('template',templateFile);
+  const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить шаблон.');
+  applyTemplateLibrary(payload.templates||templateLibrary);
+  templateInput.value='';
+  if(!quiet) setTemplateInfo(payload.info,'saved',null,payload.template.id);
+  return {id:payload.template.id,info:payload.info};
+}
 async function saveUploadedTemplate() {
   if(templateMode!=='upload'||!templateFile) return;
-  const fd=new FormData();fd.append('type','docx');fd.append('name',templateFile.name.replace(/\.docx$/i,'')||'Шаблон DOCX');fd.append('template',templateFile);
   const button=$('saveUploadedTemplate');button.disabled=true;button.textContent='Сохраняем…';
   try {
-    const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
-    const payload=await response.json();
-    if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить шаблон.');
-    templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
-    setTemplateInfo(payload.info,'saved',null,payload.template.id);
-    templateInput.value='';showToast('DOCX-шаблон сохранён в библиотеку приложения.','success');
+    // Carry an unsaved letter (HTML design, recipients, text) into the new
+    // library entry: the document and its letter are one template.
+    const pending=letterFormHasContent();
+    const saved=await saveUploadToLibrary(true);
+    if(pending) await saveLetterFor(saved.id);
+    setTemplateInfo(saved.info,'saved',null,saved.id);
+    showToast(pending?'DOCX-шаблон сохранён вместе с письмом и HTML-дизайном.':'DOCX-шаблон сохранён в библиотеку приложения.','success');
   } catch(e) { showToast(e.message||'Ошибка сохранения шаблона.','error'); }
   finally {button.textContent='Сохранить DOCX в библиотеку';button.disabled=templateMode!=='upload';}
 }
@@ -2183,6 +2487,44 @@ body { font-family: "Liberation Serif", "Times New Roman", serif; font-size: 12p
 <p>{Обращение} {Имя Отчество}!</p>
 <p>Текст письма. Замените этот текст и настройте оформление под свой документ.</p>
 <p class="sign">{Должность руководителя дательный}<br>{ФИО ДП}</p>
+</body>
+</html>`;
+const LETTER_DESIGN_STARTER=`<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+</head>
+<body style="margin:0;padding:0;background:#eef2f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.45;color:#1f2d3d;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{Регион}. Документ во вложении: краткое содержание письма для превью в почте.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#eef2f5"><tr><td align="center" style="padding:16px 12px;">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;"><tr><td bgcolor="#ffffff" style="border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(30,50,70,0.06);">
+<div style="padding:18px 24px 12px;">
+<a href="https://example.org/" style="display:inline-block;background:#e6f2f3;color:#1a6b70;font-size:12px;font-weight:600;padding:5px 12px;border-radius:8px;text-decoration:none;margin-bottom:8px;">📅 11 декабря · 10:00 МСК</a>
+<h1 style="margin:0 0 8px;font-size:21px;line-height:1.25;font-weight:600;color:#0f2c3d;">Ваш заголовок — {Регион}</h1>
+<p style="margin:0 0 10px;color:#1f2d3d;">Добрый день, {Имя Отчество}!</p>
+<p style="margin:0 0 8px;color:#1f2d3d;">Направляем документ для «{Наименование (ЕГРЮЛ/лист)}» во вложении. Ниже — главное, что стоит посмотреть.</p>
+</div>
+<div style="padding:14px 24px;background:#f7fafb;">
+<h2 style="margin:0 0 8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:#1a6b70;">Что внутри</h2>
+<ul style="margin:0;padding:0 0 0 18px;color:#1f2d3d;">
+<li style="margin-bottom:4px;">Инвестиционные программы и целевая амортизация</li>
+<li style="margin-bottom:4px;">Требования к тарифному делу на 2028 год</li>
+<li>Контрольные сроки и типичные ошибки</li>
+</ul>
+</div>
+<div style="padding:14px 24px;text-align:center;">
+<a href="https://example.org/" style="display:inline-block;background:#1a6b70;color:#ffffff;text-decoration:none;padding:11px 18px;border-radius:8px;font-weight:600;font-size:14px;">Открыть подробнее →</a>
+<p style="margin:10px 0 0;font-size:12px;color:#5a6b7c;">Документ также приложен к этому письму в формате PDF.</p>
+</div>
+<div style="padding:12px 24px;background:#f7fafb;font-size:12px;color:#5a6b7c;text-align:center;">
+Координатор: Ирина Рашидовна — <a href="mailto:kir@example.org" style="color:#1a6b70;">kir@example.org</a>
+</div>
+</td></tr>
+<tr><td style="padding:14px 12px;font-size:11px;color:#8896a4;text-align:center;line-height:1.45;">
+Вы получили письмо, так как подписаны на рассылку.<br><a href="{{UnsubscribeUrl}}" style="color:#8896a4;">Отписаться</a>
+</td></tr>
+</table>
+</td></tr></table>
 </body>
 </html>`;
 function previewHtml(html) {
@@ -2217,7 +2559,7 @@ async function saveHtmlTemplate() {
     const response=await fetch('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd});
     const payload=await response.json();
     if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить HTML-шаблон.');
-    templateLibrary=payload.templates||templateLibrary;renderTemplateOptions();
+    applyTemplateLibrary(payload.templates||templateLibrary);
     setTemplateInfo(payload.info,'saved',null,payload.template.id);closeHtmlEditor();showToast('HTML-шаблон сохранён.','success');
   } catch(e) { $('htmlTemplateFeedback').textContent=e.message||'Ошибка сохранения.';showToast(e.message||'Ошибка сохранения шаблона.','error'); }
   finally {button.disabled=false;button.textContent=editingHtmlTemplateId?'Сохранить изменения':'Сохранить шаблон';}
@@ -2257,9 +2599,11 @@ async function generate() {
   const fd=new FormData();
   fd.append('selected_ids',JSON.stringify(ids));
   fd.append('overrides',JSON.stringify(overrides));
-  fd.append('smtp_account_id',$('smtpAccountForRun').value||smtpAccountId||'default');
+  fd.append('excluded_fields',JSON.stringify(templateInfo.excluded||[]));
   if (templateMode==='upload' && templateFile) fd.append('template',templateFile);
   else fd.append('template_id',templateId);
+  // A one-off DOCX keeps the letter typed in this window, design included.
+  if(templateMode==='upload' && letterFormHasContent()) fd.append('letterDraft',JSON.stringify(Object.fromEntries(Object.entries(LETTER_FIELDS).map(([id,key])=>[key,$(id).value]))));
   const btn=$('generateBtn'), oldText=btn.textContent;
   const progressToken=makeProgressToken();
   fd.append('progress_token',progressToken);
@@ -2279,6 +2623,9 @@ async function generate() {
     await refreshQueue();
     const skipped=Number(payload.skipped||0);
     showToast(`Готово: ${payload.created||0} PDF добавлено в очередь${skipped?`; ошибок/пропусков — ${skipped}`:''}. Отправки не было.`,'success');
+    if(Number(payload.htmlTextFallback||0)>0){
+      showToast(`В ${payload.htmlTextFallback} письмах текстовая версия собрана из HTML-дизайна. Проверьте её в карточке письма: без текста письмо не отправить.`,'info');
+    }
     $('emailQueue').scrollIntoView({behavior:'smooth',block:'start'});
   } catch(e) {
     showToast(e.message||'Ошибка формирования.','error');
@@ -2298,9 +2645,10 @@ function renderQueue() {
     const rows=queueItems.filter(item=>batch.id==='legacy'?!item.batchId:item.batchId===batch.id);
     const items=rows.map(item=>{
       const [statusLabel,css]=queueStatus(item.status);
-      return `<div class="batch-review-item"><span class="status-label ${css}">${statusLabel}</span><b>${esc(item.recipientName||item.recordId||'Адресат')}</b><span class="small-muted">${esc(item.to||'получатель не указан')}</span><span class="small-muted">${esc(item.subject||'')}</span><button type="button" class="btn-ghost btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div>`;
+      const letterMarks=[queueItemHasHtml(item)?'HTML':''].filter(Boolean).map(mark=>`<span class="letter-badge">${mark}</span>`).join('');
+      return `<div class="batch-review-item"><span class="status-label ${css}">${statusLabel}</span><b>${esc(item.recipientName||item.recordId||'Адресат')}</b><span class="small-muted">${esc(item.to||'получатель не указан')}</span><span class="small-muted">${esc(item.subject||'')}</span>${letterMarks}<button type="button" class="btn-ghost btn-small" data-queue-open="${esc(item.id)}">Проверить PDF и письмо</button></div>`;
     }).join('');
-    return `<details class="batch-review"><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')}</summary><div class="batch-review-body"><div class="small-muted">Создано: ${esc(batch.createdAt||'')} · ящик: ${esc(batch.smtpAccountLabel||'основной')} · писем в пачке: ${rows.length}</div><div style="margin-top:9px">${items||'<span class="small-muted">Писем нет.</span>'}</div><div class="batch-review-actions"><label><input type="checkbox" data-batch-confirm="${esc(batch.id)}"> Я проверил(а) все письма пачки</label><button type="button" class="btn-ghost btn-small" data-batch-mode="manual" data-batch-id="${esc(batch.id)}">Поставить в ручную очередь</button><button type="button" class="btn-primary btn-small" data-batch-mode="auto" data-batch-id="${esc(batch.id)}">В расписание (автоотправка)</button><span class="small-muted" data-batch-feedback="${esc(batch.id)}">Автоотправка — только после явного выбора; по умолчанию письма остаются на ручной отправке.</span></div></div></details>`;
+    return `<details class="batch-review"><summary>Очередь — ${esc(batch.name||'Без названия')} — ${Number(batch.itemCount||rows.length)} писем · Тема: ${esc(batch.subject||'—')}</summary><div class="batch-review-body"><div class="small-muted">Создано: ${esc(batch.createdAt||'')} · писем в пачке: ${rows.length}${batch.smtpAccountLabel?` · ящик: ${esc(batch.smtpAccountLabel)}`:''}</div><div class="batch-account-row"><label class="small-muted" for="batch-account-${esc(batch.id)}">Из какого ящика отправлять</label><select id="batch-account-${esc(batch.id)}" data-batch-account="${esc(batch.id)}">${smtpAccounts.map(a=>`<option value="${esc(a.id)}"${a.id===batch.smtpAccountId?' selected':''}>${esc(a.label||a.fromEmail||a.id)}${a.fromEmail?' · '+esc(a.fromEmail):''}</option>`).join('')}</select><span class="small-muted">Отправитель подставляется в письма пачки в момент передачи в очередь. Так ящик можно выбрать, уже зная число писем и адресатов.</span></div><div style="margin-top:9px">${items||'<span class="small-muted">Писем нет.</span>'}</div><div class="batch-review-actions"><label><input type="checkbox" data-batch-confirm="${esc(batch.id)}"> Я проверил(а) все письма пачки</label><button type="button" class="btn-ghost btn-small" data-batch-mode="manual" data-batch-id="${esc(batch.id)}">Поставить в ручную очередь</button><button type="button" class="btn-primary btn-small" data-batch-mode="auto" data-batch-id="${esc(batch.id)}">В расписание (автоотправка)</button><span class="small-muted" data-batch-feedback="${esc(batch.id)}">Автоотправка — только после явного выбора; по умолчанию письма остаются на ручной отправке.</span></div></div></details>`;
   }).join('');
   list.querySelectorAll('[data-queue-open]').forEach(button=>button.addEventListener('click',()=>openQueueItem(button.dataset.queueOpen)));
   list.querySelectorAll('[data-batch-mode]').forEach(button=>button.addEventListener('click',()=>reviewBatch(button.dataset.batchId,button.dataset.batchMode)));
@@ -2311,10 +2659,13 @@ async function reviewBatch(batchId, mode) {
   if(!confirm?.checked){if(feedback)feedback.textContent='Сначала отметьте, что проверили все письма пачки.';showToast('Подтвердите проверку пачки.','error');return;}
   if(mode==='auto'&&!window.confirm('Разрешить автоматическую отправку этой пачки по расписанию? Письма уйдут без дополнительного подтверждения.'))return;
   if(feedback)feedback.textContent='Передаём пачку…';
-  const fd=new FormData();fd.append('batch_id',batchId);fd.append('mode',mode);fd.append('confirmed','1');
+  const accountSelect=$('queueList').querySelector(`[data-batch-account="${CSS.escape(batchId)}"]`);
+  const accountId=accountSelect?.value||'';
+  if(!accountId){if(feedback)feedback.textContent='Выберите ящик, из которого отправлять пачку.';showToast('Выберите ящик отправки.','error');return;}
+  const fd=new FormData();fd.append('batch_id',batchId);fd.append('mode',mode);fd.append('confirmed','1');fd.append('smtp_account_id',accountId);
   try {
     const payload=await requestJson('?action=review_batch',{method:'POST',headers:csrfHeaders(),body:fd},15000);
-    showToast(mode==='auto'?'Пачка поставлена в расписание.':'Пачка передана в ручную очередь.','success');
+    showToast((mode==='auto'?'Пачка поставлена в расписание.':'Пачка передана в ручную очередь.')+(payload.account?.label?` Ящик: ${payload.account.label}.`:''),'success');
     await refreshQueue();
   } catch(e) {
     if(feedback)feedback.textContent=e.message||'Не удалось передать пачку.';
@@ -2333,21 +2684,60 @@ async function refreshQueue() {
   renderQueue();
 }
 function currentQueueItem() { return queueItems.find(item=>item.id===activeQueueItemId)||null; }
+function queueItemHasHtml(item) { return Boolean(item&&String(item.bodyHtml||'').trim()); }
+function queuePreviewTab(tab) {
+  const item=currentQueueItem();if(!item)return;
+  activeQueuePreview=tab;
+  document.querySelectorAll('[data-queue-preview]').forEach(button=>{
+    const active=button.dataset.queuePreview===tab;
+    button.classList.toggle('active',active);button.setAttribute('aria-selected',active?'true':'false');
+  });
+  const frame=$('queuePreviewFrame'),text=$('queueTextPreview');
+  if(tab==='text'){
+    frame.hidden=true;text.hidden=false;
+    text.textContent=String(item.body||'').trim()||'Текстовая версия пуста. Письмо с HTML-дизайном нельзя отправить без неё — заполните поле «Текстовая версия» ниже.';
+    text.classList.toggle('empty',!String(item.body||'').trim());
+  } else if(tab==='design' && queueItemHasHtml(item)) {
+    frame.hidden=false;text.hidden=true;
+    frame.src=`?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&design=1&inline=1`;
+  } else {
+    frame.hidden=false;text.hidden=true;
+    frame.src=`?action=queue_file&id=${encodeURIComponent(item.id)}&format=pdf&inline=1`;
+  }
+}
+function updateQueueTextHint() {
+  const item=currentQueueItem();if(!item)return;
+  const hasHtml=queueItemHasHtml(item);
+  const hasText=String(item.body||'').trim()!=='';
+  const hint=$('queueTextHint');
+  hint.hidden=!(hasHtml&&!hasText);
+  $('queueDesignTab').hidden=!hasHtml;
+  $('queueTextTab').textContent=hasHtml?'Текстовая версия'+(hasText?'':' · пусто'):'Текст письма';
+  $('queuePreviewHint').textContent=hasHtml
+    ? 'HTML-дизайн и текстовая версия уйдут вместе (multipart/alternative). Проверьте обе.'
+    : 'Письмо отправляется простым текстом; PDF/DOCX — вложение.';
+  if(!hasHtml && activeQueuePreview==='design')activeQueuePreview='pdf';
+}
 function syncQueueReviewControls() {
   const item=currentQueueItem();
   if(!item)return;
   const blocked=['sent','sending'].includes(item.status);
-  $('sendQueueItemBtn').disabled=!$('queueReviewedCheck').checked||blocked;
+  const missingText=queueItemHasHtml(item)&&String(item.body||'').trim()==='';
+  $('sendQueueItemBtn').disabled=!$('queueReviewedCheck').checked||blocked||missingText;
   $('saveQueueItemBtn').disabled=blocked;
+  $('sendQueueItemBtn').title=missingText?'Заполните текстовую версию письма: HTML-письмо уходит как multipart/alternative.':'';
   $('sendQueueItemBtn').textContent=item.status==='failed'?'Повторить отправку':'Отправить это письмо';
+  updateQueueTextHint();
 }
 function openQueueItem(id) {
   const item=queueItems.find(row=>row.id===id);if(!item)return;
   activeQueueItemId=id;
   $('queueItemLabel').textContent=[item.region,item.recipientName,item.recordId].filter(Boolean).join(' · ');
   $('queueTo').value=item.to||'';$('queueCc').value=item.cc||'';$('queueSubject').value=item.subject||'';$('queueBody').value=item.body||'';
-  $('queueEmailSource').textContent=`Исходные поля книги — основной: ${item.sourcePrimaryEmail||'пусто'}; доп./старые: ${item.sourceAdditionalEmails||'пусто'}. Проверьте пометки об устаревших адресах. Отправка из ящика: ${item.smtpAccountLabel||'основной'}.`;
-  $('queuePdfFrame').src=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf&inline=1`;
+  $('queueEmailSource').textContent=`Исходные поля книги — основной: ${item.sourcePrimaryEmail||'пусто'}; доп./старые: ${item.sourceAdditionalEmails||'пусто'}. Проверьте пометки об устаревших адресах.`;
+  activeQueuePreview='pdf';
+  updateQueueTextHint();
+  queuePreviewTab('pdf');
   $('queuePdfDownload').href=`?action=queue_file&id=${encodeURIComponent(id)}&format=pdf`;
   $('queueDocxDownload').hidden=!item.hasDocx;
   $('queueDocxDownload').href=`?action=queue_file&id=${encodeURIComponent(id)}&format=docx`;
@@ -2358,7 +2748,7 @@ function openQueueItem(id) {
   $('queueModal').hidden=false;document.body.classList.add('modal-open');syncQueueReviewControls();$('queueModalClose').focus();
 }
 function closeQueueModal() {
-  $('queueModal').hidden=true;$('queuePdfFrame').src='about:blank';document.body.classList.remove('modal-open');activeQueueItemId='';
+  $('queueModal').hidden=true;$('queuePreviewFrame').src='about:blank';$('queueTextPreview').textContent='';document.body.classList.remove('modal-open');activeQueueItemId='';
 }
 function openQueueManager() {
   const frame=$('queueManagerFrame');
@@ -2407,19 +2797,12 @@ function renderSmtpAccountOptions(payload, selectedId) {
   smtpAccounts=Array.isArray(payload.accounts)?payload.accounts:[];
   const options=smtpAccounts.map(a=>`<option value="${esc(a.id)}">${esc(a.label||a.fromEmail||'Ящик')}</option>`).join('');
   $('smtpAccountSelect').innerHTML=options;
-  $('smtpAccountForRun').innerHTML=options;
   smtpAccountId=selectedId||payload.accountId||(smtpAccounts[0]?.id||'');
   $('smtpAccountSelect').value=smtpAccountId;
-  const preferred=queueAccountId||letterSettings?.smtpAccountId||'';
-  const queueChoice=smtpAccounts.some(a=>a.id===preferred)
-    ? preferred
-    : (smtpAccounts.some(a=>a.id===smtpAccountId)?smtpAccountId:(smtpAccounts[0]?.id||''));
-  queueAccountId=queueChoice;
-  $('smtpAccountForRun').value=queueChoice;
   $('deleteSmtpAccountBtn').disabled=smtpAccounts.length<=1;
   $('smtpAccountsHint').textContent=smtpAccounts.length>1
-    ? `Ящиков: ${smtpAccounts.length}. При формировании очереди выберите нужный в панели инструментов.`
-    : 'При формировании очереди можно выбрать, из какого ящика отправлять письма.';
+    ? `Ящиков: ${smtpAccounts.length}. Очередь формируется без отправителя: ящик выбирается при проверке пачки.`
+    : 'Очередь формируется без отправителя: ящик выбирается при проверке пачки.';
 }
 function applySmtpAccountToForm(id) {
   const account=smtpAccounts.find(a=>a.id===id)||smtpAccounts[0];
@@ -2480,48 +2863,347 @@ function renderLetterAccountOptions() {
   select.value=smtpAccounts.some(account=>account.id===wanted)?wanted:(smtpAccounts[0]?.id||'');
 }
 function applyLetterAccountDefault() {
-  if(queueAccountTouched||!letterSettings?.smtpAccountId)return;
-  if(smtpAccounts.some(account=>account.id===letterSettings.smtpAccountId)){
-    queueAccountId=letterSettings.smtpAccountId;
-    $('smtpAccountForRun').value=queueAccountId;
+}
+function selectedTemplateLabel() {
+  const selected=templateLibrary.find(item=>item.id===templateId);
+  return selected?.name || templateInfo?.templateName || 'Письмо-пример.docx';
+}
+function currentLetterTemplateId() {
+  // Only saved templates can keep their own letter copy; uploads and the
+  // sample edit the common values.
+  return templateId && templateId!=='__upload__' && templateId!=='sample-docx' ? templateId : '';
+}
+function renderLetterDesignPreview(fillWithData) {
+  const frame=$('letterDesignPreview');if(!frame)return;
+  let html=$('letterHtmlPattern').value;
+  if(!html.trim()){frame.srcdoc='<body style="font-family:system-ui,sans-serif;color:#8896a4;font-size:13px;padding:18px">HTML-дизайн не задан. Пока письмо уходит обычным текстом.</body>';return;}
+  if(fillWithData && letterSampleData) html=letterPreviewWithData(html, letterSampleData);
+  frame.srcdoc=letterPreviewSanitize(html);
+}
+function letterPreviewWithData(html, values) {
+  return html.replace(/\$\{([^{}]+)\}|\{([^{}:;\n]{1,120})\}/g,(match, dollarName, plainName)=>{
+    const key=String(dollarName||plainName||'').trim();
+    return key && values[key]!==undefined ? values[key] : match;
+  }).replace(/\{nl\}/g,'<br>');
+}
+function letterPreviewSanitize(html) {
+  return String(html||'').replace(/<\s*(script|iframe|object|embed|form)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi,'').replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi,'').replace(/(src|href|poster|background)\s*=\s*("|')\s*(https?:|file:|javascript:|data:|\/\/)[^"']*\2/gi,'');
+}
+function letterTab(tab) {
+  letterDesignMode=tab;
+  document.querySelectorAll('[data-letter-tab]').forEach(button=>{
+    const active=button.dataset.letterTab===tab;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-selected',active?'true':'false');
+  });
+  document.querySelectorAll('[data-letter-pane]').forEach(pane=>{pane.hidden=pane.dataset.letterPane!==tab;});
+  if(tab==='design')renderLetterDesignPreview($('letterDesignPreviewFill').checked);
+  else renderLetterVariables();
+}
+function updateLetterNotice() {
+  const html=$('letterHtmlPattern').value.trim();
+  const plain=$('letterBodyPattern').value.trim();
+  const ownText=$('letterHtmlTextPattern').value.trim();
+  $('letterDesignMark').hidden=!html;
+  $('letterDesignMark').title=html?'Для этого шаблона задан HTML-дизайн письма':'';
+  const notice=$('letterPlainNotice');
+  if(notice){
+    notice.hidden=!html;
+    notice.textContent=html&&!plain&&!ownText
+      ? 'HTML-дизайн задан, а текстовая версия пуста: она будет собрана из HTML. Проверьте её в карточке письма; при автоотправке письма без текстовой версии блокируются.'
+      : 'HTML-дизайн задан и текстовая версия заполнена — письмо уйдёт как multipart/alternative.';
+    notice.className='letter-plain-notice '+(html&&!plain&&!ownText?'warn':'ok');
   }
 }
-function applyLetterSettings() {
-  const settings=letterSettings||{};
+function applyLetterSettings(payload={}) {
+  const settings=payload.settings||letterSettings||{};
   Object.entries(LETTER_FIELDS).forEach(([id,key])=>{
     const input=$(id);
     if(input)input.value=settings[key]??'';
   });
+  letterOwn=Boolean(settings.own);
+  const scopeIsTemplate=Boolean(currentLetterTemplateId());
+  const unsavedUpload=!scopeIsTemplate&&templateMode==='upload';
+  $('letterState').textContent=scopeIsTemplate?(letterOwn?'Своё письмо шаблона':'Письмо выбранного шаблона'):(unsavedUpload?'Письмо разового DOCX':'Общее письмо · шаблон-пример');
+  $('letterState').className='settings-state '+((letterOwn||unsavedUpload)?'ok':'');
+  $('letterTemplateName').textContent=unsavedUpload?(templateFile?.name||'Загруженный DOCX'):selectedTemplateLabel();
+  $('letterSourceBadge').className='pill '+(letterOwn?'ok':'');
+  $('letterSourceBadge').textContent=letterOwn?'свои настройки шаблона':(unsavedUpload?'будет сохранено вместе с DOCX':'общие настройки (по умолчанию)');
+  $('letterContextHint').textContent=!scopeIsTemplate
+    ? (unsavedUpload?'Заполните письмо и нажмите «Сохранить письмо для этого шаблона»: DOCX попадёт в библиотеку вместе со своим HTML-дизайном, получателями и текстом.'
+      :'Письмо-пример настраивается общими значениями. Сохраните DOCX в библиотеку — и у шаблона появится своё письмо.')
+    : (letterOwn?'Изменения сохранятся только для этого шаблона.':'Изменения сохранятся копией для этого шаблона, общие значения не изменятся.');
+  $('copyLetterDefaultsBtn').hidden=!letterOwn;
+  // Codes and the data-filled preview depend on the selected template.
+  letterSampleData=letterSampleValues();
   renderLetterAccountOptions();
   applyLetterAccountDefault();
   renderLetterVariables();
+  renderLetterDesignPreview($('letterDesignPreviewFill')?.checked);
+  updateLetterNotice();
 }
-async function loadLetterTemplate() {
-  const response=await fetch('?action=letter_template',{cache:'no-store'});
-  const payload=await response.json();if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать шаблон письма.');
+function letterSampleValues() {
+  const id=[...selectedIds][0];
+  const record=id?dataset.records.find(row=>row.id===id):null;
+  if(!record)return null;
+  const values={...(record.fields||{}),...((overrides&&overrides[record.id])||{})};
+  values['Наименование файла']=String(templateInfo?.templateName||'Документ').replace(/\.(docx|html)$/i,'');
+  return values;
+}
+async function loadLetterTemplate(forTemplateId) {
+  const wanted=forTemplateId===undefined?(currentLetterTemplateId()):(forTemplateId||'');
+  letterTemplateKey=wanted;
+  const query=wanted?`&template_id=${encodeURIComponent(wanted)}`:'';
+  const response=await fetch(`?action=letter_template${query}`,{cache:'no-store'});
+  const payload=await response.json();
+  if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось прочитать шаблон письма.');
+  if(letterTemplateKey!==wanted)return; // A newer template selection already won.
   letterSettings=payload.settings||{};
-  applyLetterSettings();
+  applyLetterSettings(payload);
+  const design=$('letterHtmlPattern').value.trim();
+  if(design)letterTab(letterDesignMode||'main');
+  else if(letterDesignMode==='design')letterTab('main');
+}
+function letterFormData(templateKey) {
+  const fd=new FormData();
+  Object.entries(LETTER_FIELDS).forEach(([id,key])=>fd.append(key,$(id).value));
+  fd.append('smtpAccountId',$('letterAccountSelect').value||'default');
+  fd.append('templateId',templateKey||'');
+  return fd;
+}
+function letterFormHasContent() {
+  return Boolean($('letterHtmlPattern').value.trim()||$('letterBodyPattern').value.trim()||$('letterHtmlTextPattern').value.trim());
+}
+async function saveLetterFor(templateKey) {
+  const payload=await requestJson('?action=save_letter_template',{method:'POST',headers:csrfHeaders(),body:letterFormData(templateKey)},15000);
+  const previousAccountId=letterSettings?.smtpAccountId||'';
+  letterSettings=payload.settings||letterSettings;
+  letterOwn=Boolean(letterSettings.own);
+  applyLetterSettings(payload);
+  return payload;
 }
 async function saveLetterTemplate() {
   const button=$('saveLetterTemplateBtn');
   if(button.disabled)return;
+  const html=$('letterHtmlPattern').value.trim();
+  const plain=$('letterBodyPattern').value.trim();
+  const ownText=$('letterHtmlTextPattern').value.trim();
+  if(!plain&&!ownText&&!html){$('letterFeedback').textContent='Заполните текст письма или вставьте HTML-дизайн.';showToast('Письмо не может быть пустым.','error');letterTab('main');return;}
+  if(!$('letterSubjectPattern').value.trim()){$('letterFeedback').textContent='Укажите тему письма.';showToast('Укажите тему письма.','error');letterTab('main');return;}
+  if(html&&!plain&&!ownText){
+    const proceed=window.confirm('Текстовая версия пуста. Она будет собрана из HTML, но multipart/alternative надёжнее с явным текстом. Сохранить и проверить позже?');
+    if(!proceed){letterTab('main');$('letterBodyPattern').focus();$('letterFeedback').textContent='Заполните текстовую версию письма.';return;}
+  }
   button.disabled=true;button.textContent='Сохраняем…';
-  $('letterFeedback').textContent='Сохраняем шаблон письма…';
+  $('letterFeedback').textContent='Сохраняем письмо шаблона…';
   try {
-    const fd=new FormData();
-    Object.entries(LETTER_FIELDS).forEach(([id,key])=>fd.append(key,$(id).value));
-    fd.append('smtpAccountId',$('letterAccountSelect').value||'default');
-    const payload=await requestJson('?action=save_letter_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
-    const previousAccountId=letterSettings?.smtpAccountId||'';
-    letterSettings=payload.settings||letterSettings;
-    if(letterSettings.smtpAccountId!==previousAccountId)queueAccountTouched=false;
-    applyLetterSettings();
-    $('letterFeedback').textContent='Шаблон письма сохранён.';
-    showToast('Шаблон письма сохранён.','success');
+    let targetId=currentLetterTemplateId(), created=null;
+    // One template = document + its letter: an uploaded DOCX joins the library
+    // first, so the design is stored in that same template entry.
+    if(!targetId && templateMode==='upload' && templateFile) {
+      created=await saveUploadToLibrary(true);
+      targetId=created.id;
+    }
+    const payload=await saveLetterFor(targetId);
+    if(created) setTemplateInfo(created.info,'saved',null,created.id);
+    $('letterFeedback').textContent=letterOwn?'Письмо сохранено для этого шаблона.':'Общие настройки письма сохранены.';
+    showToast(letterOwn?(created?'DOCX-шаблон сохранён вместе с письмом и HTML-дизайном.':'Письмо шаблона сохранено.'):'Общие настройки письма сохранены.','success');
+    if(payload.notice)showToast(payload.notice,'info');
   } catch(e) {
     $('letterFeedback').textContent=e.message||'Ошибка сохранения шаблона письма.';
     showToast(e.message||'Ошибка сохранения шаблона письма.','error');
-  } finally {button.disabled=false;button.textContent='Сохранить шаблон письма';}
+  } finally {button.disabled=false;button.textContent='Сохранить письмо для этого шаблона';}
+}
+// --- Template manager: name, copy, replace file, delete -------------------
+const templateManagerState = {replaceId:'', pendingUpload:null};
+function templateKindLabel(item) {
+  return item.type==='html' ? 'HTML-шаблон → PDF' : 'DOCX → PDF';
+}
+function templateLetterBadges(item) {
+  if(item.sample) return '<span class="pill">встроенный пример · общее письмо</span>';
+  const parts=[];
+  parts.push(item.ownLetter?'<span class="pill ok">своё письмо</span>':'<span class="pill">общее письмо</span>');
+  if(item.hasHtmlDesign) parts.push('<span class="pill ok">HTML-дизайн</span>');
+  if(item.size) parts.push(`<span class="pill">${Math.max(1,Math.round(Number(item.size)/1024))} КБ</span>`);
+  if(item.updatedAt) parts.push(`<span class="pill" title="Изменён">${esc(String(item.updatedAt).slice(0,10))}</span>`);
+  return parts.join('');
+}
+function renderTemplateManager() {
+  const list=$('templateManagerList');if(!list)return;
+  list.innerHTML=templateLibrary.map(item=>{
+    const current=item.id===templateId;
+    const editable=!item.sample;
+    return `<article class="template-row${current?' current':''}" data-template-row="${esc(item.id)}">
+      <div class="template-row-head"><div><div class="template-row-title">${esc(item.name)}</div><div class="small-muted">${esc(templateKindLabel(item))}${current?' · выбран сейчас':''}</div></div><div class="template-row-meta">${templateLetterBadges(item)}</div></div>
+      ${editable?`<input type="text" maxlength="180" value="${esc(item.name)}" data-template-name-input="${esc(item.id)}" aria-label="Новое имя шаблона ${esc(item.name)}">
+      <div class="template-row-actions">
+        <button type="button" class="btn-primary" data-template-action="rename" data-id="${esc(item.id)}">Сохранить имя</button>
+        <button type="button" class="btn-ghost" data-template-action="copy" data-id="${esc(item.id)}">Сохранить как копию…</button>
+        ${item.type==='html'?`<button type="button" class="btn-ghost" data-template-action="edit" data-id="${esc(item.id)}">Редактировать HTML</button>`:`<button type="button" class="btn-ghost" data-template-action="replace" data-id="${esc(item.id)}">Заменить DOCX…</button>`}
+        <button type="button" class="btn-ghost" data-template-action="select" data-id="${esc(item.id)}">Выбрать</button>
+        <button type="button" class="btn danger" data-template-action="delete" data-id="${esc(item.id)}">Удалить</button>
+      </div>`:`<div class="template-row-actions"><button type="button" class="btn-ghost" data-template-action="select" data-id="${esc(item.id)}">Выбрать пример</button></div>`}
+    </article>`;
+  }).join('');
+  list.querySelectorAll('[data-template-action]').forEach(button=>{
+    button.addEventListener('click',()=>runTemplateAction(button.dataset.templateAction,button.dataset.id));
+  });
+}
+function templateManagerMessage(text,error) {
+  const feedback=$('templateManagerFeedback');
+  if(feedback){feedback.textContent=text;feedback.style.color=error?'var(--bad)':'';}
+  if(text) showToast(text,error?'error':'success');
+}
+function refreshTemplateRow() {
+  renderTemplateManager();
+  syncTemplateNameInput(true);
+}
+function templateNameInputValue() { return $('templateNameInput')?.value.trim()||''; }
+function selectedTemplateName() {
+  const selected=templateLibrary.find(item=>item.id===templateId);
+  return selected?.name||'Письмо-пример.docx';
+}
+function syncTemplateNameInput(force) {
+  const input=$('templateNameInput');if(!input)return;
+  if(force||document.activeElement!==input) input.value=selectedTemplateName();
+  const isSample=templateId==='sample-docx';
+  input.disabled=templateId==='__upload__'||isSample;
+  $('templateRenameBtn').disabled=templateId==='__upload__'||isSample;
+  $('templateSaveAsBtn').disabled=templateId==='__upload__';
+}
+async function saveTemplateName() {
+  if(!templateId||templateId==='__upload__'){ $('templateNameFeedback').textContent='Сначала сохраните DOCX в библиотеку — у разового файла нет имени в списке.'; return; }
+  if(templateId==='sample-docx'){ $('templateNameFeedback').textContent='У встроенного примера имя не меняется. Используйте «Сохранить как копию…».'; return; }
+  const name=templateNameInputValue();
+  if(!name){ $('templateNameFeedback').textContent='Введите имя шаблона.'; return; }
+  const button=$('templateRenameBtn');button.disabled=true;
+  try {
+    const fd=new FormData();fd.append('id',templateId);fd.append('name',name);
+    const payload=await requestJson('?action=rename_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+    applyTemplateLibrary(payload.templates);
+    $('templateNameFeedback').textContent='Имя сохранено: '+name;
+    if(!$('templateManagerModal').hidden) refreshTemplateRow();
+    showToast('Имя шаблона сохранено.','success');
+  } catch(e) {
+    $('templateNameFeedback').textContent=e.message||'Не удалось сохранить имя.';
+    showToast(e.message||'Не удалось сохранить имя.','error');
+  } finally {button.disabled=false;syncTemplateNameInput(true);}
+}
+async function saveTemplateAsCopy(sourceId, suggestedName) {
+  const baseName=suggestedName||templateNameInputValue()||selectedTemplateName();
+  const name=window.prompt('Новое имя копии шаблона:',baseName+' · копия');
+  if(name===null)return null;
+  if(!name.trim()){showToast('Имя копии не может быть пустым.','error');return null;}
+  try {
+    const fd=new FormData();fd.append('source_id',sourceId);fd.append('name',name.trim());
+    const payload=await requestJson('?action=copy_template',{method:'POST',headers:csrfHeaders(),body:fd},30000);
+    applyTemplateLibrary(payload.templates);
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);
+    syncTemplateNameInput(true);
+    if(!$('templateManagerModal').hidden) renderTemplateManager();
+    showToast('Копия создана: '+payload.template.name,'success');
+    if(payload.notice)showToast(payload.notice,'info');
+    return payload.template;
+  } catch(e) { showToast(e.message||'Не удалось создать копию.','error'); return null; }
+}
+async function runTemplateAction(action,id) {
+  if(action==='select'){ await selectTemplate(id); if(!$('templateManagerModal').hidden) renderTemplateManager(); return; }
+  if(action==='edit'){ try { await selectTemplate(id); await editHtmlTemplate(); } catch(e){ showToast(e.message||'Не удалось открыть редактор.','error'); } return; }
+  if(action==='rename'){
+    const input=document.querySelector(`[data-template-name-input="${id}"]`);
+    const name=input?.value.trim()||'';
+    if(!name){ templateManagerMessage('Введите имя шаблона.',true); return; }
+    try {
+      const fd=new FormData();fd.append('id',id);fd.append('name',name);
+      const payload=await requestJson('?action=rename_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+      applyTemplateLibrary(payload.templates);
+      if(id===templateId)syncTemplateNameInput(true);
+      renderTemplateManager();
+      templateManagerMessage('Имя сохранено: '+name);
+    } catch(e) { templateManagerMessage(e.message||'Не удалось переименовать шаблон.',true); }
+    return;
+  }
+  if(action==='copy'){ await saveTemplateAsCopy(id); return; }
+  if(action==='replace'){
+    templateManagerState.replaceId=id;
+    $('templateManagerReplaceInput').value='';
+    $('templateManagerReplaceInput').click();
+    return;
+  }
+  if(action==='delete'){
+    const item=templateLibrary.find(row=>row.id===id);
+    const label=item?.name||'шаблон';
+    if(!window.confirm(`Удалить шаблон «${label}» вместе с его письмом и HTML-дизайном? Документ и настройки будут потеряны.`))return;
+    if(!window.confirm('Подтвердите удаление: отменить его будет нельзя.'))return;
+    try {
+      const fd=new FormData();fd.append('id',id);
+      const payload=await requestJson('?action=delete_template',{method:'POST',headers:csrfHeaders(),body:fd},15000);
+      applyTemplateLibrary(payload.templates);
+      if(id===templateId){ await selectTemplate('sample-docx'); }
+      renderTemplateManager();
+      templateManagerMessage('Шаблон «'+label+'» удалён.');
+    } catch(e) { templateManagerMessage(e.message||'Не удалось удалить шаблон.',true); }
+  }
+}
+async function replaceTemplateFile(file) {
+  const id=templateManagerState.replaceId;
+  if(!id||!file)return;
+  if(!window.confirm(`Заменить DOCX-файл шаблона «${selectedTemplateNameFor(id)}»? Имя, письмо и HTML-дизайн сохранятся, файл станет новым.`))return;
+  try {
+    const fd=new FormData();fd.append('id',id);fd.append('template',file);
+    const payload=await requestJson('?action=replace_template_file',{method:'POST',headers:csrfHeaders(),body:fd},60000);
+    applyTemplateLibrary(payload.templates);
+    if(id===templateId) setTemplateInfo(payload.info,'saved',null,id);
+    renderTemplateManager();
+    templateManagerMessage(payload.notice||'Файл шаблона заменён.');
+  } catch(e) { templateManagerMessage(e.message||'Не удалось заменить файл шаблона.',true); }
+  finally { templateManagerState.replaceId=''; }
+}
+function selectedTemplateNameFor(id) {
+  return templateLibrary.find(item=>item.id===id)?.name||'шаблон';
+}
+function openTemplateManager() {
+  renderTemplateManager();
+  $('templateManagerFeedback').textContent='Действия применяются только к выбранной строке.';
+  $('templateManagerModal').hidden=false;document.body.classList.add('modal-open');
+  $('templateManagerClose').focus();
+}
+function closeTemplateManager() {
+  $('templateManagerModal').hidden=true;document.body.classList.remove('modal-open');
+  syncTemplateNameInput(true);
+}
+async function uploadTemplateFromManager(file) {
+  if(!file)return;
+  const name=($('templateManagerNewName').value.trim()||file.name.replace(/\.docx$/i,'')).slice(0,180);
+  const button=$('templateManagerUploadBtn');button.disabled=true;button.textContent='Сохраняем…';
+  try {
+    const fd=new FormData();fd.append('type','docx');fd.append('name',name);fd.append('template',file);
+    const payload=await requestJson('?action=save_template',{method:'POST',headers:csrfHeaders(),body:fd},60000);
+    applyTemplateLibrary(payload.templates);
+    setTemplateInfo(payload.info,'saved',null,payload.template.id);
+    $('templateManagerNewName').value='';
+    syncTemplateNameInput(true);
+    renderTemplateManager();
+    templateManagerMessage('Шаблон «'+payload.template.name+'» добавлен в библиотеку.');
+  } catch(e) { templateManagerMessage(e.message||'Не удалось сохранить DOCX.',true); }
+  finally {button.disabled=false;button.textContent='Загрузить DOCX и сохранить';$('templateManagerUploadInput').value='';}
+}
+async function copyLetterDefaults() {
+  if(!window.confirm('Заменить поля общими настройками? Несохранённые изменения этого шаблона будут потеряны.'))return;
+  try { await loadLetterTemplate(); $('letterFeedback').textContent='Показаны значения по умолчанию (без сохранения).'; }
+  catch(e) { showToast(e.message||'Не удалось прочитать общие настройки.','error'); }
+}
+function letterDesignSample() {
+  if($('letterHtmlPattern').value.trim()&&!window.confirm('Заменить текущий HTML-дизайн примером письма?'))return;
+  $('letterHtmlPattern').value=LETTER_DESIGN_STARTER;
+  letterTab('design');renderLetterDesignPreview($('letterDesignPreviewFill').checked);updateLetterNotice();
+  $('letterDesignFeedback').textContent='Пример вставлен. Замените текст, дату и ссылки на свои.';
+}
+function letterDesignClear() {
+  if(!$('letterHtmlPattern').value.trim())return;
+  if(!window.confirm('Очистить HTML-дизайн для этого шаблона? Письмо вернётся к обычному тексту.'))return;
+  $('letterHtmlPattern').value='';$('letterDesignFeedback').textContent='HTML-дизайн очищен; не забудьте сохранить.';
+  renderLetterDesignPreview(false);updateLetterNotice();$('letterDesignMark').hidden=true;
 }
 function smtpFormData(includeTemplates) {
   const fd=new FormData();
@@ -2565,6 +3247,45 @@ async function deleteSmtpAccount() {
     $('smtpFeedback').textContent='SMTP-ящик удалён.';showToast('SMTP-ящик удалён.','success');
   } catch(e) {$('smtpFeedback').textContent=e.message||'Не удалось удалить ящик.';showToast(e.message||'Не удалось удалить SMTP-ящик.','error');}
 }
+function openSmtpLog(diagnostics) {
+  const log=diagnostics||{};
+  const ok=Boolean(log.ok);
+  const bad=$('smtpLogBadge');
+  bad.textContent=ok?'Успешно':'Ошибка';
+  bad.className='smtp-log-badge '+(ok?'ok':'bad');
+  $('smtpLogSubtitle').textContent=[log.server||'', log.context?.['шифрование']||'', log.elapsedMs?`${log.elapsedMs} мс`:''].filter(Boolean).join(' · ');
+  $('smtpLogHeadline').textContent=log.summary||(ok?'Соединение проверено.':'Проверка не прошла.');
+  $('smtpLogHint').textContent=ok
+    ?'Пароль и диалог с сервером скрыты. Сервер принял параметры авторизации.'
+    :(log.probeWarn||'Ниже — сетевые шаги и полный диалог: по ним видно, на каком этапе всё остановилось.');
+  const steps=Array.isArray(log.steps)?log.steps:[];
+  $('smtpLogSteps').innerHTML=steps.length?steps.map(step=>`<li class="${step.ok?'good':'bad'}"><span class="step-name">${esc(step.step||'')}</span><span>${step.ok?'✓':'✕'} ${esc(step.detail||'')}</span></li>`).join(''):'<li><span class="step-name">Сеть</span><span>Сетевые шаги недоступны.</span></li>';
+  const ports=Array.isArray(log.ports)?log.ports:[];
+  const portsBox=$('smtpLogPortsBox');
+  portsBox.hidden=ports.length===0;
+  $('smtpLogPorts').innerHTML=ports.map(item=>{
+    const open=Boolean(item.ok);
+    const usable=open&&/приветствие/.test(String(item.detail||''));
+    return `<li class="${open?'good':'bad'}"><span class="step-name">${item.port}</span><span>${open?'✓ открыт':'✕ '+esc(String(item.detail||'').replace(/^\d+\s*—\s*/,''))}${open?': '+esc(item.detail):''}${usable?` · <button type="button" class="link-button" data-smtp-use="${item.port}" data-smtp-enc="${esc(item.encryption)}">применить ${item.port} + ${item.encryption==='tls'?'STARTTLS':(item.encryption==='ssl'?'SSL/TLS':'без шифрования')}</button>`:''}</span></li>`;
+  }).join('');
+  $('smtpLogPorts').querySelectorAll('[data-smtp-use]').forEach(button=>button.addEventListener('click',()=>{
+    $('smtpPort').value=button.dataset.smtpUse;
+    $('smtpEncryption').value=button.dataset.smtpEnc;
+    updateSmtpState();
+    $('smtpLogFeedback').textContent=`Порт ${button.dataset.smtpUse} и режим шифрования перенесены в форму. Нажмите «Проверить SMTP» ещё раз, затем сохраните настройки.`;
+  }));
+  const smtpError=log.smtpError||{};
+  const errorLine=[smtpError.error,smtpError.detail,smtpError.code&&`код ${smtpError.code}`].filter(Boolean).join(' · ');
+  $('smtpLogTranscript').textContent=[log.transcript||'PHPMailer не оставил журнала.',errorLine?`\nSMTP: ${errorLine}`:''].join('');
+  const context=Object.entries(log.context||{});
+  $('smtpLogContext').innerHTML=context.map(([key,value])=>`<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('');
+  $('smtpLogFeedback').textContent=ok?'Проверка ничего не сохранила.':'Журнал можно скопировать целиком.';
+  $('smtpLogModal').hidden=false;document.body.classList.add('modal-open');
+  $('smtpLogCloseBtn').focus();
+}
+function closeSmtpLog() {
+  $('smtpLogModal').hidden=true;document.body.classList.remove('modal-open');
+}
 async function testSmtp() {
   const button=$('testSmtpBtn');
   if(button.disabled)return;
@@ -2575,10 +3296,37 @@ async function testSmtp() {
   button.disabled=true;button.textContent='Проверяем…';
   $('smtpFeedback').textContent='Подключаемся к SMTP-серверу…';
   try {
-    const payload=await requestJson('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false)},20000);
-    $('smtpFeedback').textContent=payload.message||'Соединение проверено.';showToast(payload.message||'SMTP доступен.','success');
-  } catch(e) {$('smtpFeedback').textContent=e.message||'Ошибка SMTP.';showToast(e.message||'Ошибка SMTP.','error');}
-  finally {button.disabled=false;button.textContent='Проверить SMTP';}
+    // Ошибка 502 всё равно несёт журнал, поэтому читаем тело до проверки ok.
+    const response=await fetchSmtpTest();
+    const payload=await response.json().catch(()=>({}));
+    if(payload.ok){
+      $('smtpFeedback').textContent=payload.summary||payload.message||'Соединение проверено.';
+      showToast(payload.summary||'SMTP доступен.','success');
+      openSmtpLog(payload);
+      return;
+    }
+    const summary=payload.summary||payload.error||'Проверка SMTP не прошла.';
+    $('smtpFeedback').textContent=summary;
+    showToast(summary+' Открыт журнал проверки.','error');
+    openSmtpLog(payload);
+  } catch(e) {
+    $('smtpFeedback').textContent=e.message||'Ошибка SMTP.';
+    showToast(e.message||'Ошибка SMTP.','error');
+    openSmtpLog({ok:false,summary:e.message||'Проверка не дошла до сервера.',steps:[],transcript:'',context:{}});
+  } finally {button.disabled=false;button.textContent='Проверить SMTP';}
+}
+async function fetchSmtpTest() {
+  const controller=new AbortController();
+  // Бюджет сервера — 22 с, поэтому клиент ждёт дольше: сервер должен успеть
+  // вернуть журнал, а не оборваться по таймауту браузера.
+  const limitSeconds=35;
+  const timer=setTimeout(()=>controller.abort(),limitSeconds*1000);
+  try {
+    return await fetch('?action=test_smtp',{method:'POST',headers:csrfHeaders(),body:smtpFormData(false),signal:controller.signal});
+  } catch(e) {
+    if(e.name==='AbortError')throw new Error(`Сервер не ответил за ${limitSeconds} с: проверка не уложилась в бюджет. Попробуйте ещё раз через минуту — журнал появится, как только сервер ответит.`);
+    throw e;
+  } finally {clearTimeout(timer);}
 }
 function updateDadataState() {
   const count=Object.keys(managerChecks||{}).length;
@@ -2911,8 +3659,9 @@ $('queueManagerModalClose').addEventListener('click',closeQueueManager);
 $('queueManagerModal').addEventListener('click',event=>{if(event.target===$('queueManagerModal'))closeQueueManager();});
 document.querySelectorAll('[data-open-manager]').forEach(element=>element.addEventListener('click',openQueueManager));
 window.addEventListener('message',event=>{if(event.data==='docgen-close-queue-manager')closeQueueManager();});
+document.querySelectorAll('[data-queue-preview]').forEach(button=>button.addEventListener('click',()=>queuePreviewTab(button.dataset.queuePreview)));
 $('queueReviewedCheck').addEventListener('change',syncQueueReviewControls);
-['queueTo','queueCc','queueSubject','queueBody'].forEach(id=>$(id).addEventListener('input',()=>{if($('queueReviewedCheck').checked)$('queueReviewedCheck').checked=false;syncQueueReviewControls();}));
+['queueTo','queueCc','queueSubject','queueBody'].forEach(id=>$(id).addEventListener('input',()=>{if($('queueReviewedCheck').checked)$('queueReviewedCheck').checked=false;const item=currentQueueItem();if(item&&id==='queueBody')item.body=$('queueBody').value;syncQueueReviewControls();}));
 $('saveQueueItemBtn').addEventListener('click',async()=>{try{await saveQueueItem(true);showToast('Правки письма сохранены.','success');}catch(e){showToast(e.message||'Не удалось сохранить правки.','error');}});
 $('sendQueueItemBtn').addEventListener('click',sendQueueItem);
 $('refreshQueueBtn').addEventListener('click',async()=>{try{await refreshQueue();showToast('Очередь обновлена.','success');}catch(e){showToast(e.message||'Не удалось обновить очередь.','error');}});
@@ -2930,15 +3679,69 @@ $('backupImportCancelBtn').addEventListener('click',closeBackupImportModal);
 $('confirmBackupImportBtn').addEventListener('click',confirmConfigBackupImport);
 $('backupImportModal').addEventListener('click',event=>{if(event.target===$('backupImportModal'))closeBackupImportModal();});
 $('addTableSectionBtn').addEventListener('click',addTableSection);
+$('templateRenameBtn').addEventListener('click',saveTemplateName);
+$('templateNameInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();saveTemplateName();}});
+$('templateSaveAsBtn').addEventListener('click',()=>saveTemplateAsCopy(templateId));
+$('openTemplateManager').addEventListener('click',openTemplateManager);
+$('templateManagerClose').addEventListener('click',closeTemplateManager);
+$('templateManagerDone').addEventListener('click',closeTemplateManager);
+$('templateManagerModal').addEventListener('click',event=>{if(event.target===$('templateManagerModal'))closeTemplateManager();});
+$('templateManagerUploadBtn').addEventListener('click',()=>{$('templateManagerUploadInput').value='';$('templateManagerUploadInput').click();});
+$('templateManagerUploadInput').addEventListener('change',()=>uploadTemplateFromManager($('templateManagerUploadInput').files?.[0]));
+$('templateManagerReplaceInput').addEventListener('change',()=>replaceTemplateFile($('templateManagerReplaceInput').files?.[0]));
+$('templateManagerHtmlBtn').addEventListener('click',()=>{closeTemplateManager();openHtmlEditor();});
 $('saveLetterTemplateBtn').addEventListener('click',saveLetterTemplate);
 $('letterVariableList').addEventListener('click',event=>{
   const button=event.target.closest('[data-var]');
   if(button)insertLetterVariable(button.dataset.var);
 });
 Object.keys(LETTER_FIELDS).forEach(id=>$(id)?.addEventListener('focus',()=>{letterActiveField=id;renderLetterVariables();}));
-$('smtpAccountForRun').addEventListener('change',()=>{queueAccountTouched=true;queueAccountId=$('smtpAccountForRun').value;});
+Object.keys(LETTER_FIELDS).forEach(id=>$(id)?.addEventListener('input',()=>{updateLetterNotice();if(id==='letterHtmlPattern')renderLetterDesignPreview($('letterDesignPreviewFill')?.checked);}));
+document.querySelectorAll('[data-letter-tab]').forEach(button=>button.addEventListener('click',()=>letterTab(button.dataset.letterTab)));
+$('copyLetterDefaultsBtn').addEventListener('click',copyLetterDefaults);
+$('letterDesignSampleBtn').addEventListener('click',letterDesignSample);
+$('letterDesignClearBtn').addEventListener('click',letterDesignClear);
+$('letterDesignPreviewFill').addEventListener('change',()=>{renderLetterDesignPreview($('letterDesignPreviewFill').checked);});
+$('letterDesignFileInput').addEventListener('change',()=>{
+  const file=$('letterDesignFileInput').files?.[0];
+  if(!file)return;
+  if(file.size>1000000){showToast('HTML-дизайн больше 1 МБ — упростите файл.','error');$('letterDesignFileInput').value='';return;}
+  const reader=new FileReader();
+  reader.onload=()=>{
+    if($('letterHtmlPattern').value.trim()&&!window.confirm('Заменить текущий HTML-дизайн содержимым файла?')){$('letterDesignFileInput').value='';return;}
+    $('letterHtmlPattern').value=String(reader.result||'');
+    letterTab('design');renderLetterDesignPreview($('letterDesignPreviewFill').checked);updateLetterNotice();
+    $('letterDesignFeedback').textContent='Файл загружен: '+file.name+'. Проверьте коды и сохраните.';
+  };
+  reader.onerror=()=>showToast('Не удалось прочитать файл.','error');
+  reader.readAsText(file,'utf-8');
+  $('letterDesignFileInput').value='';
+});
 $('saveSmtpBtn').addEventListener('click',saveSmtpSettings);
 $('testSmtpBtn').addEventListener('click',testSmtp);
+$('smtpLogReloadBtn').addEventListener('click',async()=>{
+  $('smtpLogFeedback').textContent='Читаем сохранённый журнал…';
+  try {
+    const response=await fetch('?action=smtp_last_diagnose',{cache:'no-store'});
+    const payload=await response.json();
+    if(!response.ok||!payload)throw new Error('Журнал не прочитан.');
+    openSmtpLog(payload);
+    $('smtpLogFeedback').textContent=payload.savedAt?`Журнал от ${payload.savedAt}.`:'Журнал прочитан.';
+  } catch(e) {$('smtpLogFeedback').textContent=e.message||'Не удалось прочитать журнал.';}
+});
+$('smtpLogClose').addEventListener('click',closeSmtpLog);
+$('smtpLogCloseBtn').addEventListener('click',closeSmtpLog);
+$('smtpLogModal').addEventListener('click',event=>{if(event.target===$('smtpLogModal'))closeSmtpLog();});
+$('smtpLogCopyBtn').addEventListener('click',async()=>{
+  const portsText=$('smtpLogPortsBox').hidden?'':('Порты:\n'+$('smtpLogPorts').innerText);
+  const text=[$('smtpLogTitle').textContent,$('smtpLogHeadline').textContent,$('smtpLogSteps').innerText,portsText,$('smtpLogTranscript').textContent,$('smtpLogContext').innerText].filter(Boolean).join('\n');
+  try { await navigator.clipboard.writeText(text); $('smtpLogFeedback').textContent='Журнал скопирован.'; }
+  catch(e) {
+    const area=document.createElement('textarea');area.value=text;document.body.appendChild(area);area.select();
+    try{document.execCommand('copy');$('smtpLogFeedback').textContent='Журнал скопирован.';}catch{ $('smtpLogFeedback').textContent='Браузер не дал скопировать: выделите текст вручную.'; }
+    area.remove();
+  }
+});
 $('addSmtpAccountBtn').addEventListener('click',addSmtpAccount);
 $('deleteSmtpAccountBtn').addEventListener('click',deleteSmtpAccount);
 $('smtpAccountSelect').addEventListener('change',()=>applySmtpAccountToForm($('smtpAccountSelect').value));
@@ -2964,7 +3767,7 @@ $('smtpEncryption').addEventListener('change',()=>{
   if(encryption==='ssl'&&port==='587')$('smtpPort').value='465';
   if(encryption==='tls'&&port==='465')$('smtpPort').value='587';
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('queueManagerModal').hidden)closeQueueManager();else if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('smtpLogModal').hidden)closeSmtpLog();else if(!$('queueManagerModal').hidden)closeQueueManager();else if(!$('backupImportModal').hidden)closeBackupImportModal();else if(!$('queueModal').hidden)closeQueueModal();else if(!$('excelImportModal').hidden)closeExcelImportModal();else if(!$('htmlTemplateModal').hidden)closeHtmlEditor();else if(!$('recordModal').hidden)closeRecordCard();}});
 $('dropTemplate').addEventListener('click',()=>templateInput.click());
 $('dropTemplate').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();templateInput.click();}});
 templateInput.addEventListener('change',()=>analyzeUpload(templateInput.files?.[0]));

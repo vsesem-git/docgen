@@ -31,16 +31,28 @@ define('DOCGEN_DEMO_OVERRIDES_FILE', DOCGEN_STORAGE_DIR . '/demo_overrides.json'
 define('DOCGEN_DADATA_API_URL', 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party');
 define('DOCGEN_DADATA_BATCH_SIZE', 20);
 define('DOCGEN_TEMPLATE_INDEX', DOCGEN_TEMPLATES_DIR . '/index.json');
+define('DOCGEN_TEMPLATE_LETTERS_FILE', DOCGEN_TEMPLATES_DIR . '/letters.json');
 define('DOCGEN_DOWNLOAD_TTL_SECONDS', 86400);
 define('DOCGEN_MAX_HTML_TEMPLATE_BYTES', 1_000_000);
 // Only the interactive "Check SMTP" probe is time-boxed. Actual mail delivery
 // keeps PHPMailer's normal timeout, so a slow server can still accept a letter.
 define('DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS', 8);
+// Вся проверка обязана уложиться в бюджет браузера (30 с), иначе модалка
+// покажет таймаут вместо журнала. Бюджет делится: PHPMailer получает
+// DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS, остальное — сетевые шаги и порты.
+define('DOCGEN_SMTP_PROBE_BUDGET_SECONDS', 22.0);
 
 function docgenEnsureDir(string $directory, int $mode = 0700): void
 {
-    if (!is_dir($directory) && !mkdir($directory, $mode, true) && !is_dir($directory)) {
-        throw new RuntimeException('Не удалось создать приватную папку хранения.');
+    if (!is_dir($directory)) {
+        // Host mounts (PHP-wasm) can report mkdir()=false for a directory they
+        // just created, and keep the failed stat cached. Re-check after the
+        // cache is cleared instead of treating mkdir()'s return as the truth.
+        @mkdir($directory, $mode, true);
+        clearstatcache(true, $directory);
+        if (!is_dir($directory)) {
+            throw new RuntimeException('Не удалось создать приватную папку хранения: ' . $directory);
+        }
     }
     @chmod($directory, $mode);
 }
@@ -123,14 +135,14 @@ function docgenVerifyCsrf(): void
     }
 }
 
-function docgenRenderLogin(string $error = ''): never
+function docgenRenderLogin(string $error = '', string $return = ''): never
 {
     $token = docgenCsrfToken();
     http_response_code($error === '' ? 200 : 401);
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
     $safeError = $error !== '' ? '<div class="error">' . docgenEsc($error) . '</div>' : '';
-    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход — Формирование документов</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f2f5f9;color:#16283c;font:15px/1.5 system-ui,"Segoe UI",sans-serif}.box{width:min(420px,calc(100% - 28px));background:white;border:1px solid #dde5ee;border-radius:14px;padding:26px;box-shadow:0 12px 35px #16283c18}h1{font-size:20px;margin:0 0 8px;color:#123c61}.muted{color:#5b6b7f;font-size:13px;margin-bottom:18px}label{display:block;font-size:13px;font-weight:650;margin-bottom:6px}input{width:100%;height:42px;padding:8px 10px;border:1px solid #cbd7e3;border-radius:8px;font:inherit}button{width:100%;margin-top:14px;padding:10px;border:0;border-radius:8px;background:#0e4f8a;color:white;font:inherit;font-weight:700;cursor:pointer}.error{padding:9px 11px;margin:0 0 13px;background:#fdecea;color:#9f2e28;border-radius:7px;font-size:13px}</style></head><body><main class="box"><h1>Формирование документов</h1><div class="muted">Войдите, чтобы открыть тестовое приложение.</div>' . $safeError . '<form method="post" action="?action=login"><input type="hidden" name="csrf_token" value="' . docgenEsc($token) . '"><label for="password">Пароль администратора</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus><button type="submit">Войти</button></form></main></body></html>';
+    echo '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход — Формирование документов</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f2f5f9;color:#16283c;font:15px/1.5 system-ui,"Segoe UI",sans-serif}.box{width:min(420px,calc(100% - 28px));background:white;border:1px solid #dde5ee;border-radius:14px;padding:26px;box-shadow:0 12px 35px #16283c18}h1{font-size:20px;margin:0 0 8px;color:#123c61}.muted{color:#5b6b7f;font-size:13px;margin-bottom:18px}label{display:block;font-size:13px;font-weight:650;margin-bottom:6px}input{width:100%;height:42px;padding:8px 10px;border:1px solid #cbd7e3;border-radius:8px;font:inherit}button{width:100%;margin-top:14px;padding:10px;border:0;border-radius:8px;background:#0e4f8a;color:white;font:inherit;font-weight:700;cursor:pointer}.error{padding:9px 11px;margin:0 0 13px;background:#fdecea;color:#9f2e28;border-radius:7px;font-size:13px}</style></head><body><main class="box"><h1>Формирование документов</h1><div class="muted">Войдите, чтобы открыть тестовое приложение.</div>' . $safeError . '<form method="post" action="?action=login"><input type="hidden" name="csrf_token" value="' . docgenEsc($token) . '"><input type="hidden" name="return" value="' . docgenEsc($return) . '"><label for="password">Пароль администратора</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus><button type="submit">Войти</button></form></main></body></html>';
     exit;
 }
 
@@ -160,7 +172,7 @@ function docgenBoot(string $action): void
     $authRequired = $hash !== '';
     if ($action === 'login') {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            docgenRenderLogin();
+            docgenRenderLogin('', (string) ($_GET['return'] ?? ''));
         }
         docgenVerifyCsrf();
         $password = (string) ($_POST['password'] ?? '');
@@ -168,10 +180,12 @@ function docgenBoot(string $action): void
             session_regenerate_id(true);
             $_SESSION['docgen_authenticated'] = true;
             $_SESSION['docgen_csrf'] = bin2hex(random_bytes(32));
-            header('Location: ./', true, 303);
+            // Возврат только на известные страницы приложения: открытый redirect недопустим.
+            $target = (string) ($_POST['return'] ?? '');
+            header('Location: ' . ($target === 'webinar.php' || $target === 'queue.php' ? $target : './'), true, 303);
             exit;
         }
-        docgenRenderLogin('Неверный пароль. Попробуйте ещё раз.');
+        docgenRenderLogin('Неверный пароль. Попробуйте ещё раз.', (string) ($_POST['return'] ?? ''));
     }
     if ($action === 'logout') {
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -189,8 +203,12 @@ function docgenBoot(string $action): void
     }
     $authenticated = !$authRequired || !empty($_SESSION['docgen_authenticated']);
     if (!$authenticated) {
+        // Пустое действие — это HTML-страница, которую можно показать формой входа:
+        // главная (?), менеджер очереди и генератор вебинаров (webinar.php?).
         if ($action === '' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
-            docgenRenderLogin();
+            // Первый аргумент — текст ошибки, второй — адрес возврата после
+            // входа. Раньше сюда попадал return, и страница отдавалась с 401.
+            docgenRenderLogin('', (string) ($_GET['return'] ?? ''));
         }
         sendJson(['ok' => false, 'error' => 'Требуется вход администратора. Обновите страницу и войдите.'], 401);
     }
@@ -248,12 +266,20 @@ function docgenTemplateList(): array
         'type' => 'docx',
         'sample' => true,
     ]];
+    $letters = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
     foreach (docgenUserTemplateIndex() as $template) {
+        $own = isset($letters[$template['id']]) && is_array($letters[$template['id']]);
         $templates[] = [
             'id' => $template['id'],
             'name' => $template['name'],
             'type' => $template['type'],
             'sample' => false,
+            'size' => (int) @filesize($template['path']),
+            'createdAt' => $template['createdAt'],
+            'updatedAt' => $template['updatedAt'],
+            // The manager shows which templates already keep their own letter.
+            'ownLetter' => $own,
+            'hasHtmlDesign' => $own && trim((string) ($letters[$template['id']]['htmlPattern'] ?? '')) !== '',
         ];
     }
     return $templates;
@@ -328,6 +354,306 @@ function docgenScanTemplate(array $template): array
     $info['templateName'] = $template['name'];
     $info['templateId'] = $template['id'];
     return $info;
+}
+
+/**
+ * Отключённые переменные шаблона.
+ *
+ * Оператор может убрать код из документа: например, «{Полное наименование}»
+ * в бланке не нужно — тогда код вырезается целиком, а не подставляется
+ * пустым значением. Хранится по паре «шаблон + имя файла»: разовый DOCX
+ * из очереди не имеет id библиотеки, но у него есть имя.
+ */
+function docgenTemplateExcludedFile(): string
+{
+    return DOCGEN_SETTINGS_DIR . '/template-excluded.json';
+}
+
+function docgenTemplateExclusionKey(?string $templateId, ?string $fileName = null): string
+{
+    $id = trim((string) $templateId);
+    if ($id !== '' && $id !== '__upload__') {
+        return 'id:' . $id;
+    }
+    $name = trim((string) $fileName);
+    return $name !== '' ? 'file:' . mb_strtolower($name, 'UTF-8') : '';
+}
+
+/** @return list<string> имена отключённых переменных для шаблона */
+function docgenTemplateExcluded(string $key): array
+{
+    if ($key === '') {
+        return [];
+    }
+    $store = docgenReadJson(docgenTemplateExcludedFile(), []);
+    $list = $store['templates'][$key] ?? [];
+    if (!is_array($list)) {
+        return [];
+    }
+    return array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $list
+    ), static fn(string $name): bool => $name !== '')));
+}
+
+/** @param list<string> $names */
+function docgenSaveTemplateExcluded(string $key, array $names): void
+{
+    if ($key === '') {
+        return;
+    }
+    $store = docgenReadJson(docgenTemplateExcludedFile(), []);
+    if (!is_array($store['templates'] ?? null)) {
+        $store['templates'] = [];
+    }
+    $clean = array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $names
+    ), static fn(string $name): bool => $name !== '')));
+    if ($clean === []) {
+        unset($store['templates'][$key]);
+    } else {
+        $store['templates'][$key] = $clean;
+    }
+    $store['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson(docgenTemplateExcludedFile(), $store);
+}
+
+/** Отключённые переменные текущего шаблона: из запроса или из сохранённых настроек. */
+function docgenExcludedFromRequest(array $template): array
+{
+    if (isset($_POST['excluded_fields'])) {
+        $posted = trim((string) $_POST['excluded_fields']);
+        $raw = json_decode($posted, true);
+        if (!is_array($raw) && $posted !== '') {
+            // Принимаем и список строкой через запятую: так проще из формы.
+            $raw = array_map('trim', explode(',', $posted));
+        }
+        if (is_array($raw)) {
+            return array_values(array_unique(array_filter(array_map(
+                static fn($name): string => trim((string) $name),
+                $raw
+            ), static fn(string $name): bool => $name !== '')));
+        }
+    }
+    $key = docgenTemplateExclusionKey((string) ($template['id'] ?? ''), (string) ($template['name'] ?? ''));
+    return docgenTemplateExcluded($key);
+}
+
+/**
+ * Вырезать коды отключённых переменных из текста (HTML-шаблоны).
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedCodes(string $text, array $excluded): string
+{
+    foreach ($excluded as $name) {
+        $text = str_replace(['${' . $name . '}', '{' . $name . '}'], '', $text);
+    }
+    return $text;
+}
+
+/**
+ * Вырезать отключённые переменные из DOCX до подстановки значений.
+ *
+ * PHPWord заменил бы код пустой строкой, оставив абзац, пробелы и знаки
+ * препинания вокруг. Здесь код удаляется вместе с осиротевшими знаками:
+ * «(тел. {Телефон})» без телефона становится пустым, а не «(тел. )».
+ * Шаблон при этом не меняется — правка идёт на копии в пакете.
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedFromDocx(string $path, array $excluded): int
+{
+    if ($excluded === [] || !is_file($path)) {
+        return 0;
+    }
+    $zip = new ZipArchive();
+    if ($zip->open($path) !== true) {
+        return 0;
+    }
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    $removed = 0;
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $entry = $zip->getNameIndex($i);
+        if (!is_string($entry) || !preg_match('#^word/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$#', $entry)) {
+            continue;
+        }
+        $xml = $zip->getFromName($entry);
+        if (!is_string($xml) || $xml === '') {
+            continue;
+        }
+        $updated = docgenStripExcludedXml($xml, $excluded, $wordNs, $removed);
+        if ($updated !== null) {
+            $zip->addFromString($entry, $updated);
+        }
+    }
+    $zip->close();
+    return $removed;
+}
+
+/**
+ * Правка одной XML-части документа. Возвращает новый XML или null, когда
+ * менять нечего. Код может быть разбит Word на несколько w:t, поэтому
+ * работаем с текстом абзаца целиком и раскладываем результат обратно.
+ *
+ * @param list<string> $excluded
+ */
+function docgenStripExcludedXml(string $xml, array $excluded, string $wordNs, int &$removed): ?string
+{
+    $dom = new DOMDocument();
+    $dom->preserveWhiteSpace = true;
+    $dom->formatOutput = false;
+    if (!@$dom->loadXML($xml, LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR)) {
+        return null;
+    }
+    $xpath = new DOMXPath($dom);
+    $xpath->registerNamespace('w', $wordNs);
+    $changed = false;
+    // Word часто режет «{Полное наименование}» на несколько w:t. Тогда ни в
+    // одном узле нет кода целиком, и построчная правка ничего не найдёт.
+    // Поэтому сначала собираем текст абзаца, вырезаем код и раскладываем
+    // результат обратно — в первый непустой прогон, остальные пустеют.
+    foreach ($xpath->query('//w:p') as $paragraph) {
+        $textNodes = [];
+        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+            $textNodes[] = $textNode;
+        }
+        if ($textNodes === []) {
+            continue;
+        }
+        $joined = '';
+        foreach ($textNodes as $textNode) {
+            $joined .= $textNode->textContent;
+        }
+        $next = docgenStripExcludedCodes($joined, $excluded);
+        if ($next === $joined) {
+            continue;
+        }
+        $removed += 1;
+        $changed = true;
+        $textNodes[0]->nodeValue = $next;
+        for ($index = 1; $index < count($textNodes); $index++) {
+            $textNodes[$index]->nodeValue = '';
+        }
+        // xml:space="preserve" сохраняет значимые пробелы по краям абзаца.
+        if (trim($next) === '' && $next !== '') {
+            $textNodes[0]->setAttribute('xml:space', 'preserve');
+        }
+    }
+    // Знаки препинания, оставшиеся без кода: «(тел. )» и «, ». Убираем их
+    // только в абзацах, где реально что-то вырезали, чтобы не трогать текст.
+    if ($changed) {
+        docgenTidyLeftovers($xpath, $wordNs, $excluded);
+    }
+    if (!$changed) {
+        return null;
+    }
+    return (string) $dom->saveXML();
+}
+
+/**
+ * Убрать пустые скобки и висящие запятые, которые остались после вырезания.
+ * Работает только с абзацами, где были отключённые коды.
+ *
+ * @param list<string> $excluded
+ */
+function docgenTidyLeftovers(DOMXPath $xpath, string $wordNs, array $excluded): void
+{
+    foreach ($xpath->query('//w:p') as $paragraph) {
+        $textNodes = [];
+        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+            $textNodes[] = $textNode;
+        }
+        if ($textNodes === []) {
+            continue;
+        }
+        $joined = '';
+        foreach ($textNodes as $textNode) {
+            $joined .= $textNode->textContent;
+        }
+        // Меняем только абзацы, где уже ничего не осталось от переменной.
+        if ($joined === '' || !preg_match('/[()\[\]«»,;:]/u', $joined)) {
+            continue;
+        }
+        $tidy = $joined;
+        $tidy = (string) preg_replace('/\(\s*\)/u', '', $tidy);
+        $tidy = (string) preg_replace('/\[\s*\]/u', '', $tidy);
+        $tidy = (string) preg_replace('/«\s*»/u', '', $tidy);
+        $tidy = (string) preg_replace('/[ \t]+([,;:])/u', '$1', $tidy);
+        $tidy = (string) preg_replace('/([,;:])\s*(?=[,;:])/u', '', $tidy);
+        // Знак препинания без кода остался в начале или в конце абзаца.
+        $tidy = (string) preg_replace('/^[ \t]*[,;:][ \t]*/u', '', $tidy);
+        $tidy = (string) preg_replace('/[ \t]*[,;:][ \t]*$/u', '', $tidy);
+        $tidy = (string) preg_replace('/([.!?])[ \t]+[,;:]/u', '$1', $tidy);
+        $tidy = (string) preg_replace('/[ \t]{2,}/u', ' ', $tidy);
+        $tidy = trim($tidy);
+        if ($tidy === $joined) {
+            continue;
+        }
+        // Возврат текста в первый w:t, остальные пустеют: так сохраняется
+        // оформление первого фрагмента и не появляются лишние разрывы.
+        $textNodes[0]->nodeValue = $tidy;
+        for ($index = 1; $index < count($textNodes); $index++) {
+            $textNodes[$index]->nodeValue = '';
+        }
+    }
+}
+
+/**
+ * Сохранить набор отключённых переменных для шаблона. Постоянный DOCX из
+ * библиотеки запоминается между запусками; разовый файл — по имени.
+ */
+function docgenSaveTemplateExcluding(): never
+{
+    $templateId = trim((string) ($_POST['template_id'] ?? ''));
+    $fileName = trim((string) ($_POST['template_name'] ?? ''));
+    $key = docgenTemplateExclusionKey($templateId, $fileName);
+    if ($key === '') {
+        sendJson(['ok' => false, 'error' => 'Не удалось определить шаблон: откройте его ещё раз.'], 422);
+    }
+    $raw = json_decode((string) ($_POST['excluded_fields'] ?? '[]'), true);
+    if (is_string($raw)) {
+        $raw = array_map('trim', explode(',', $raw));
+    }
+    if (!is_array($raw)) {
+        $raw = [];
+    }
+    $names = array_values(array_unique(array_filter(array_map(
+        static fn($name): string => trim((string) $name),
+        $raw
+    ), static fn(string $name): bool => $name !== '')));
+    if (count($names) > 200) {
+        sendJson(['ok' => false, 'error' => 'Слишком много отключённых переменных.'], 422);
+    }
+    docgenSaveTemplateExcluded($key, $names);
+    sendJson([
+        'ok' => true,
+        'key' => $key,
+        'excluded' => docgenTemplateExcluded($key),
+        'message' => $names === []
+            ? 'Отключённых переменных нет: все коды подставляются.'
+            : 'Отключено переменных: ' . count($names) . '. Их коды будут удалены из документа.',
+    ]);
+}
+
+/** Данные для раздела 3: все переменные шаблона и отметки об отключении. */
+function docgenTemplateVariablePayload(array $templateInfo, array $template): array
+{
+    $key = docgenTemplateExclusionKey((string) ($template['id'] ?? ''), (string) ($template['name'] ?? ''));
+    $excluded = docgenTemplateExcluded($key);
+    $fields = array_values((array) ($templateInfo['fields'] ?? []));
+    $excluded = array_values(array_intersect($excluded, $fields));
+    $result = [];
+    foreach ($fields as $name) {
+        $result[] = ['name' => (string) $name, 'excluded' => in_array((string) $name, $excluded, true)];
+    }
+    return [
+        'key' => $key,
+        'variables' => $result,
+        'excluded' => $excluded,
+        'templateName' => (string) ($template['name'] ?? ''),
+    ];
 }
 
 function docgenSanitizeHtml(string $html): string
@@ -548,10 +874,28 @@ function docgenSmtpWriteAccount(array $account, string $password, bool $clearPas
 }
 
 /**
- * Global letter layout shared by all DOCX/HTML templates. Patterns use the same
- * {column} codes as the documents; the resulting letter is always editable in
- * the queue before a manual send.
+ * Letter layout per template: attachment name, recipients, subject and the
+ * letter text (plain text part + optional HTML design). The global file keeps
+ * the common defaults that other templates inherit until they save their own.
  */
+define('DOCGEN_LETTER_HTML_MAX_BYTES', 1_000_000);
+
+function docgenIsHtmlTemplateId(string $id): bool
+{
+    if ($id === 'sample-docx' || $id === '__upload__' || $id === '') {
+        return false;
+    }
+    if (preg_match('/^[a-f0-9]{32}$/', $id) !== 1) {
+        return false;
+    }
+    foreach (docgenUserTemplateIndex() as $template) {
+        if ($template['id'] === $id) {
+            return $template['type'] === 'html';
+        }
+    }
+    return false;
+}
+
 function docgenLetterTemplateDefaults(): array
 {
     $legacy = docgenSmtpAccount(docgenSmtpAccountStore()['defaultId']);
@@ -561,15 +905,277 @@ function docgenLetterTemplateDefaults(): array
         'ccPattern' => '{Доп./старые email}',
         'subjectPattern' => (string) ($legacy['subjectTemplate'] ?? 'Документ'),
         'bodyPattern' => (string) ($legacy['bodyTemplate'] ?? "Добрый день.\n\nНаправляем документ во вложении."),
+        'htmlPattern' => '',
+        'htmlTextPattern' => '',
         'smtpAccountId' => 'default',
     ];
 }
 
+/** Global common letter defaults (config/letter-template.json). */
 function docgenLetterTemplate(): array
 {
     return array_merge(docgenLetterTemplateDefaults(), docgenReadJson(DOCGEN_LETTER_TEMPLATE_FILE, []));
 }
 
+/**
+ * One template's own letter settings. A saved copy wins; otherwise the common
+ * defaults apply — also for the built-in sample and one-off uploads.
+ * The letter text may live in any of bodyPattern / htmlTextPattern / htmlPattern.
+ */
+function docgenTemplateLetterSettings(string $templateId): array
+{
+    $stored = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    $own = preg_match('/^[a-f0-9]{32}$/', $templateId) === 1 ? ($stored[$templateId] ?? null) : null;
+    $settings = is_array($own)
+        ? array_merge(docgenLetterTemplateDefaults(), $own)
+        : docgenLetterTemplate();
+    $settings['templateId'] = $templateId;
+    $settings['own'] = is_array($own);
+    return $settings;
+}
+
+function docgenSaveTemplateLetterSettings(string $templateId, array $fields, string $accountId): void
+{
+    if ($templateId === '') {
+        // No saved template yet: only the global default can keep these values.
+        docgenWriteJson(DOCGEN_LETTER_TEMPLATE_FILE, array_merge(docgenLetterTemplateDefaults(), $fields, ['smtpAccountId' => $accountId]));
+        return;
+    }
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    $store[$templateId] = array_merge($fields, [
+        'smtpAccountId' => $accountId,
+        'updatedAt' => date(DATE_ATOM),
+    ]);
+    docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+}
+
+/** Copy one template's saved letter to another (used by «Сохранить как…»). */
+function docgenCopyTemplateLetterSettings(string $fromId, string $toId): bool
+{
+    if ($fromId === '' || $toId === '' || $fromId === $toId) {
+        return false;
+    }
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    if (!isset($store[$fromId]) || !is_array($store[$fromId])) {
+        return false;
+    }
+    $copy = $store[$fromId];
+    $copy['updatedAt'] = date(DATE_ATOM);
+    $store[$toId] = $copy;
+    docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+    return true;
+}
+
+function docgenCleanupTemplateLetters(string $templateId): void
+{
+    $store = docgenReadJson(DOCGEN_TEMPLATE_LETTERS_FILE, []);
+    if (isset($store[$templateId]) && is_array($store[$templateId])) {
+        unset($store[$templateId]);
+        docgenWriteJson(DOCGEN_TEMPLATE_LETTERS_FILE, $store);
+    }
+}
+
+/**
+ * Strip executable and remote-fetching content. Hyperlinks stay clickable for
+ * email bodies (buttons are the point of a design); the print path keeps the
+ * stricter document rules that the PDF converter always used.
+ */
+function docgenNormalizeLetterHtml(string $html, bool $forPrint): string
+{
+    // Inbox preheaders are hidden inline; drop the block so the screen preview
+    // starts at the visible headline instead of a blank strip.
+    $html = preg_replace('#<div\b[^>]*\bclass\s*=\s*("[^"]*\bpreheader\b[^"]*"|\'[^\']*\bpreheader\b[^\']*\')[^>]*>.*?<\s*/\s*div\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(script|iframe|object|embed|form|applet|base)\b[^>]*>.*?<\s*/\s*\1\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(script|iframe|object|embed|form|applet|base)\b[^>]*/?>#isu', '', $html) ?? $html;
+    $html = preg_replace('/\s+on[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)/iu', '', $html) ?? $html;
+    // Images and other embedded content are never fetched from the network.
+    $html = preg_replace('/\s+(src|poster|background|data)\s*=\s*("|\')\s*(?:https?:|file:|data:|javascript:|\/\/)[^"\']*\2/iu', '', $html) ?? $html;
+    $html = preg_replace('/@import\s+(?:url\()?[^;]+;?/iu', '', $html) ?? $html;
+    $html = preg_replace('/url\(\s*("|\')?\s*(?:https?:|file:|data:|javascript:|\/\/)[^)]*\)/iu', 'none', $html) ?? $html;
+    if ($forPrint) {
+        // PDF documents never need remote navigation; email designs keep buttons.
+        $html = preg_replace('/\s+(href)\s*=\s*("|\')\s*(?:https?:|file:|data:|javascript:|\/\/)[^"\']*\2/iu', '', $html) ?? $html;
+        if (!preg_match('/@page\b/i', $html)) {
+            $css = '<style>@page{size:A4;margin:22mm 20mm}body{font-family:"Liberation Serif","Times New Roman",serif;font-size:12pt;line-height:1.45;color:#111}</style>';
+            $html = preg_match('/<head\b[^>]*>/i', $html)
+                ? (preg_replace('/<head\b[^>]*>/i', '$0' . $css, $html, 1) ?? $html)
+                : $css . $html;
+        }
+        if (!preg_match('/<html\b/i', $html)) {
+            $html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Документ</title></head><body>' . $html . '</body></html>';
+        } elseif (!preg_match('/<meta\s+charset=/i', $html)) {
+            $html = preg_replace('/<head\b[^>]*>/i', '$0<meta charset="utf-8">', $html, 1) ?? $html;
+        }
+    } else {
+        // Email links may point outside; local/script schemes are unsafe.
+        $html = preg_replace('/\s+(href)\s*=\s*("|\')\s*(?:file:|data:|javascript:)[^"\']*\2/iu', '', $html) ?? $html;
+    }
+    return $html;
+}
+
+/** Preview page for the design: email layout with links kept, no page rules. */
+function docgenLetterHtmlPreview(string $html): string
+{
+    $html = docgenNormalizeLetterHtml($html, false);
+    // A fragment opens in a browser tab too, so it needs its own charset.
+    if (stripos($html, '<meta charset') === false && preg_match('/<head\b[^>]*>/i', $html)) {
+        $html = preg_replace('/<head\b[^>]*>/i', '$0<meta charset="utf-8">', $html, 1) ?? $html;
+    } elseif (stripos($html, '<html') === false) {
+        $html = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>HTML-дизайн письма</title></head><body>' . $html . '</body></html>';
+    }
+    return $html;
+}
+
+/**
+ * Hand-written plain text becomes email markup: escaped text, {nl} and real
+ * line breaks, links clickable. URLs stop at braces and quotes so a following
+ * code such as {nl} or {Регион} is never swallowed into the link.
+ */
+function docgenLetterPlainToHtml(string $text): string
+{
+    $escaped = htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $escaped = preg_replace_callback(
+        '/(?<![">=(])(?:https?:\/\/|www\.)[^\s<>"\'{}]+/iu',
+        static function (array $match): string {
+            $url = rtrim($match[0], '.,;:!?)]');
+            $tail = substr($match[0], strlen($url));
+            return '<a href="' . $url . '">' . $url . '</a>' . $tail;
+        },
+        $escaped
+    ) ?? $escaped;
+    $escaped = str_ireplace('{nl}', '<br>', $escaped);
+    $escaped = str_replace(["\r\n", "\r"], "\n", $escaped);
+    return nl2br($escaped, false);
+}
+
+/**
+ * Parts of the outgoing letter. The text part is mandatory whenever a design
+ * is present: mail servers and clients must get multipart/alternative, not an
+ * HTML-only message. Errors are phrased for the operator, not for developers.
+ */
+function docgenLetterMailParts(array $item): array
+{
+    $text = trim((string) ($item['body'] ?? ''));
+    $html = trim((string) ($item['bodyHtml'] ?? ''));
+    if ($text === '' && $html === '') {
+        throw new RuntimeException('Письмо пустое: нет ни текстовой версии, ни HTML-дизайна.');
+    }
+    if ($html !== '' && $text === '') {
+        throw new RuntimeException('Нет текстовой версии письма. Письмо с HTML-дизайном отправляется как multipart/alternative, поэтому заполните «Текстовую версию» в карточке письма.');
+    }
+    return ['text' => $text, 'html' => $html];
+}
+
+/** Readable text from letter markup, used as the plain alternative. */
+function docgenLetterHtmlToText(string $html): string
+{
+    $html = preg_replace('#<div\b[^>]*\bclass\s*=\s*("[^"]*\bpreheader\b[^"]*"|\'[^\']*\bpreheader\b[^\']*\')[^>]*>.*?<\s*/\s*div\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*(style|head|title)\b[^>]*>.*?<\s*/\s*\1\s*>#isu', '', $html) ?? $html;
+    $html = preg_replace('#<\s*br\b[^>]*>#iu', "\n", $html) ?? $html;
+    $html = preg_replace('#<\s*/\s*(p|div|li|h[1-6]|tr|blockquote|td|th)\s*>#iu', "\n\n", $html) ?? $html;
+    $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = str_replace("\u{00A0}", ' ', $text);
+    $text = preg_replace('/[ \t]+/u', ' ', $text) ?? $text;
+    $text = preg_replace('/ *\n */u', "\n", $text) ?? $text;
+    $text = preg_replace('/\n{3,}/u', "\n\n", $text) ?? $text;
+    return trim($text);
+}
+
+/**
+ * Plain-text part of multipart/alternative. Order: the letter text, its own
+ * text variant, text derived from the design, and finally the common default.
+ */
+function docgenLetterTextAlternative(array $settings): string
+{
+    foreach (['bodyPattern', 'htmlTextPattern'] as $key) {
+        $value = trim((string) ($settings[$key] ?? ''));
+        if ($value !== '') {
+            return str_ireplace('{nl}', "\n", $value);
+        }
+    }
+    $derived = docgenLetterHtmlToText((string) ($settings['htmlPattern'] ?? ''));
+    if ($derived !== '') {
+        return $derived;
+    }
+    return trim((string) docgenLetterTemplateDefaults()['bodyPattern']);
+}
+
+/**
+ * Columns of the active book plus supported letter codes. Design validation
+ * uses them so {Регион} or {Фамилия И.О.} are recognised before generation.
+ */
+function docgenLetterKnownCodes(): array
+{
+    static $known = null;
+    if (is_array($known)) {
+        return $known;
+    }
+    $known = ['Наименование файла' => true, 'наименование файла' => true];
+    foreach (loadDataset()['records'] ?? [] as $record) {
+        if (is_array($record) && is_array($record['fields'] ?? null)) {
+            foreach (array_keys($record['fields']) as $field) {
+                $known[(string) $field] = true;
+            }
+            break;
+        }
+    }
+    foreach (docgenTableData()['columns'] ?? [] as $column) {
+        $known[(string) $column] = true;
+    }
+    return $known;
+}
+
+/**
+ * The design must reach the queue as a valid, self-contained email: unknown
+ * {codes} would otherwise be sent literally. Errors name the codes instead of
+ * guessing values. With $allowKnownCodes the book's own columns are accepted,
+ * so the design can be saved before records are picked.
+ */
+function docgenValidateLetterHtml(string $html, array $values, bool $allowKnownCodes = false): void
+{
+    if (trim($html) === '') {
+        throw new RuntimeException('HTML-дизайн письма пуст.');
+    }
+    if (strlen($html) > DOCGEN_LETTER_HTML_MAX_BYTES) {
+        throw new RuntimeException('HTML-дизайн письма больше 1 МБ.');
+    }
+    if (preg_match_all('/(?<!\{)\{([^{}:\n;]{1,120})\}(?!\})/u', $html, $matches)) {
+        $known = $allowKnownCodes ? docgenLetterKnownCodes() : [];
+        $unknown = [];
+        foreach (array_unique($matches[1]) as $field) {
+            $field = trim($field);
+            // Word style GUIDs and double-brace mail placeholders are not codes.
+            if ($field === '' || preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-/i', $field) === 1) {
+                continue;
+            }
+            if (!array_key_exists($field, $values) && !isset($known[$field])) {
+                $unknown[] = '{' . $field . '}';
+            }
+        }
+        if ($unknown) {
+            throw new RuntimeException('В HTML-дизайне письма остались незаполненные коды: ' . implode(', ', array_slice($unknown, 0, 8)) . '. Добавьте колонку в книгу или замените код текстом.');
+        }
+    }
+    if (docgenLetterHtmlToText($html) === '' && preg_match('/<img\b/i', $html) !== 1) {
+        throw new RuntimeException('В HTML-дизайне письма нет видимого текста — получатель увидит пустое письмо.');
+    }
+}
+
+/** Remaining {{UnsubscribeUrl}}-style placeholders of an external mail service. */
+function docgenLetterHtmlLeftoverPlaceholders(string $html): array
+{
+    if (!preg_match_all('/\{\{\s*([^{}\n]{1,80})\s*\}\}/u', $html, $matches)) {
+        return [];
+    }
+    return array_values(array_unique(array_map('trim', $matches[1])));
+}
+
+/**
+ * Save the letter layout: as this template's own copy (or the common defaults
+ * when only the sample/upload is selected). The HTML design is optional; when
+ * present it becomes the body and the text part is always kept for
+ * multipart/alternative.
+ */
 function docgenSaveLetterTemplate(): never
 {
     $fields = [
@@ -578,12 +1184,47 @@ function docgenSaveLetterTemplate(): never
         'ccPattern' => trim((string) ($_POST['ccPattern'] ?? '')),
         'subjectPattern' => trim((string) ($_POST['subjectPattern'] ?? '')),
         'bodyPattern' => (string) ($_POST['bodyPattern'] ?? ''),
+        'htmlPattern' => (string) ($_POST['htmlPattern'] ?? ''),
+        'htmlTextPattern' => (string) ($_POST['htmlTextPattern'] ?? ''),
     ];
-    $limits = ['filenamePattern' => 300, 'toPattern' => 1000, 'ccPattern' => 1000, 'subjectPattern' => 500, 'bodyPattern' => 20_000];
-    $labels = ['filenamePattern' => 'имя вложенного файла', 'toPattern' => 'Кому', 'ccPattern' => 'копия', 'subjectPattern' => 'тема письма', 'bodyPattern' => 'текст письма'];
+    $limits = ['filenamePattern' => 300, 'toPattern' => 1000, 'ccPattern' => 1000, 'subjectPattern' => 500, 'bodyPattern' => 20_000, 'htmlPattern' => DOCGEN_LETTER_HTML_MAX_BYTES, 'htmlTextPattern' => 20_000];
+    $labels = ['filenamePattern' => 'имя вложенного файла', 'toPattern' => 'Кому', 'ccPattern' => 'копия', 'subjectPattern' => 'тема письма', 'bodyPattern' => 'текст письма', 'htmlPattern' => 'HTML-дизайн письма', 'htmlTextPattern' => 'текстовая версия'];
     foreach ($limits as $key => $limit) {
         if (mb_strlen($fields[$key], 'UTF-8') > $limit) {
             sendJson(['ok' => false, 'error' => 'Слишком длинное поле: ' . $labels[$key] . '.'], 422);
+        }
+    }
+    if (trim($fields['bodyPattern']) === '' && trim($fields['htmlTextPattern']) === '' && trim($fields['htmlPattern']) === '') {
+        sendJson(['ok' => false, 'error' => 'Письмо не может быть пустым: заполните текст письма, текстовую версию или HTML-дизайн.'], 422);
+    }
+    if ($fields['subjectPattern'] === '') {
+        sendJson(['ok' => false, 'error' => 'Укажите тему письма.'], 422);
+    }
+    $notice = '';
+    if (trim($fields['htmlPattern']) !== '') {
+        try {
+            docgenValidateLetterHtml($fields['htmlPattern'], [], true);
+        } catch (Throwable $e) {
+            sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+        }
+        $leftover = docgenLetterHtmlLeftoverPlaceholders($fields['htmlPattern']);
+        if ($leftover) {
+            $notice = 'В дизайне остались подстановки рассылки {{' . implode('}}, {{', array_slice($leftover, 0, 4)) . '}}. Для SMTP-отправки замените их настоящей ссылкой или удалите.';
+        } elseif (trim($fields['bodyPattern']) === '' && trim($fields['htmlTextPattern']) === '') {
+            $notice = 'Текстовая версия не заполнена: для multipart/alternative она будет собрана из HTML. Проверьте её в карточке письма — письма без текстовой версии нельзя отправить автоматически.';
+        }
+    }
+    $templateId = trim((string) ($_POST['templateId'] ?? ''));
+    if ($templateId !== '') {
+        $known = false;
+        foreach (docgenUserTemplateIndex() as $template) {
+            if ($template['id'] === $templateId) {
+                $known = true;
+                break;
+            }
+        }
+        if (!$known) {
+            sendJson(['ok' => false, 'error' => 'Шаблон не найден. Обновите список и повторите сохранение.'], 404);
         }
     }
     $accountId = trim((string) ($_POST['smtpAccountId'] ?? ''));
@@ -594,13 +1235,20 @@ function docgenSaveLetterTemplate(): never
     if (!in_array($accountId, array_column($store['accounts'], 'id'), true)) {
         sendJson(['ok' => false, 'error' => 'Выберите существующий SMTP-ящик отправителя.'], 422);
     }
-    $settings = array_merge(docgenLetterTemplateDefaults(), $fields, ['smtpAccountId' => $accountId]);
     try {
-        docgenWriteJson(DOCGEN_LETTER_TEMPLATE_FILE, $settings);
+        docgenSaveTemplateLetterSettings($templateId, $fields, $accountId);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
     }
-    sendJson(['ok' => true, 'settings' => $settings, 'accountId' => $accountId]);
+    $settings = docgenTemplateLetterSettings($templateId);
+    sendJson([
+        'ok' => true,
+        'settings' => $settings,
+        'accountId' => $settings['smtpAccountId'],
+        'templateId' => $templateId,
+        'own' => $settings['own'],
+        'notice' => $notice,
+    ]);
 }
 
 function docgenDadataSecret(): array
@@ -821,6 +1469,7 @@ function docgenBackupFileMap(bool $includeSecrets): array
     }
     $index = is_file(DOCGEN_TEMPLATE_INDEX) ? docgenReadJson(DOCGEN_TEMPLATE_INDEX, []) : [];
     $files['templates/index.json'] = ['path' => DOCGEN_TEMPLATE_INDEX, 'label' => 'Список шаблонов', 'secret' => false];
+    $files['templates/letters.json'] = ['path' => DOCGEN_TEMPLATE_LETTERS_FILE, 'label' => 'Письма шаблонов (HTML-дизайн)', 'secret' => false];
     foreach (is_array($index) ? $index : [] as $item) {
         if (!is_array($item)) {
             continue;
@@ -1656,13 +2305,44 @@ function docgenBatchItems(string $batchId): array
     return array_values(array_filter($items, static fn(array $item): bool => ($item['batchId'] ?? '') === $batchId));
 }
 
+/** Mailbox limit: 1–6 letters per minute (Mail.ru blocks faster streams). */
+function docgenClampPerMinute(int $value): int
+{
+    return max(1, min(6, $value));
+}
+
+/** Daily cap per mailbox: 0 means "no local cap", 1–300 otherwise. */
+function docgenClampDailyCap(int $value): int
+{
+    return max(0, min(300, $value));
+}
+
+/**
+ * Mailing settings. Besides the per-minute limit this keeps the "human"
+ * shaping that makes a stream of letters look like normal operator work:
+ * a daily cap, a sending window, jitter between letters and a pause after
+ * the provider's rate-limit reply (Mail.ru answers 421 4.7.0).
+ */
 function docgenMailingSettings(): array
 {
     $settings = docgenReadJson(DOCGEN_MAILING_SETTINGS_FILE, []);
     $limits = is_array($settings['accountLimits'] ?? null) ? $settings['accountLimits'] : [];
+    $start = (string) ($settings['windowStart'] ?? '09:00');
+    $end = (string) ($settings['windowEnd'] ?? '18:00');
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $start) !== 1) {
+        $start = '09:00';
+    }
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $end) !== 1) {
+        $end = '18:00';
+    }
     return [
-        'lettersPerMinute' => max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1))),
+        'lettersPerMinute' => docgenClampPerMinute((int) ($settings['lettersPerMinute'] ?? 1)),
         'accountLimits' => $limits,
+        'dailyCap' => docgenClampDailyCap((int) ($settings['dailyCap'] ?? 0)),
+        'windowStart' => $start,
+        'windowEnd' => $end,
+        'jitterSeconds' => max(0, min(300, (int) ($settings['jitterSeconds'] ?? 20))),
+        'weekdaysOnly' => !empty($settings['weekdaysOnly']),
     ];
 }
 
@@ -1673,13 +2353,10 @@ function docgenCronAccountLimit(string $accountId, ?array $settings = null): int
     if (array_key_exists($accountId, $limits)) {
         $raw = (string) $limits[$accountId];
         if (ctype_digit($raw)) {
-            $limit = (int) $raw;
-            if ($limit >= 1 && $limit <= 60) {
-                return $limit;
-            }
+            return docgenClampPerMinute((int) $raw);
         }
     }
-    return max(1, min(60, (int) ($settings['lettersPerMinute'] ?? 1)));
+    return docgenClampPerMinute((int) ($settings['lettersPerMinute'] ?? 1));
 }
 
 function docgenMailingAccounts(): array
@@ -1691,6 +2368,10 @@ function docgenMailingAccounts(): array
         $accounts[] = array_merge($account, [
             'limit' => docgenCronAccountLimit($id, $settings),
             'limitCustom' => array_key_exists($id, (array) ($settings['accountLimits'] ?? [])),
+            // Quota visible next to the limit so the operator sees how much of
+            // today's allowance this mailbox has already used.
+            'dailyCap' => (int) ($settings['dailyCap'] ?? 0),
+            'sentToday' => docgenCronSentToday($id),
         ]);
     }
     return $accounts;
@@ -1700,9 +2381,29 @@ function docgenSaveMailingSettings(): never
 {
     $raw = (string) ($_POST['lettersPerMinute'] ?? '1');
     $perMinute = (int) $raw;
-    if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 60) {
-        sendJson(['ok' => false, 'error' => 'Укажите от 1 до 60 писем в минуту.'], 422);
+    // Mail.ru counts a stream faster than ~1 letter per minute as mass mailing;
+    // 6 is a hard ceiling, the UI explains the safe values.
+    if (!ctype_digit($raw) || $perMinute < 1 || $perMinute > 6) {
+        sendJson(['ok' => false, 'error' => 'Укажите от 1 до 6 писем в минуту: почтовые сервисы считают быстрый поток массовой рассылкой.'], 422);
     }
+    $dailyRaw = (string) ($_POST['dailyCap'] ?? '0');
+    if (!ctype_digit($dailyRaw) || (int) $dailyRaw > 300) {
+        sendJson(['ok' => false, 'error' => 'Дневной лимит: 0 (без локального ограничения) или от 1 до 300.'], 422);
+    }
+    $dailyCap = (int) $dailyRaw;
+    $windowStart = trim((string) ($_POST['windowStart'] ?? '09:00'));
+    $windowEnd = trim((string) ($_POST['windowEnd'] ?? '18:00'));
+    if (preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $windowStart) !== 1 || preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $windowEnd) !== 1) {
+        sendJson(['ok' => false, 'error' => 'Окно отправки указывается как ЧЧ:ММ, например 09:00 и 18:00.'], 422);
+    }
+    if (strtotime('today ' . $windowEnd) <= strtotime('today ' . $windowStart)) {
+        sendJson(['ok' => false, 'error' => 'Конец окна отправки должен быть позже начала (в пределах одного дня).'], 422);
+    }
+    $jitterRaw = (string) ($_POST['jitterSeconds'] ?? '20');
+    if (!ctype_digit($jitterRaw) || (int) $jitterRaw > 300) {
+        sendJson(['ok' => false, 'error' => 'Случайная задержка между письмами: от 0 до 300 секунд.'], 422);
+    }
+    $jitter = (int) $jitterRaw;
     $existingLimits = docgenMailingSettings()['accountLimits'];
     $limits = $existingLimits;
     if (array_key_exists('accountLimits', $_POST)) {
@@ -1719,13 +2420,21 @@ function docgenSaveMailingSettings(): never
             }
             $text = (string) $value;
             $limit = (int) $text;
-            if (!ctype_digit($text) || $limit < 1 || $limit > 60) {
-                sendJson(['ok' => false, 'error' => 'Для каждого ящика укажите от 1 до 60 писем в минуту.'], 422);
+            if (!ctype_digit($text) || $limit < 1 || $limit > 6) {
+                sendJson(['ok' => false, 'error' => 'Для каждого ящика укажите от 1 до 6 писем в минуту.'], 422);
             }
             $limits[$accountId] = $limit;
         }
     }
-    $settings = ['lettersPerMinute' => $perMinute, 'accountLimits' => $limits];
+    $settings = [
+        'lettersPerMinute' => $perMinute,
+        'accountLimits' => $limits,
+        'dailyCap' => $dailyCap,
+        'windowStart' => $windowStart,
+        'windowEnd' => $windowEnd,
+        'jitterSeconds' => $jitter,
+        'weekdaysOnly' => !empty($_POST['weekdaysOnly']),
+    ];
     try {
         docgenWriteJson(DOCGEN_MAILING_SETTINGS_FILE, $settings);
     } catch (Throwable $e) {
@@ -1734,10 +2443,34 @@ function docgenSaveMailingSettings(): never
     sendJson(['ok' => true, 'settings' => $settings, 'accounts' => docgenMailingAccounts()]);
 }
 
+/**
+ * Назначить ящик пачке и всем её письмам. Вызывается только на этапе проверки
+ * пачки: до этого очередь существует без отправителя и его можно выбрать
+ * спокойно, зная, сколько писем и кому уйдёт.
+ */
+function docgenAssignBatchAccount(string $batchId, string $accountId): array
+{
+    $store = docgenSmtpAccountStore();
+    if (!in_array($accountId, array_column($store['accounts'], 'id'), true)) {
+        throw new RuntimeException('Выберите SMTP-ящик из списка: он определяет отправителя писем.');
+    }
+    $account = docgenSmtpAccount($accountId);
+    foreach (docgenBatchItems($batchId) as $item) {
+        if (($item['status'] ?? '') === 'sent') {
+            continue;
+        }
+        $item['smtpAccountId'] = (string) $account['id'];
+        $item['smtpAccountLabel'] = (string) ($account['label'] ?? '');
+        docgenSaveQueueItem($item);
+    }
+    return $account;
+}
+
 function docgenReviewBatch(): never
 {
     $batchId = trim((string) ($_POST['batch_id'] ?? ''));
     $mode = (string) ($_POST['mode'] ?? '');
+    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
     if (!in_array($mode, ['manual', 'auto'], true)) {
         sendJson(['ok' => false, 'error' => 'Выберите режим очереди.'], 422);
     }
@@ -1752,6 +2485,13 @@ function docgenReviewBatch(): never
     if (!$items) {
         sendJson(['ok' => false, 'error' => 'В пачке нет писем.'], 422);
     }
+    // Очередь уже сформирована — теперь выбираем ящик, из которого пойдут письма.
+    try {
+        $account = docgenAssignBatchAccount($batchId, $accountId);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    $items = docgenBatchItems($batchId);
     if ($mode === 'auto') {
         $broken = 0;
         foreach ($items as $item) {
@@ -1765,11 +2505,22 @@ function docgenReviewBatch(): never
         if ($broken > 0) {
             sendJson(['ok' => false, 'error' => 'В ' . $broken . ' письмах нет получателя или PDF. Исправьте их перед автоотправкой.'], 422);
         }
+        $missingText = 0;
+        foreach ($items as $item) {
+            if (trim((string) ($item['bodyHtml'] ?? '')) !== '' && trim((string) ($item['body'] ?? '')) === '') {
+                $missingText++;
+            }
+        }
+        if ($missingText > 0) {
+            sendJson(['ok' => false, 'error' => 'В ' . $missingText . ' письмах с HTML-дизайном нет текстовой версии. Без неё письмо нельзя отправить как multipart/alternative — заполните текст в карточке письма.'], 422);
+        }
     }
     $batch['status'] = $mode === 'auto' ? 'scheduled' : 'manual';
     $batch['mode'] = $mode;
     $batch['reviewedAt'] = date(DATE_ATOM);
     $batch['updatedAt'] = date(DATE_ATOM);
+    $batch['smtpAccountId'] = (string) $account['id'];
+    $batch['smtpAccountLabel'] = (string) ($account['label'] ?? '');
     foreach ($items as $item) {
         if (($item['status'] ?? '') !== 'queued') {
             continue;
@@ -1785,7 +2536,46 @@ function docgenReviewBatch(): never
     } else {
         docgenSaveLegacyBatchState($batch);
     }
-    sendJson(['ok' => true, 'batch' => $batch, 'itemCount' => count($items)]);
+    sendJson([
+        'ok' => true,
+        'batch' => $batch,
+        'itemCount' => count($items),
+        'account' => ['id' => (string) $account['id'], 'label' => (string) ($account['label'] ?? ''), 'fromEmail' => (string) ($account['fromEmail'] ?? '')],
+    ]);
+}
+
+/**
+ * Сменить ящик у пачки, которая ещё не начала отправляться. Нужно, когда
+ * оператор поставил пачку в очередь, а потом передумал насчёт отправителя.
+ */
+function docgenChangeBatchAccount(): never
+{
+    $batchId = trim((string) ($_POST['batch_id'] ?? ''));
+    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
+    $batch = docgenBatchMeta($batchId);
+    if (!$batch) {
+        sendJson(['ok' => false, 'error' => 'Пачка не найдена.'], 404);
+    }
+    if (!in_array(($batch['status'] ?? ''), ['review', 'manual', 'scheduled', 'paused'], true)) {
+        sendJson(['ok' => false, 'error' => 'Ящик можно менять только до начала отправки пачки.'], 409);
+    }
+    try {
+        $account = docgenAssignBatchAccount($batchId, $accountId);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    if ($batchId !== 'legacy') {
+        $batch['smtpAccountId'] = (string) $account['id'];
+        $batch['smtpAccountLabel'] = (string) ($account['label'] ?? '');
+        $batch['updatedAt'] = date(DATE_ATOM);
+        docgenSaveBatch($batch);
+    }
+    sendJson([
+        'ok' => true,
+        'batch' => $batch,
+        'account' => ['id' => (string) $account['id'], 'label' => (string) ($account['label'] ?? ''), 'fromEmail' => (string) ($account['fromEmail'] ?? '')],
+        'message' => 'Письма пачки будут отправлены из ящика «' . (string) ($account['label'] ?? $account['id']) . '».',
+    ]);
 }
 
 function docgenCancelBatch(): never
@@ -2017,12 +2807,30 @@ function docgenQueueFile(): never
     if (!preg_match('/^[a-f0-9]{32}$/', $id) || !in_array($format, ['pdf', 'docx'], true)) {
         sendJson(['ok' => false, 'error' => 'Параметры файла очереди некорректны.'], 400);
     }
-    $meta = docgenReadQueueItem($id);
+    try {
+        $meta = docgenReadQueueItem($id);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 404);
+    }
+    if ($format === 'pdf' && (string) ($_GET['design'] ?? '') === '1') {
+        // The letter design preview is an HTML page, not the PDF attachment:
+        // it must open even when this letter has no PDF (for example, when the
+        // document conversion failed but the design is being checked).
+        if (trim((string) ($meta['bodyHtml'] ?? '')) === '') {
+            sendJson(['ok' => false, 'error' => 'У этого письма нет HTML-дизайна.'], 404);
+        }
+        header('Content-Type: text/html; charset=utf-8');
+        header('Content-Disposition: inline; filename="design.html"');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        echo docgenLetterHtmlPreview((string) $meta['bodyHtml']);
+        exit;
+    }
     $path = docgenQueuePath($id) . '/document.' . $format;
     if (!is_file($path)) {
         sendJson(['ok' => false, 'error' => 'Файл документа не найден.'], 404);
     }
-    $inline = $format === 'pdf' && (string) ($_GET['inline'] ?? '') === '1';
+    $inline = (string) ($_GET['inline'] ?? '') === '1';
     $mime = $format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     $name = safeFilename((string) ($meta['filename'] ?? 'document')) . '.' . $format;
     header('Content-Type: ' . $mime);
@@ -2116,8 +2924,21 @@ function docgenConvertToPdf(array $inputPaths, string $outputDir, string $profil
 
 function docgenBuildDocumentSource(array $template, array $templateInfo, array $values, string $sourcePath): void
 {
+    // Отключённые оператором переменные не подставляются: код вырезается.
+    // Значения по ним уже отфильтрованы в docgenGenerate().
+    $excluded = (array) ($templateInfo['excluded'] ?? []);
     if ($template['type'] === 'docx') {
-        $processor = new \PhpOffice\PhpWord\TemplateProcessor((string) $template['path']);
+        if ($excluded !== []) {
+            // Правку делаем на копии: исходный шаблон остаётся нетронутым,
+            // а мусор вокруг кода (скобки, запятые) убираем до подстановки.
+            if (!copy((string) $template['path'], $sourcePath)) {
+                throw new RuntimeException('Не удалось скопировать шаблон для правки.');
+            }
+            docgenStripExcludedFromDocx($sourcePath, $excluded);
+            $processor = new \PhpOffice\PhpWord\TemplateProcessor($sourcePath);
+        } else {
+            $processor = new \PhpOffice\PhpWord\TemplateProcessor((string) $template['path']);
+        }
         $syntax = (string) ($templateInfo['syntax'] ?? 'phpword');
         if ($syntax === 'mixed') {
             throw new RuntimeException('В одном DOCX смешаны переменные {поле} и ${поле}. Оставьте один формат.');
@@ -2125,6 +2946,9 @@ function docgenBuildDocumentSource(array $template, array $templateInfo, array $
         $macroOpen = $syntax === 'filldocuments' ? '{' : '${';
         $processor->setMacroChars($macroOpen, '}');
         foreach ($values as $key => $value) {
+            if (in_array((string) $key, $excluded, true)) {
+                continue;
+            }
             $processor->setValue((string) $key, (string) $value);
         }
         $processor->saveAs($sourcePath);
@@ -2132,6 +2956,9 @@ function docgenBuildDocumentSource(array $template, array $templateInfo, array $
         return;
     }
     $html = docgenSanitizeHtml((string) ($template['content'] ?? file_get_contents((string) $template['path'])));
+    if ($excluded !== []) {
+        $html = docgenStripExcludedCodes($html, $excluded);
+    }
     $html = docgenReplaceCodes($html, $values, true);
     if (file_put_contents($sourcePath, $html, LOCK_EX) === false) {
         throw new RuntimeException('Не удалось записать HTML-документ.');
@@ -2199,6 +3026,14 @@ function docgenGenerate(): never
     if (empty($templateInfo['fields'])) {
         sendJson(['ok' => false, 'error' => 'В шаблоне не найдены коды полей.'], 422);
     }
+    // Отключённые переменные не требуют данных: их коды вырезаются из документа.
+    $excluded = docgenExcludedFromRequest($template);
+    $excluded = array_values(array_intersect($excluded, (array) $templateInfo['fields']));
+    $requiredFields = array_values(array_diff((array) $templateInfo['fields'], $excluded));
+    $templateInfo['excluded'] = $excluded;
+    if ($requiredFields === [] && $excluded !== []) {
+        sendJson(['ok' => false, 'error' => 'Все переменные шаблона отключены. Оставьте хотя бы одну или загрузите другой DOCX.'], 422);
+    }
     $overrides = json_decode((string) ($_POST['overrides'] ?? '{}'), true);
     if (!is_array($overrides)) {
         $overrides = [];
@@ -2238,7 +3073,7 @@ function docgenGenerate(): never
         $progress('documents', $processed, 'Карточка ' . $processed . '/' . $totalSteps . ' — подготовка документа', $cardLabel);
         $values = [];
         $missing = [];
-        foreach ($templateInfo['fields'] as $fieldName) {
+        foreach ($requiredFields as $fieldName) {
             $value = $fields[$fieldName] ?? '';
             if (!is_scalar($value) || trim((string) $value) === '') {
                 $missing[] = $fieldName;
@@ -2283,10 +3118,34 @@ function docgenGenerate(): never
         }
     }
 
-    $accountId = trim((string) ($_POST['smtp_account_id'] ?? ''));
-    $store = docgenSmtpAccountStore();
-    $settings = $accountId !== '' ? docgenSmtpAccount($accountId) : docgenSmtpAccount($store['defaultId']);
-    $letter = docgenLetterTemplate();
+    // Ящик здесь не выбирается: очередь формируется без отправителя, а ящик
+    // оператор назначает на этапе проверки пачки (docgenReviewBatch).
+    // One template = document + its own letter layout (HTML design, recipients,
+    // name, subject, text). Templates without a saved copy use common defaults.
+    $letterTemplateId = (string) ($template['id'] ?? '');
+    if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
+        $letterTemplateId = '';
+    }
+    $letter = docgenTemplateLetterSettings($letterTemplateId);
+    // A one-off DOCX has no saved template yet: the design typed in this window
+    // must still reach its letters instead of being silently replaced.
+    if ($letterTemplateId === '' && (string) ($template['id'] ?? '') === '__upload__') {
+        $draft = json_decode((string) ($_POST['letterDraft'] ?? ''), true);
+        if (is_array($draft)) {
+            $fields = [];
+            foreach (['filenamePattern', 'toPattern', 'ccPattern', 'subjectPattern', 'bodyPattern', 'htmlPattern', 'htmlTextPattern'] as $key) {
+                if (isset($draft[$key]) && is_scalar($draft[$key])) {
+                    $fields[$key] = (string) $draft[$key];
+                }
+            }
+            if ($fields) {
+                $letter = array_merge($letter, $fields, ['own' => false]);
+                if (trim((string) ($letter['subjectPattern'] ?? '')) === '') {
+                    $letter['subjectPattern'] = (string) docgenLetterTemplateDefaults()['subjectPattern'];
+                }
+            }
+        }
+    }
     $batchId = bin2hex(random_bytes(16));
     docgenEnsureDir(docgenBatchPath($batchId));
     $sourceNames = [];
@@ -2350,7 +3209,24 @@ function docgenGenerate(): never
                 $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
                 $cc = array_values(array_filter($cc, static fn(string $email): bool => !isset($toKeys[mb_strtolower($email, 'UTF-8')])));
                 $subject = docgenReplaceCodes((string) $letter['subjectPattern'], $emailValues);
-                $body = docgenReplaceCodes((string) $letter['bodyPattern'], $emailValues);
+                // Bodies for multipart/alternative: plain text first, then the
+                // HTML design (when set) as the rich alternative.
+                $body = docgenReplaceCodes(docgenLetterTextAlternative($letter), $emailValues);
+                $bodyHtml = '';
+                if (trim((string) ($letter['htmlPattern'] ?? '')) !== '') {
+                    $bodyHtml = docgenReplaceCodes((string) $letter['htmlPattern'], $emailValues);
+                    docgenValidateLetterHtml($bodyHtml, $emailValues);
+                    if (trim($body) === '') {
+                        $body = trim(docgenLetterHtmlToText($bodyHtml));
+                    }
+                }
+                if (trim($body) === '' && $bodyHtml === '') {
+                    throw new RuntimeException('Письмо пустое: заполните текст письма или HTML-дизайн.');
+                }
+                // A generated-only text part still works, but the operator must see it.
+                $htmlFallback = $bodyHtml !== ''
+                    && trim((string) ($letter['bodyPattern'] ?? '')) === ''
+                    && trim((string) ($letter['htmlTextPattern'] ?? '')) === '';
                 $meta = [
                     'id' => $queueId,
                     'batchId' => $batchId,
@@ -2359,8 +3235,8 @@ function docgenGenerate(): never
                     'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
                     'position' => (string) ($fields['Должность'] ?? $fields['Должность руководителя'] ?? ''),
                     'templateName' => (string) $template['name'],
-                    'smtpAccountId' => (string) $settings['id'],
-                    'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
+                    'smtpAccountId' => '',
+                    'smtpAccountLabel' => '',
                     'filename' => $baseName,
                     'to' => implode('; ', $to),
                     'cc' => implode('; ', $cc),
@@ -2368,6 +3244,10 @@ function docgenGenerate(): never
                     'sourceAdditionalEmails' => (string) ($fields['Доп./старые email'] ?? ''),
                     'subject' => trim(preg_replace('/[\r\n]+/u', ' ', $subject) ?? $subject),
                     'body' => $body,
+                    'bodyHtml' => $bodyHtml,
+                    'htmlFallback' => $htmlFallback,
+                    'templateId' => (string) ($template['id'] ?? ''),
+                    'letterTemplateId' => $letterTemplateId,
                     'hasDocx' => $hasDocx,
                     'status' => 'queued',
                     'lastError' => count($to) ? '' : 'В исходной записи не найден корректный основной email. Заполните получателя перед отправкой.',
@@ -2431,6 +3311,19 @@ function docgenGenerate(): never
             $errors[] = ['id' => '', 'region' => '', 'reason' => $e->getMessage()];
         }
     }
+    // Multipart/alternative: the text part is mandatory, so a generated-only
+    // fallback must be visible while the batch is reviewed.
+    $htmlFallbackCount = 0;
+    $htmlLettersCount = 0;
+    foreach (docgenQueueList() as $queuedLetter) {
+        if ((string) ($queuedLetter['batchId'] ?? '') !== $batchId || trim((string) ($queuedLetter['bodyHtml'] ?? '')) === '') {
+            continue;
+        }
+        $htmlLettersCount++;
+        if (!empty($queuedLetter['htmlFallback'])) {
+            $htmlFallbackCount++;
+        }
+    }
     cleanupTree($jobDir);
     $progress('done', $totalSteps, 'Готово: ' . $queueCreated . ' писем в очереди, ошибок/пропусков ' . count($errors) . '.');
     if ($progressToken !== '') {
@@ -2446,8 +3339,8 @@ function docgenGenerate(): never
         'priority' => docgenNextBatchPriority(),
         'createdAt' => date(DATE_ATOM),
         'reviewedAt' => null,
-        'smtpAccountId' => (string) ($settings['id'] ?? ''),
-        'smtpAccountLabel' => (string) ($settings['label'] ?? ''),
+        'smtpAccountId' => '',
+        'smtpAccountLabel' => '',
         'sentCount' => 0,
         'failedCount' => 0,
         'lastError' => '',
@@ -2461,6 +3354,8 @@ function docgenGenerate(): never
         'documents' => $downloadedDocuments,
         'skipped' => count($errors),
         'details' => array_slice(array_map(static fn(array $item): string => ($item['region'] !== '' ? $item['region'] . ': ' : '') . ($item['id'] ?? '') . ' — ' . $item['reason'], $errors), 0, 12),
+        'htmlLetters' => $htmlLettersCount,
+        'htmlTextFallback' => $htmlFallbackCount,
         'queueUrl' => '#emailQueue',
     ]);
 }
@@ -2558,6 +3453,123 @@ function docgenResolveTemplateFromId(string $id): array
     return docgenResolveTemplate();
 }
 
+/** Rename a saved template without touching its file or its letter. */
+function docgenRenameTemplate(): never
+{
+    $id = trim((string) ($_POST['id'] ?? ''));
+    $name = trim((string) ($_POST['name'] ?? ''));
+    if (mb_strlen($name, 'UTF-8') > 180) {
+        sendJson(['ok' => false, 'error' => 'Название шаблона — не более 180 символов.'], 422);
+    }
+    if ($name === '') {
+        sendJson(['ok' => false, 'error' => 'Укажите название шаблона.'], 422);
+    }
+    $found = null;
+    foreach (docgenUserTemplateIndex() as $item) {
+        if ($item['id'] === $id) {
+            $found = $item;
+            break;
+        }
+    }
+    if (!$found) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
+    }
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    $renamed = false;
+    foreach ($raw as $index => $item) {
+        if (is_array($item) && (string) ($item['id'] ?? '') === $id) {
+            $raw[$index]['name'] = $name;
+            $raw[$index]['updatedAt'] = date(DATE_ATOM);
+            $renamed = true;
+        }
+    }
+    if (!$renamed) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден в списке.'], 404);
+    }
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => 'Не удалось переименовать шаблон: ' . $e->getMessage()], 500);
+    }
+    sendJson(['ok' => true, 'id' => $id, 'name' => $name, 'templates' => docgenTemplateList()]);
+}
+
+/** «Сохранить как…»: a copy of the document under a new name, letter included. */
+function docgenCopyTemplate(): never
+{
+    $sourceId = trim((string) ($_POST['source_id'] ?? ''));
+    $name = trim((string) ($_POST['name'] ?? ''));
+    if ($name === '' || mb_strlen($name, 'UTF-8') > 180) {
+        sendJson(['ok' => false, 'error' => 'Укажите название копии (не более 180 символов).'], 422);
+    }
+    if ($sourceId === 'sample-docx') {
+        // The built-in sample is a normal DOCX file: copy it like any other.
+        $source = ['id' => 'sample-docx', 'name' => 'Письмо-пример.docx', 'type' => 'docx', 'path' => SAMPLE_TEMPLATE];
+    } else {
+        $source = null;
+        foreach (docgenUserTemplateIndex() as $item) {
+            if ($item['id'] === $sourceId) {
+                $source = $item;
+                break;
+            }
+        }
+        if (!$source) {
+            sendJson(['ok' => false, 'error' => 'Исходный шаблон не найден. Обновите список.'], 404);
+        }
+    }
+    docgenEnsureDir(DOCGEN_TEMPLATES_DIR);
+    $id = bin2hex(random_bytes(16));
+    $extension = $source['type'] === 'docx' ? 'docx' : 'html';
+    $path = DOCGEN_TEMPLATES_DIR . '/' . $id . '.' . $extension;
+    try {
+        if ($source['type'] === 'docx') {
+            if (!copy((string) $source['path'], $path)) {
+                sendJson(['ok' => false, 'error' => 'Не удалось скопировать DOCX-файл шаблона.'], 500);
+            }
+            validateDocxPath($path);
+        } else {
+            $content = (string) file_get_contents((string) $source['path']);
+            if (file_put_contents($path, $content, LOCK_EX) === false) {
+                sendJson(['ok' => false, 'error' => 'Не удалось скопировать HTML-шаблон.'], 500);
+            }
+            @chmod($path, 0600);
+        }
+    } catch (Throwable $e) {
+        @unlink($path);
+        sendJson(['ok' => false, 'error' => 'Копия не создана: ' . $e->getMessage()], 422);
+    }
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    $raw[] = [
+        'id' => $id,
+        'name' => $name,
+        'type' => $source['type'],
+        'createdAt' => date(DATE_ATOM),
+        'updatedAt' => date(DATE_ATOM),
+    ];
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+        $letterCopied = false;
+        if ($sourceId !== 'sample-docx') {
+            $letterCopied = docgenCopyTemplateLetterSettings($sourceId, $id);
+        }
+        $info = docgenScanTemplate(docgenResolveTemplateFromId($id));
+    } catch (Throwable $e) {
+        @unlink($path);
+        sendJson(['ok' => false, 'error' => 'Копия не создана: ' . $e->getMessage()], 500);
+    }
+    $notice = $letterCopied
+        ? 'Письмо и HTML-дизайн скопированы вместе с шаблоном.'
+        : 'У копии общие настройки письма: сохраните их, когда будете готовы.';
+    sendJson([
+        'ok' => true,
+        'template' => ['id' => $id, 'name' => $name, 'type' => $source['type']],
+        'templates' => docgenTemplateList(),
+        'info' => $info,
+        'letterCopied' => $letterCopied,
+        'notice' => $notice,
+    ]);
+}
+
 function docgenDeleteTemplate(): never
 {
     $id = trim((string) ($_POST['id'] ?? ''));
@@ -2573,10 +3585,81 @@ function docgenDeleteTemplate(): never
         sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
     }
     @unlink($found['path']);
+    try {
+        docgenCleanupTemplateLetters($id);
+    } catch (Throwable $e) {
+        // A stale letter config is harmless; the template itself is gone.
+    }
     $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
     $raw = array_values(array_filter($raw, static fn($item): bool => !is_array($item) || (string) ($item['id'] ?? '') !== $id));
     docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
     sendJson(['ok' => true, 'templates' => docgenTemplateList()]);
+}
+
+/**
+ * Replace the file of a saved DOCX template. The template id, its name and its
+ * letter (design included) stay untouched; the new file must still be a DOCX.
+ */
+function docgenReplaceTemplateFile(): never
+{
+    $id = trim((string) ($_POST['id'] ?? ''));
+    $found = null;
+    foreach (docgenUserTemplateIndex() as $item) {
+        if ($item['id'] === $id) {
+            $found = $item;
+            break;
+        }
+    }
+    if (!$found) {
+        sendJson(['ok' => false, 'error' => 'Сохранённый шаблон не найден.'], 404);
+    }
+    if ($found['type'] !== 'docx') {
+        sendJson(['ok' => false, 'error' => 'Для HTML-шаблона используйте HTML-редактор.'], 422);
+    }
+    try {
+        $uploaded = uploadedTemplatePath();
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
+    }
+    if ($uploaded === null) {
+        sendJson(['ok' => false, 'error' => 'Выберите новый DOCX-файл.'], 422);
+    }
+    $backup = $found['path'] . '.bak';
+    try {
+        if (!copy($found['path'], $backup)) {
+            sendJson(['ok' => false, 'error' => 'Не удалось сохранить копию текущего файла перед заменой.'], 500);
+        }
+        if (!copy($uploaded, $found['path'])) {
+            sendJson(['ok' => false, 'error' => 'Не удалось заменить DOCX-файл шаблона.'], 500);
+        }
+        @chmod($found['path'], 0600);
+        validateDocxPath($found['path']);
+    } catch (Throwable $e) {
+        if (is_file($backup)) {
+            @copy($backup, $found['path']);
+        }
+        @unlink($backup);
+        sendJson(['ok' => false, 'error' => 'Файл не заменён: ' . $e->getMessage()], 422);
+    }
+    @unlink($backup);
+    $raw = docgenReadJson(DOCGEN_TEMPLATE_INDEX, []);
+    foreach ($raw as $index => $item) {
+        if (is_array($item) && (string) ($item['id'] ?? '') === $id) {
+            $raw[$index]['updatedAt'] = date(DATE_ATOM);
+        }
+    }
+    try {
+        docgenWriteJson(DOCGEN_TEMPLATE_INDEX, $raw);
+        $info = docgenScanTemplate(docgenResolveTemplateFromId($id));
+    } catch (Throwable $e) {
+        sendJson(['ok' => false, 'error' => 'Файл заменён, но шаблон не перечитан: ' . $e->getMessage()], 500);
+    }
+    sendJson([
+        'ok' => true,
+        'templates' => docgenTemplateList(),
+        'info' => $info,
+        'notice' => 'DOCX-файл заменён. Письмо и HTML-дизайн этого шаблона сохранены.',
+    ]);
 }
 
 function docgenTemplateContent(): never
@@ -2605,6 +3688,9 @@ function docgenAnalyze(): never
         $sourceKey = (string) ($_POST['source_key'] ?? '');
         $info['analysis'] = buildFieldAnalysis($info, $dataset['records'] ?? [], $sourceKey);
         $info['ok'] = true;
+        $info['templateName'] = (string) ($template['name'] ?? '');
+        // Раздел 3: все переменные шаблона и сохранённые отметки об отключении.
+        $info['variables'] = docgenTemplateVariablePayload($info, $template);
         sendJson($info);
     } catch (Throwable $e) {
         sendJson(['ok' => false, 'error' => $e->getMessage()], 422);
@@ -2804,6 +3890,11 @@ function docgenBuildMailer(?array $override = null, ?string $overridePassword = 
             $nonce = md5(uniqid('docgen', true));
         }
         $mailer->MessageID = '<' . $nonce . '@' . $fromDomain . '>';
+        // HELO/EHLO must be a real FQDN that resolves to this server's IP.
+        // Without it PHPMailer sends the container hostname ("docgen"), which
+        // SpamAssassin flags as SPF_HELO_NONE and some receivers reject.
+        $mailer->Helo = $fromDomain;
+        $mailer->Hostname = $fromDomain;
     }
     $mailer->isSMTP();
     $mailer->Host = $host;
@@ -2871,6 +3962,469 @@ function docgenSmtpSettingsFromRequest(): array
     ], $password];
 }
 
+/**
+ * Прятать пароль в протоколе SMTP: PHPMailer скрывает только штатную
+ * авторизацию, а сам сервер может вернуть строку с логином.
+ */
+function docgenSmtpMaskSecrets(string $text, string $password, string $username = ''): string
+{
+    if ($password !== '' && strlen($password) >= 3) {
+        $text = str_replace([$password, base64_encode($password)], '[пароль скрыт]', $text);
+    }
+    // base64 от «логин\0логин\0пароль» и от пароля в разных кодировках AUTH.
+    if ($username !== '' && $password !== '') {
+        $text = str_replace(base64_encode("\0" . $username . "\0" . $password), '[пароль скрыт]', $text);
+        $text = str_replace(base64_encode($username . "\0" . $username . "\0" . $password), '[пароль скрыт]', $text);
+    }
+    return $text;
+}
+
+/**
+ * Сетевой слой до SMTP: DNS, TCP и старт TLS. Нужен, чтобы отличить
+ * «сервер не отвечает» от «сервер ответил, но TLS/авторизация не прошли»:
+ * в браузере видно только «Could not connect to SMTP host».
+ *
+ * @return list<array{step: string, ok: bool, detail: string}>
+ */
+function docgenSmtpNetworkSteps(string $host, int $port, string $encryption, float $timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS): array
+{
+    $steps = [];
+    $started = microtime(true);
+
+    if (preg_match('/^\[[0-9A-Fa-f:]+\]$/', $host) === 1) {
+        $steps[] = ['step' => 'DNS', 'ok' => true, 'detail' => 'адрес задан явно: ' . $host];
+        $ips = [trim($host, '[]')];
+    } else {
+        $ips = [];
+        try {
+            $resolved = @gethostbynamel($host);
+            if (is_array($resolved)) {
+                $ips = $resolved;
+            }
+            if ($ips === []) {
+                $records = @dns_get_record($host, DNS_AAAA);
+                if (is_array($records)) {
+                    foreach ($records as $record) {
+                        if (!empty($record['ipv6'])) {
+                            $ips[] = (string) $record['ipv6'];
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $error) {
+            $steps[] = ['step' => 'DNS', 'ok' => false, 'detail' => 'ошибка резолвера: ' . $error->getMessage()];
+        }
+        if ($ips === [] && $steps === []) {
+            $steps[] = ['step' => 'DNS', 'ok' => false, 'detail' => 'имя ' . $host . ' не разрешается в IP — проверьте написание и DNS контейнера'];
+        } elseif ($ips !== []) {
+            $steps[] = ['step' => 'DNS', 'ok' => true, 'detail' => $host . ' → ' . implode(', ', array_slice(array_unique($ips), 0, 4))];
+        }
+    }
+
+    // Простой TCP с собственным дедлайном: fsockopen держит только свой
+    // таймаут, а нам нужен общий бюджет на всю проверку.
+    $errno = 0;
+    $errstr = '';
+    $tcpStarted = microtime(true);
+    $deadline = $tcpStarted + max(0.5, $timeout);
+    $socket = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, 0.0, STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT);
+    if (is_resource($socket)) {
+        stream_set_blocking($socket, false);
+        $opened = false;
+        while (microtime(true) < $deadline) {
+            $write = [$socket];
+            $read = [];
+            $except = [$socket];
+            $left = max(0.02, $deadline - microtime(true));
+            $ready = @stream_select($read, $write, $except, (int) $left, (int) (($left - (int) $left) * 1_000_000));
+            if ($ready === false) {
+                break;
+            }
+            if ($ready > 0) {
+                $name = @stream_socket_get_name($socket, true);
+                $opened = $name !== false && $name !== '';
+                $errno = $opened ? 0 : 111;
+                break;
+            }
+        }
+        if (!$opened && $errno === 0) {
+            // Дедлайн истёк без ответа — это и есть «молчащий» порт.
+            $errno = 110;
+            $errstr = 'Connection timed out';
+        }
+        if (!$opened) {
+            fclose($socket);
+            $socket = false;
+        } else {
+            stream_set_blocking($socket, true);
+            stream_set_timeout($socket, 2);
+        }
+    }
+    if (is_resource($socket)) {
+        $elapsed = microtime(true) - $tcpStarted;
+        $banner = @fgets($socket, 512);
+        $steps[] = ['step' => 'TCP', 'ok' => true, 'detail' => sprintf('%s:%d открыт за %.2f с%s', $host, $port, $elapsed, $banner !== false ? '; приветствие: ' . trim($banner) : '')];
+        if ($encryption === 'ssl') {
+            // Порт 465 ждёт TLS сразу, до любого SMTP-диалога.
+            $context = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => true, 'peer_name' => $host]]);
+            $tls = @stream_socket_client('ssl://' . $host . ':' . $port, $tlsErrno, $tlsErrstr, max(1.0, $deadline - microtime(true)), STREAM_CLIENT_CONNECT, $context);
+            if (is_resource($tls)) {
+                $steps[] = ['step' => 'TLS', 'ok' => true, 'detail' => 'согласование SSL/TLS на порту ' . $port . ' прошло' . (function_exists('stream_socket_get_name') ? '; узел: ' . (string) stream_socket_get_name($tls, true) : '')];
+                fclose($tls);
+            } else {
+                $steps[] = ['step' => 'TLS', 'ok' => false, 'detail' => 'SSL/TLS на порту ' . $port . ' не согласовался: ' . ($tlsErrstr !== '' ? $tlsErrstr : 'сервер не ответил на приветствие TLS')];
+            }
+        }
+        fclose($socket);
+    } else {
+        $explain = match (true) {
+            $errno === 110 || $errno === 10060 || stripos($errstr, 'timed out') !== false => 'таймаут: сервер или сеть не отвечают, возможно порт закрыт провайдером',
+            $errno === 111 || $errno === 10061 => 'соединение отклонено: на этом порту никто не слушает или порт не тот',
+            $errno === 113 || $errno === 101 => 'сеть недоступна из контейнера: проверьте маршрут и DNS',
+            default => 'соединение не открылось',
+        };
+        $steps[] = ['step' => 'TCP', 'ok' => false, 'detail' => sprintf('%s:%d — %s (%s%s)', $host, $port, $explain, $errstr !== '' ? $errstr : 'ошибка', $errno !== 0 ? ', errno ' . $errno : '')];
+    }
+    return $steps;
+}
+
+/**
+ * Быстрая проверка соседних портов и режимов: когда 465 не отвечает,
+ * оператору нужен не совет «проверьте порт», а список того, что реально
+ * открывается из этого контейнера. Таймаут короткий, чтобы модалка не ждала.
+ *
+ * @return list<array{port: int, encryption: string, ok: bool, detail: string}>
+ */
+function docgenSmtpPortProbe(string $host, float $timeout = 2.5): array
+{
+    $targets = [
+        ['port' => 465, 'encryption' => 'ssl'],
+        ['port' => 587, 'encryption' => 'tls'],
+        ['port' => 25, 'encryption' => 'none'],
+        ['port' => 2525, 'encryption' => 'tls'],
+    ];
+    // Жёсткий предел на весь опрос: даже если каждый connect «залипнет»,
+    // остальные порты честно помечаются «не проверялся».
+    $hardDeadline = microtime(true) + max(1.0, min(4.0, $timeout * 2));
+    $sockets = [];
+    $skipped = [];
+    $started = microtime(true);
+
+    // Неблокирующий connect в PHP не гарантирован: некоторые сборки всё равно
+    // ждут внутри stream_socket_client. Поэтому после каждого сокета сверяем
+    // часы и при исчерпанном бюджете честно отмечаем остаток «не проверялось»,
+    // а не висим четыре таймаута подряд.
+    foreach ($targets as $target) {
+        $port = (int) $target['port'];
+        if (microtime(true) > $hardDeadline - 0.2) {
+            $skipped[] = $port;
+            continue;
+        }
+        $errno = 0;
+        $errstr = '';
+        $socket = @stream_socket_client(
+            'tcp://' . $host . ':' . $port,
+            $errno,
+            $errstr,
+            $timeout,
+            STREAM_CLIENT_CONNECT | STREAM_CLIENT_ASYNC_CONNECT
+        );
+        if (is_resource($socket)) {
+            stream_set_blocking($socket, false);
+            $sockets[$port] = ['socket' => $socket, 'encryption' => (string) $target['encryption'], 'errno' => 0, 'errstr' => '', 'opened' => null];
+        } else {
+            $sockets[$port] = ['socket' => null, 'encryption' => (string) $target['encryption'], 'errno' => $errno, 'errstr' => $errstr, 'opened' => false];
+        }
+    }
+
+    $deadline = min(microtime(true) + $timeout, $hardDeadline);
+    $pending = [];
+    foreach ($sockets as $port => $item) {
+        if (is_resource($item['socket'])) {
+            $pending[$port] = $item['socket'];
+            $sockets[$port]['opened'] = false;
+        }
+    }
+    while ($pending !== [] && microtime(true) < $deadline) {
+        $read = [];
+        $write = [];
+        $except = [];
+        foreach ($pending as $port => $stream) {
+            $write['p' . $port] = $stream;
+            $except['p' . $port] = $stream;
+        }
+        $left = max(0.02, $deadline - microtime(true));
+        $ready = @stream_select($read, $write, $except, (int) $left, (int) (($left - (int) $left) * 1_000_000));
+        if ($ready === false) {
+            break;
+        }
+        foreach ([$write, $except] as $set) {
+            foreach ($set as $key => $stream) {
+                $port = (int) substr((string) $key, 1);
+                if (!isset($pending[$port])) {
+                    continue;
+                }
+                $name = @stream_socket_get_name($stream, true);
+                $sockets[$port]['opened'] = $name !== false && $name !== '';
+                if ($sockets[$port]['opened'] === false) {
+                    $sockets[$port]['errno'] = 111;
+                }
+                unset($pending[$port]);
+            }
+        }
+    }
+    foreach ($pending as $port => $stream) {
+        $sockets[$port]['opened'] = false;
+        $sockets[$port]['errno'] = 110;
+    }
+
+    $results = [];
+    foreach ($sockets as $port => $item) {
+        $ms = (int) round((microtime(true) - $started) * 1000);
+        if (is_resource($item['socket'])) {
+            if ($item['opened'] === true) {
+                // Приветствие есть только у настоящего SMTP: это отличает его от
+                // веб-сервера, который тоже может держать порт открытым.
+                stream_set_blocking($item['socket'], true);
+                stream_set_timeout($item['socket'], 1);
+                $banner = @fgets($item['socket'], 512);
+                $results[] = [
+                    'port' => (int) $port,
+                    'encryption' => $item['encryption'],
+                    'ok' => true,
+                    'detail' => sprintf('%d открыт за %d мс%s', $port, $ms, $banner !== false && trim((string) $banner) !== '' ? '; приветствие: ' . trim((string) $banner) : '; приветствия SMTP нет'),
+                ];
+            } else {
+                $why = $item['errno'] === 111 ? 'отклонено' : 'таймаут';
+                $results[] = ['port' => (int) $port, 'encryption' => $item['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+            }
+            fclose($item['socket']);
+        } else {
+            $why = match (true) {
+                $item['errno'] === 110 || $item['errno'] === 10060 || stripos((string) $item['errstr'], 'timed out') !== false => 'таймаут',
+                $item['errno'] === 111 || $item['errno'] === 10061 => 'отклонено',
+                $item['errno'] === 113 || $item['errno'] === 101 => 'сеть недоступна',
+                default => $item['errstr'] !== '' ? (string) $item['errstr'] : 'нет соединения',
+            };
+            $results[] = ['port' => (int) $port, 'encryption' => $item['encryption'], 'ok' => false, 'detail' => sprintf('%d — %s (%d мс)', $port, $why, $ms)];
+        }
+    }
+    foreach ($skipped as $port) {
+        $results[] = ['port' => (int) $port, 'encryption' => '—', 'ok' => false, 'detail' => sprintf('%d — не проверялся: исчерпан бюджет времени проверки', $port)];
+    }
+    usort($results, static fn(array $a, array $b): int => $a['port'] <=> $b['port']);
+    return $results;
+}
+
+/**
+ * Полный журнал проверки SMTP для модалки: параметры, сетевой слой,
+ * полный диалог PHPMailer без пароля и подсказка по конкретной ошибке.
+ *
+ * @return array<string, mixed>
+ */
+function docgenSmtpDiagnose(array $settings, string $password): array
+{
+    // Проверка — это тоже подключение. Если её жать подряд после бана,
+    // firewall получит новую серию попыток и продлит блокировку.
+    $probeStatePath = DOCGEN_STORAGE_DIR . '/smtp-probe-state.json';
+    $probeState = docgenReadJson($probeStatePath, []);
+    $lastProbe = (int) ($probeState['lastAt'] ?? 0);
+    $probeCount = (int) ($probeState['count'] ?? 0);
+    if ($lastProbe < time() - 600) {
+        $probeCount = 0;
+    }
+    $probeCount++;
+    docgenWriteJson($probeStatePath, ['lastAt' => time(), 'count' => $probeCount, 'host' => (string) ($settings['host'] ?? '')]);
+
+    $host = (string) ($settings['host'] ?? '');
+    $port = (int) ($settings['port'] ?? 587);
+    $encryption = (string) ($settings['encryption'] ?? 'tls');
+    $username = (string) ($settings['username'] ?? '');
+    $fromEmail = (string) ($settings['fromEmail'] ?? '');
+
+    // Журнал сохраняем до ответа: если браузер оборвёт запрос по таймауту,
+    // его всё равно можно будет прочитать кнопкой «Последний журнал».
+    $journalPath = DOCGEN_STORAGE_DIR . '/smtp-last-diagnose.json';
+    $save = static function (array $payload) use ($journalPath): array {
+        $payload['savedAt'] = date(DATE_ATOM);
+        try {
+            docgenWriteJson($journalPath, $payload);
+        } catch (Throwable $ignored) {
+            // Запись журнала не должна ломать саму проверку.
+        }
+        return $payload;
+    };
+    // Две одновременные проверки — двойная серия подключений к серверу.
+    $lockPath = DOCGEN_STORAGE_DIR . '/smtp-probe.lock';
+    $lock = @fopen($lockPath, 'c');
+    if (is_resource($lock) && !flock($lock, LOCK_EX | LOCK_NB)) {
+        fclose($lock);
+        return $save([
+            'ok' => false,
+            'summary' => 'Проверка уже идёт в другой вкладке. Дождитесь её окончания: параллельные подключения только увеличивают число отказов.',
+            'steps' => [],
+            'ports' => [],
+            'transcript' => '',
+            'busy' => true,
+            'probeWarn' => '',
+            'context' => [],
+        ]);
+    }
+
+    $transcript = '';
+    $phpmailerError = '';
+    $smtpError = [];
+    $ok = false;
+    $connectStarted = microtime(true);
+    try {
+        $mailer = docgenBuildMailer($settings, $password);
+        // Только для этой проверки: полный диалог и собственная функция вывода.
+        $mailer->SMTPDebug = 3;
+        $mailer->Debugoutput = static function (string $line, int $level) use (&$transcript): void {
+            $transcript .= rtrim($line) . "\n";
+        };
+        // PHPMailer получает меньший таймаут, чем общий бюджет: остаток нужен
+        // сетевым шагам, чтобы журнал всё равно дошёл до браузера.
+        $mailerTimeout = (int) min(6, max(2, DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS - 2));
+        $mailer->Timeout = $mailerTimeout;
+        $smtp = $mailer->getSMTPInstance();
+        $smtp->Timelimit = $mailerTimeout;
+        $ok = (bool) $mailer->smtpConnect();
+        $smtpError = (array) $smtp->getError();
+        if ($ok) {
+            $mailer->smtpClose();
+        }
+        $phpmailerError = trim((string) $mailer->ErrorInfo);
+    } catch (Throwable $error) {
+        $phpmailerError = trim($error->getMessage());
+    }
+    $connectMs = (int) round((microtime(true) - $connectStarted) * 1000);
+
+    $transcript = docgenSmtpMaskSecrets(docgenSmaskTranscript($transcript), $password, $username);
+    if ($phpmailerError !== '') {
+        $phpmailerError = docgenSmtpMaskSecrets($phpmailerError, $password, $username);
+    }
+    // Каждый следующий шаг берёт только остаток бюджета: лучше короткая
+    // проверка с журналом, чем ответ браузера «сервер не ответил за 30 с».
+    $spent = microtime(true) - $connectStarted;
+    $left = max(1.0, DOCGEN_SMTP_PROBE_BUDGET_SECONDS - $spent);
+    // Сетевые шаги при сбое полезны, но требуют до двух таймаутов; при
+    // остатке меньше 5 с их пропускаем и говорим об этом прямо.
+    $steps = ($left >= 3.0) ? docgenSmtpNetworkSteps($host, $port, $encryption, min(4.0, $left / 2)) : [];
+    $spent = microtime(true) - $connectStarted;
+    $left = max(0.0, DOCGEN_SMTP_PROBE_BUDGET_SECONDS - $spent);
+    // Соседние порты — параллельно, с таймаутом не больше остатка.
+    $ports = ($ok || $left < 1.0) ? [] : docgenSmtpPortProbe($host, min(1.5, $left));
+    $budgetNote = ($steps === [] || $ports === []) && !$ok
+        ? ' Проверка остановлена по бюджету времени: часть сетевых шагов пропущена, чтобы журнал дошёл до браузера.'
+        : '';
+    $payload = [
+        'ok' => $ok,
+        'phpmailer' => $phpmailerError,
+        'summary' => $ok
+            ? 'Соединение с SMTP установлено, сервер принял параметры авторизации.'
+            : docgenSmtpExplain($phpmailerError, $encryption, $port, $steps) . $budgetNote,
+        'steps' => $steps,
+        'ports' => $ports,
+        'transcript' => $transcript !== '' ? $transcript : 'PHPMailer не успел начать диалог.',
+        'smtpError' => [
+            'error' => docgenSmtpMaskSecrets((string) ($smtpError['error'] ?? ''), $password, $username),
+            'detail' => docgenSmtpMaskSecrets((string) ($smtpError['detail'] ?? ''), $password, $username),
+            'code' => (string) ($smtpError['smtp_code'] ?? ''),
+            'codeEx' => (string) ($smtpError['smtp_code_ex'] ?? ''),
+        ],
+        'server' => $host . ':' . $port,
+        'elapsedMs' => (int) round((microtime(true) - $connectStarted) * 1000),
+        'probeCount' => $probeCount,
+        'probeWarn' => (!$ok && $probeCount >= 3)
+            ? 'Это ' . $probeCount . '-я проверка за 10 минут. Каждая попытка — новое подключение: если сервер банит по числу отказов, следующая проверка продлит бан. Сделайте паузу 10–15 минут и сначала разберитесь с блокировкой.'
+            : '',
+        'context' => [
+            'PHP' => PHP_VERSION,
+            'SAPI' => PHP_SAPI,
+            'шифрование' => $encryption === 'ssl' ? 'SSL/TLS (implicit, 465)' : ($encryption === 'tls' ? 'STARTTLS (587)' : 'без шифрования'),
+            'логин' => $username !== '' ? $username : 'без авторизации',
+            'пароль' => $password !== '' ? 'задан, в журнале скрыт' : 'не задан',
+            'отправитель' => $fromEmail,
+            'таймаут' => DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS . ' с',
+            'openssl' => extension_loaded('openssl') ? 'доступен' : 'НЕ ЗАГРУЖЕН',
+            'проверка сертификата' => 'включена при подключении PHPMailer',
+        ],
+    ];
+    if (is_resource($lock)) {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+    return $save($payload);
+}
+
+/** Последний сохранённый журнал: спасает, когда запрос оборвался по таймауту. */
+function docgenSmtpLastDiagnose(): array
+{
+    $payload = docgenReadJson(DOCGEN_STORAGE_DIR . '/smtp-last-diagnose.json', []);
+    if ($payload === []) {
+        return ['ok' => false, 'summary' => 'Сохранённого журнала пока нет: ни одна проверка ещё не завершилась.', 'steps' => [], 'ports' => [], 'transcript' => '', 'context' => []];
+    }
+    return $payload;
+}
+
+/** Полный диалог без пароля: он маскируется отдельной функцией. */
+function docgenSmaskTranscript(string $transcript): string
+{
+    return (string) preg_replace('/CLIENT -> SERVER: [A-Za-z0-9+\/=]{16,}/', 'CLIENT -> SERVER: [base64 скрыт]', $transcript);
+}
+
+/** Понятная причина вместо технического текста PHPMailer. */
+function docgenSmtpExplain(string $error, string $encryption, int $port, array $steps = []): string
+{
+    $errorText = mb_strtolower($error, 'UTF-8');
+    // Порт открыт на уровне TCP, но SMTP-диалог не начался: так ведут себя
+    // фильтр провайдера, прокси или не-SMTP сервис на этом порту.
+    $tcpOpen = false;
+    foreach ($steps as $step) {
+        if (($step['step'] ?? '') === 'TCP') {
+            $tcpOpen = (bool) ($step['ok'] ?? false);
+        }
+    }
+    if ($tcpOpen && stripos($error, 'Could not connect to SMTP host') !== false) {
+        return 'TCP-соединение с ' . $port . ' открылось, но SMTP-диалог не начался: сервер не прислал приветствие 220 или оборвал связь. Часто это фильтр провайдера, прокси или не SMTP-сервис на этом порту — проверьте порт и шифрование.';
+    }
+    // Таймаут на SMTP-порту — самая частая ситуация: провайдер или файрвол
+    // молча отбрасывает пакеты. errno 110/10060 и текст «timed out» означают
+    // именно это, а не загруженный сервер.
+    $timedOut = stripos($error, 'timed out') !== false || stripos($error, 'errno 110') !== false
+        || stripos($error, '(110)') !== false || stripos($error, '10060') !== false;
+    if ($timedOut && in_array($port, [25, 465, 587], true)) {
+        return 'Порт ' . $port . ' молчит: соединение ушло в таймаут, ответа не было вообще. Это не ошибка пароля и не ошибка сервера — трафик на этот порт не доходит. '
+            . 'Частая причина — этот IP забанен firewall/fail2ban на почтовом сервере: тогда пакеты молча отбрасываются. '
+            . 'Проверьте на сервере: fail2ban-client status, iptables -S | grep <IP>. '
+            . 'Смотрите проверку соседних портов ниже: если открыт 587 — переключитесь на 587 + STARTTLS.';
+    }
+    if (stripos($error, 'Could not connect to SMTP host') !== false) {
+        if ($encryption === 'ssl' && $port !== 465) {
+            return 'Не удалось открыть SSL/TLS-соединение. Для SSL обычно нужен порт 465, для STARTTLS — 587. Проверьте порт и режим шифрования.';
+        }
+        if ($encryption === 'tls' && $port === 465) {
+            return 'Порт 465 ждёт SSL/TLS сразу, а выбрано STARTTLS. Смените шифрование на SSL/TLS или порт на 587.';
+        }
+        return 'Сервер не открыл соединение: проверьте адрес, порт и доступность порта из контейнера (провайдер может блокировать исходящий SMTP).';
+    }
+    if (stripos($error, 'certificate') !== false || stripos($error, 'subjectAltName') !== false) {
+        return 'Сертификат сервера не совпадает с именем: укажите в поле «SMTP-сервер» каноническое имя из сертификата.';
+    }
+    // PHPMailer пишет и «Could not authenticate», и «Authentication failed».
+    if (stripos($error, 'authenticat') !== false || stripos($error, '535') !== false || stripos($error, '534') !== false) {
+        return 'Сервер не принял логин или пароль. Для mail.ru нужен пароль для внешнего приложения, а не пароль от почты.';
+    }
+    if (stripos($error, 'timeout') !== false || stripos($error, 'timed out') !== false) {
+        return 'Сервер не ответил за ' . DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS . ' секунд: порт закрыт, сеть медленная или адрес неверный.';
+    }
+    if ($errorText === '') {
+        return 'Соединение не установлено, но PHPMailer не оставил текста ошибки — смотрите журнал ниже.';
+    }
+    return 'Соединение не установлено: ' . mb_substr($error, 0, 300, 'UTF-8');
+}
+
 function docgenTestSmtp(): never
 {
     try {
@@ -2889,22 +4443,19 @@ function docgenTestSmtp(): never
             $override = docgenSmtpAccount($accountId);
             $overridePassword = docgenSmtpAccountSecret($accountId);
         }
-        $mailer = docgenBuildMailer($override, $overridePassword);
-        // Bound only this connectivity probe; sending from the queue is unchanged.
-        $mailer->Timeout = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
-        $mailer->getSMTPInstance()->Timelimit = DOCGEN_SMTP_CONNECT_TIMEOUT_SECONDS;
-        if ($mailer->smtpConnect()) {
-            $mailer->smtpClose();
-            sendJson(['ok' => true, 'message' => 'Соединение с SMTP установлено, сервер принял параметры авторизации.']);
-        }
-        $detail = trim((string) $mailer->ErrorInfo);
-        $hint = ' Проверьте адрес и порт из контейнера: для порта 587 выбирайте STARTTLS, для 465 — SSL/TLS; провайдер также может блокировать исходящий SMTP-порт.';
-        if (stripos($detail, 'subjectAltName') !== false || stripos($detail, 'certificate') !== false) {
-            $hint .= ' Сертификат выдан на другое имя: укажите в поле SMTP-сервер каноническое имя из сертификата вместо алиаса.';
-        }
-        sendJson(['ok' => false, 'error' => 'Не удалось подключиться к SMTP-серверу.' . ($detail !== '' ? ' ' . mb_substr($detail, 0, 400, 'UTF-8') : '') . $hint], 502);
+        $settings = $override === null ? docgenSmtpSettings() : array_merge(docgenSmtpDefaults(), $override);
+        $password = (string) ($overridePassword ?? (string) (docgenSmtpSecret()['password'] ?? ''));
+        $diagnostics = docgenSmtpDiagnose($settings, $password);
+        $diagnostics['error'] = $diagnostics['ok'] ? '' : (string) $diagnostics['summary'];
+        sendJson($diagnostics, $diagnostics['ok'] ? 200 : 502);
     } catch (Throwable $e) {
-        sendJson(['ok' => false, 'error' => 'Проверка SMTP не прошла: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
+        sendJson([
+            'ok' => false,
+            'error' => 'Проверка SMTP не прошла: ' . mb_substr(docgenSmtpMaskSecrets($e->getMessage(), (string) ($overridePassword ?? '')), 0, 800, 'UTF-8'),
+            'summary' => 'Проверка не запустилась.',
+            'steps' => [],
+            'transcript' => '',
+        ], 502);
     }
 }
 
@@ -2929,10 +4480,18 @@ function docgenUpdateQueueItem(): never
     if (preg_match('/[\r\n]/u', $subject)) {
         sendJson(['ok' => false, 'error' => 'Тема письма не должна содержать переносы строк.'], 422);
     }
+    $hasHtml = trim((string) ($meta['bodyHtml'] ?? '')) !== '';
+    if ($hasHtml && trim($body) === '') {
+        sendJson(['ok' => false, 'error' => 'У письма с HTML-дизайном должна быть текстовая версия. Заполните поле «Текстовая версия».'], 422);
+    }
     $meta['to'] = $to;
     $meta['cc'] = $cc;
     $meta['subject'] = $subject;
     $meta['body'] = $body;
+    if ($hasHtml) {
+        // A hand-written text alternative is now the operator's own choice.
+        $meta['htmlFallback'] = false;
+    }
     $meta['lastError'] = '';
     docgenSaveQueueItem($meta);
     sendJson(['ok' => true, 'item' => $meta]);
@@ -2978,7 +4537,17 @@ function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, ar
             }
         }
         $mailer->Subject = trim((string) ($current['subject'] ?? ''));
-        $mailer->Body = (string) ($current['body'] ?? '');
+        $parts = docgenLetterMailParts($current);
+        if ($parts['html'] !== '') {
+            // Always multipart/alternative: a text part goes with every HTML letter.
+            $mailer->isHTML(true);
+            $mailer->Body = $parts['html'];
+            $mailer->AltBody = $parts['text'];
+        } else {
+            $mailer->isHTML(false);
+            $mailer->Body = $parts['text'];
+            $mailer->AltBody = '';
+        }
         $mailer->addAttachment($pdfPath, safeFilename((string) ($current['filename'] ?? 'Документ')) . '.pdf', 'base64', 'application/pdf');
         $mailer->send();
         $current['status'] = 'sent';
@@ -2986,6 +4555,13 @@ function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, ar
         $current['lastError'] = '';
         $current['reviewedAt'] = date(DATE_ATOM);
         docgenSaveQueueItem($current);
+        // Manual and scheduled letters share the provider quota, so both are
+        // counted against the mailbox daily cap.
+        try {
+            docgenCronCountSent(docgenCronItemAccountId($current), 1);
+        } catch (Throwable $ignored) {
+            // Counting must never turn a sent letter into a failure.
+        }
         return ['ok' => true, 'item' => $current];
     } catch (Throwable $e) {
         try {
@@ -3025,6 +4601,9 @@ function docgenSendQueueItem(): never
     if (!is_file($pdfPath) || filesize($pdfPath) === 0) {
         sendJson(['ok' => false, 'error' => 'PDF-вложение отсутствует.'], 404);
     }
+    if (trim((string) ($meta['smtpAccountId'] ?? '')) === '') {
+        sendJson(['ok' => false, 'error' => 'У письма не выбран ящик отправки. Передайте пачку в очередь на главной странице и выберите ящик при проверке.'], 422);
+    }
     $toText = (string) ($meta['to'] ?? '');
     $ccText = (string) ($meta['cc'] ?? '');
     if (docgenHasUnparsedEmailText($toText) || docgenHasUnparsedEmailText($ccText)) {
@@ -3039,7 +4618,21 @@ function docgenSendQueueItem(): never
         $result = docgenDeliverPreparedItem($meta, $dir, $pdfPath, $to, $cc);
         sendJson(['ok' => true, 'item' => $result['item'], 'message' => 'Письмо отправлено одному адресату/группе получателей.']);
     } catch (Throwable $e) {
-        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . mb_substr($e->getMessage(), 0, 800, 'UTF-8')], 502);
+        $message = mb_substr($e->getMessage(), 0, 800, 'UTF-8');
+        if (docgenIsRateLimitError($message)) {
+            // Put the mailbox on hold so the scheduler does not keep pushing.
+            try {
+                docgenCronNoteRateLimit(docgenCronItemAccountId($meta), $message);
+            } catch (Throwable $ignored) {
+            }
+            sendJson([
+                'ok' => false,
+                'error' => 'Почтовый сервис ответил «слишком часто» (лимит отправки). Автоотправка этого ящика приостановлена на 30 минут, письмо можно повторить позже. Подождите 15–60 минут и не отправляйте подряд.',
+                'rateLimited' => true,
+                'pauseSeconds' => docgenCronRateLimitPauseSeconds(),
+            ], 429);
+        }
+        sendJson(['ok' => false, 'error' => 'Отправка не удалась: ' . $message], 502);
     }
 }
 /** Per-mailbox clock: restore the first run from the old global state file. */
@@ -3157,6 +4750,147 @@ function docgenCronRefreshBatch(string $batchId): array
     return ['id' => $batchId, 'status' => $batch['status'], 'sent' => $sent, 'failed' => $failed];
 }
 
+/** Current time in the server's timezone, used for the sending window. */
+function docgenNowMinutes(): int
+{
+    $now = getdate();
+    return ((int) $now['hours']) * 60 + (int) $now['minutes'];
+}
+
+function docgenClockMinutes(string $hhmm): int
+{
+    [$hours, $minutes] = array_map('intval', explode(':', $hhmm));
+    return $hours * 60 + $minutes;
+}
+
+/**
+ * May the scheduler send right now? Outside the configured window letters wait
+ * for the next working period instead of arriving at 3 a.m., and on weekends
+ * nothing is sent when weekdaysOnly is checked. Manual one-by-one sending from
+ * the review card is never blocked — the operator decides that himself.
+ */
+function docgenCronWithinWindow(?array $settings = null): array
+{
+    $settings = $settings ?? docgenMailingSettings();
+    $now = docgenNowMinutes();
+    $start = docgenClockMinutes((string) $settings['windowStart']);
+    $end = docgenClockMinutes((string) $settings['windowEnd']);
+    if ($now < $start || $now >= $end) {
+        return [false, 'Вне окна отправки ' . $settings['windowStart'] . '–' . $settings['windowEnd'] . ' — письма ждут следующего рабочего периода.'];
+    }
+    if (!empty($settings['weekdaysOnly']) && (int) date('N') >= 6) {
+        return [false, 'Выходной день: отправка по расписанию выключена до понедельника.'];
+    }
+    return [true, ''];
+}
+
+/** Letters sent by this mailbox since local midnight (shared send state). */
+function docgenCronSentToday(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $day = (string) ($state['sentDay'] ?? '');
+    if ($day !== date('Y-m-d')) {
+        return 0;
+    }
+    return max(0, (int) ($state['sentToday'] ?? 0));
+}
+
+function docgenCronCountSent(string $accountId, int $sent): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $today = date('Y-m-d');
+    $count = ((string) ($state['sentDay'] ?? '') === $today ? (int) ($state['sentToday'] ?? 0) : 0) + $sent;
+    $state['sentDay'] = $today;
+    $state['sentToday'] = $count;
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+/**
+ * After the provider answers 421 4.7.0 / "too many messages" the mailbox is
+ * put on hold: hammering it would extend the block and hurt the sender
+ * reputation. 30 minutes is the conservative end of Mail.ru's rate-limit pause.
+ */
+function docgenCronRateLimitPauseSeconds(): int
+{
+    return 1800;
+}
+
+function docgenCronNoteRateLimit(string $accountId, string $message): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $state['pauseUntil'] = time() + docgenCronRateLimitPauseSeconds();
+    $state['pauseReason'] = mb_substr($message, 0, 400, 'UTF-8');
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+/** Seconds left of a rate-limit hold (0 when the mailbox may send again). */
+function docgenCronPauseRemaining(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $until = (int) ($state['pauseUntil'] ?? 0);
+    return max(0, $until - time());
+}
+
+/**
+ * Сетевой сбой: сервер не ответил вообще или соединение не открылось.
+ * Так выглядит и бан fail2ban (пакеты молча отбрасываются), и упавший
+ * хост. Повторять попытки в этом состоянии нельзя: именно серия
+ * неудачных подключений и приводит к бану.
+ */
+function docgenIsNetworkError(string $message): bool
+{
+    return preg_match(
+        '/Could not connect to SMTP host|Failed to connect to server|Connection (timed out|refused)|'
+        . 'stream_socket_client|errno 1(10|11)|\b(110|111)\b|Network (is )?unreachable|'
+        . 'SMTP Connect\(\) failed|Connection closed|Lost connection/i',
+        $message
+    ) === 1;
+}
+
+/** Пауза после сетевого сбоя: короче, чем после лимита, но достаточная, чтобы не долбить. */
+function docgenCronNetworkPauseSeconds(): int
+{
+    return 900;
+}
+
+function docgenCronNoteNetworkFailure(string $accountId, string $message): void
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    $state['networkPauseUntil'] = time() + docgenCronNetworkPauseSeconds();
+    $state['networkPauseReason'] = mb_substr($message, 0, 400, 'UTF-8');
+    $state['updatedAt'] = date(DATE_ATOM);
+    docgenWriteJson($statePath, $state);
+}
+
+function docgenCronNetworkPauseRemaining(string $accountId): int
+{
+    $statePath = docgenCronAccountPath($accountId, 'state.json');
+    $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+    return max(0, (int) ($state['networkPauseUntil'] ?? 0) - time());
+}
+
+/** Понятная причина для интерфейса: бан firewall выглядит именно так. */
+function docgenSmtpNetworkErrorHint(): string
+{
+    return 'Сервер не отвечает по этому порту вообще: соединение уходит в таймаут или отбрасывается. '
+        . 'Так выглядит и блокировка firewall/fail2ban, и запрет исходящей почты у провайдера. '
+        . 'Отправка приостановлена, чтобы серия попыток не продлила бан. '
+        . 'Проверьте, не забанен ли IP: iptables -S | grep <IP>, fail2ban-client status.';
+}
+
+/** True when a delivery error means "now is too fast" rather than "bad letter". */
+function docgenIsRateLimitError(string $message): bool
+{
+    return preg_match('/\b421\b|4\.7\.0|ratelimit|rate limit|too many (messages|letters)|превышен лимит|слишком много/i', $message) === 1;
+}
+
 /** Send one mailbox's due letters at its own pace. */
 function docgenCronSendAccount(string $accountId): array
 {
@@ -3173,16 +4907,53 @@ function docgenCronSendAccount(string $accountId): array
     }
     try {
         docgenCronRecoverStale($accountId);
-        $limit = docgenCronAccountLimit($accountId);
+        // A rate-limit hold wins over everything: sending into a 421 extends it.
+        $pauseLeft = docgenCronPauseRemaining($accountId);
+        if ($pauseLeft > 0) {
+            $result['reason'] = 'rate_limit_pause';
+            $result['pauseLeft'] = $pauseLeft;
+            return $result;
+        }
+        // Сетевой сбой (в том числе бан fail2ban) — тоже пауза: пока сервер
+        // молчит, любая попытка только подтверждает firewall, что мы «атакуем».
+        $networkPauseLeft = docgenCronNetworkPauseRemaining($accountId);
+        if ($networkPauseLeft > 0) {
+            $result['reason'] = 'network_pause';
+            $result['pauseLeft'] = $networkPauseLeft;
+            $result['hint'] = docgenSmtpNetworkErrorHint();
+            return $result;
+        }
+        $mailing = docgenMailingSettings();
+        [$inWindow, $windowReason] = docgenCronWithinWindow($mailing);
+        if (!$inWindow) {
+            $result['reason'] = 'outside_window';
+            $result['window'] = $windowReason;
+            return $result;
+        }
+        $limit = docgenCronAccountLimit($accountId, $mailing);
+        $dailyCap = (int) ($mailing['dailyCap'] ?? 0);
+        if ($dailyCap > 0) {
+            $alreadySent = docgenCronSentToday($accountId);
+            if ($alreadySent >= $dailyCap) {
+                $result['reason'] = 'daily_cap';
+                $result['sentToday'] = $alreadySent;
+                return $result;
+            }
+            $limit = min($limit, $dailyCap - $alreadySent);
+        }
         $due = array_slice(docgenCronDueItems($accountId), 0, $limit);
         if (!$due) {
             $result['reason'] = 'no_due';
             return $result;
         }
         $lastSendAt = docgenCronAccountLastSend($accountId);
+        // Random gap on top of the fixed interval: an exactly periodic stream is
+        // the clearest bot signature, so each letter waits a little longer.
+        $jitterMax = (int) ($mailing['jitterSeconds'] ?? 0);
         $affected = [];
         foreach ($due as $index => $item) {
-            $target = $lastSendAt + ($index + 1) * (60.0 / $limit);
+            $gap = 60.0 / $limit + ($jitterMax > 0 ? random_int(0, $jitterMax) : 0);
+            $target = $lastSendAt + $gap;
             $wait = $target - microtime(true);
             if ($wait > 0) {
                 if ($wait > 65) {
@@ -3212,13 +4983,46 @@ function docgenCronSendAccount(string $accountId): array
                     $result['sent']++;
                 } catch (Throwable $e) {
                     $result['failed']++;
+                    if (docgenIsNetworkError($e->getMessage())) {
+                        // Письмо остаётся в расписании: дело не в адресе и не
+                        // в тексте, а в том, что сервер сейчас недоступен.
+                        docgenCronNoteNetworkFailure($accountId, $e->getMessage());
+                        $result['reason'] = 'network_error';
+                        $result['pauseLeft'] = docgenCronNetworkPauseSeconds();
+                        $result['hint'] = docgenSmtpNetworkErrorHint();
+                        try {
+                            $again = docgenReadQueueItem((string) $item['id']);
+                            $again['status'] = 'scheduled';
+                            $again['lastError'] = 'Сервер не ответил: отправка приостановлена на 15 минут, письмо осталось в расписании. ' . docgenSmtpNetworkErrorHint();
+                            docgenSaveQueueItem($again);
+                        } catch (Throwable $ignored) {
+                        }
+                        break;
+                    }
+                    if (docgenIsRateLimitError($e->getMessage())) {
+                        // The provider said "too fast": hold this mailbox and stop
+                        // the run instead of burning the rest of the batch.
+                        docgenCronNoteRateLimit($accountId, $e->getMessage());
+                        $result['reason'] = 'rate_limit';
+                        $result['pauseLeft'] = docgenCronRateLimitPauseSeconds();
+                        // The letter stays retryable, it is not a bad address.
+                        try {
+                            $again = docgenReadQueueItem((string) $item['id']);
+                            $again['status'] = 'scheduled';
+                            $again['lastError'] = 'Почтовый сервис ответил «слишком часто» (лимит). Отправка приостановлена на 30 минут, письмо осталось в расписании.';
+                            docgenSaveQueueItem($again);
+                        } catch (Throwable $ignored) {
+                        }
+                        break;
+                    }
                 }
             }
             $lastSendAt = microtime(true);
-            docgenWriteJson(docgenCronAccountPath($accountId, 'state.json'), [
-                'lastSendAt' => $lastSendAt,
-                'updatedAt' => date(DATE_ATOM),
-            ]);
+            $statePath = docgenCronAccountPath($accountId, 'state.json');
+            $state = is_file($statePath) ? docgenReadJson($statePath, []) : [];
+            $state['lastSendAt'] = $lastSendAt;
+            $state['updatedAt'] = date(DATE_ATOM);
+            docgenWriteJson($statePath, $state);
         }
         foreach (array_keys($affected) as $affectedBatchId) {
             $info = docgenCronRefreshBatch((string) $affectedBatchId);
@@ -3331,7 +5135,7 @@ function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): 
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_template', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $postActions = ['template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
     $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
@@ -3345,6 +5149,12 @@ function docgenDispatch(string $action): void
             sendJson(['ok' => true, 'templates' => docgenTemplateList()]);
         case 'save_template':
             docgenSaveTemplate();
+        case 'rename_template':
+            docgenRenameTemplate();
+        case 'copy_template':
+            docgenCopyTemplate();
+        case 'replace_template_file':
+            docgenReplaceTemplateFile();
         case 'delete_template':
             docgenDeleteTemplate();
         case 'template_content':
@@ -3356,8 +5166,21 @@ function docgenDispatch(string $action): void
         case 'smtp_settings':
             sendJson(docgenSmtpPublicPayload());
         case 'letter_template':
-            $letter = docgenLetterTemplate();
-            sendJson(['ok' => true, 'settings' => $letter, 'accountId' => $letter['smtpAccountId']]);
+            $letterTemplateId = trim((string) ($_GET['template_id'] ?? ''));
+            if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
+                $letterTemplateId = '';
+            }
+            if ($letterTemplateId !== '' && preg_match('/^[a-f0-9]{32}$/', $letterTemplateId) !== 1) {
+                sendJson(['ok' => false, 'error' => 'Некорректный идентификатор шаблона.'], 400);
+            }
+            $letter = docgenTemplateLetterSettings($letterTemplateId);
+            sendJson([
+                'ok' => true,
+                'settings' => $letter,
+                'accountId' => $letter['smtpAccountId'],
+                'templateId' => $letterTemplateId,
+                'htmlAvailable' => docgenIsHtmlTemplateId($letterTemplateId),
+            ]);
         case 'mailing_settings':
             sendJson(['ok' => true, 'settings' => docgenMailingSettings(), 'accounts' => docgenMailingAccounts()]);
         case 'save_mailing_settings':
@@ -3372,6 +5195,10 @@ function docgenDispatch(string $action): void
             docgenDeleteSmtpAccount();
         case 'test_smtp':
             docgenTestSmtp();
+        case 'smtp_last_diagnose':
+            sendJson(docgenSmtpLastDiagnose());
+        case 'template_excluded':
+            docgenSaveTemplateExcluding();
         case 'dadata_settings':
             sendJson(docgenDadataPublicPayload());
         case 'save_dadata_settings':
@@ -3410,6 +5237,8 @@ function docgenDispatch(string $action): void
             docgenSendQueueItem();
         case 'review_batch':
             docgenReviewBatch();
+        case 'change_batch_account':
+            docgenChangeBatchAccount();
         case 'cancel_batch':
             docgenCancelBatch();
         case 'retry_batch':

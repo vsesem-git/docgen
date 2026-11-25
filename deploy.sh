@@ -42,11 +42,16 @@ if [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-# Never publish a broken revision: lint the entrypoints before swapping code.
+# Never publish a broken revision: lint every PHP file before swapping code.
+# A module that only an entrypoint includes (webinars/store.php) used to slip
+# through a short list of entrypoints and broke the installed app.
 if command -v php >/dev/null 2>&1; then
-  for file in "$SOURCE/index.php" "$SOURCE/features.php" "$SOURCE/table_features.php" "$SOURCE/public/index.php" "$SOURCE/public/queue.php" "$SOURCE/queue_manager.php" "$SOURCE/cron_send.php"; do
-    php -l "$file" >/dev/null || die "Ошибка синтаксиса PHP в $file — обновление отменено."
+  LINT_FAILED=0
+  # app.env is excluded: secrets, not code. Tests are linted too — they ship.
+  for file in $(find "$SOURCE" -name '*.php' -not -path '*/vendor/*' | sort); do
+    php -l "$file" >/dev/null || LINT_FAILED=1
   done
+  [ "$LINT_FAILED" -eq 0 ] || die "Ошибка синтаксиса PHP — обновление отменено (см. вывод php -l выше)."
   # Without OpenSSL, PHP has no ssl:// transport and PHPMailer reports
   # "Could not connect to SMTP host" even when the server is reachable.
   if ! php -r "exit(extension_loaded('openssl') ? 0 : 1);"; then
@@ -84,6 +89,10 @@ if ! mv "$TMP_DIR" "$APP_DIR"; then
   [ -d "$OLD_DIR" ] && mv "$OLD_DIR" "$APP_DIR"
   die "Не удалось установить новую версию приложения."
 fi
+# Каталог нового app получает права из umask вызывающей оболочки (обычно 0755),
+# и www-data не смог бы прочитать public/index.php: служба падала бы в цикле
+# перезапуска. Повторяем права, которые выставлены для файлов внутри.
+chmod 0750 "$INSTALL_ROOT" "$APP_DIR" 2>/dev/null || true
 
 restore() {
   echo "Откатываю обновление …" >&2
@@ -104,11 +113,30 @@ if ! systemctl is-active --quiet "$SERVICE"; then
   die "$SERVICE не активен. Логи: journalctl -u $SERVICE -n 50"
 fi
 
+# `php -S` с несколькими воркерами начинает принимать соединения не мгновенно
+# после systemctl restart: старый процесс ещё держит порт, новый привязывается
+# через несколько сотен миллисекунд, а при сбое служба поднимается через
+# RestartSec=3. Одиночный запрос сразу после restart получал connection refused
+# и отменял исправное обновление. Поэтому ждём готовности с повторами.
 if command -v curl >/dev/null 2>&1; then
-  if ! curl -fsS --max-time 10 -o /dev/null "http://$PORT_HEALTH_HOST:$PORT/"; then
+  health_url="http://$PORT_HEALTH_HOST:$PORT/"
+  attempt=1
+  healthy=0
+  while [ "$attempt" -le 20 ]; do
+    if curl -fsS --max-time 5 -o /dev/null "$health_url"; then
+      healthy=1
+      break
+    fi
+    # Служба могла уйти в перезапуск — ждать дольше смысла нет.
+    systemctl is-active --quiet "$SERVICE" || break
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  if [ "$healthy" -ne 1 ]; then
+    echo "Диагностика: systemctl status $SERVICE; journalctl -u $SERVICE -n 50" >&2
     restore
     trap - INT TERM HUP
-    die "Приложение не отвечает на http://$PORT_HEALTH_HOST:$PORT/ после обновления."
+    die "Приложение не отвечает на $health_url после обновления (попыток: $attempt)."
   fi
 fi
 
