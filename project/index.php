@@ -1178,7 +1178,25 @@ body.modal-open{overflow:hidden}
 .modal-details{border:1px solid var(--line);border-radius:9px;background:#fbfcfe;padding:10px 12px}
 .modal-details summary{cursor:pointer;font-size:12.5px;font-weight:700;color:#315c82}
 ".modal-details .modal-fields{margin-top:11px}
-.record-modal{width:min(1180px,100%)}.record-modal .modal-main{padding:16px 20px 20px;background:#f6f9fc}.record-modal .modal-section{background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 14px 15px;margin:0 0 12px;box-shadow:0 1px 4px rgba(18,59,99,.06)}.record-modal .modal-section h3{margin:0 0 11px;padding:0 0 8px;border-bottom:1px solid #e8eef4;display:flex;align-items:center;gap:8px;font-size:12.5px;letter-spacing:.01em}.record-modal .modal-section h3:before{content:'';width:4px;height:14px;border-radius:3px;background:var(--brand);flex:none}.record-modal .modal-fields{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 14px;align-items:start}.record-modal .modal-field{display:flex;flex-direction:column;gap:4px;min-width:0}.record-modal .modal-field.wide{grid-column:span 2}.record-modal .modal-field label{height:34px;min-height:34px;display:flex;align-items:flex-end;margin:0;line-height:1.25;overflow:hidden}.record-modal .modal-field input,.record-modal .modal-field textarea{min-height:38px;height:38px}.record-modal .modal-field textarea{min-height:76px;height:auto}.record-modal .case-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.record-modal .manager-check-detail .manager-check-values{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.record-modal{width:min(1180px,100%)}.record-modal .modal-main{padding:16px 20px 20px;background:#f6f9fc}.record-modal .modal-section{background:#fff;border:1px solid var(--line);border-radius:11px;padding:11px 14px 13px;margin:0 0 11px;box-shadow:0 1px 4px rgba(18,59,99,.06)}.record-modal .modal-section h3{margin:0 0 10px;padding:0 0 7px;border-bottom:1px solid #e8eef4;display:flex;align-items:center;gap:8px;font-size:12.5px;letter-spacing:.01em}.record-modal .modal-section h3:before{content:'';width:4px;height:14px;border-radius:3px;background:var(--brand);flex:none}
+/* Колонки подстраиваются под ширину: узкие поля (ИНН, КПП, ОГРН, email) встают
+   в один ряд, а не растягиваются на треть окна. Подпись больше не резервирует
+   34 px — из-за этого резерва карточка была вдвое выше содержимого. */
+.record-modal .modal-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:9px 12px;align-items:start}
+.record-modal .modal-field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.record-modal .modal-field.wide{grid-column:span 2;min-width:290px}
+.record-modal .modal-field label{display:flex;align-items:center;gap:5px;min-height:0;margin:0;line-height:1.2;font-size:11px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.record-modal .modal-field input,.record-modal .modal-field textarea{width:100%;border:1px solid #cbd7e3;border-radius:7px;padding:6px 9px;background:#fff;color:var(--ink);font-size:12.5px;font-family:inherit;min-height:34px;height:34px}
+.record-modal .modal-field textarea{min-height:34px;height:auto;line-height:1.35;resize:vertical}
+.record-modal .modal-field input:focus,.record-modal .modal-field textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(14,79,138,.1);outline:none}
+.record-modal .field-badge{flex:none;font-size:9px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;border-radius:4px;padding:1px 4px}
+.record-modal .field-badge.auto{color:#0f7b4f;background:var(--ok-bg)}
+.record-modal .field-badge.source{color:#8a6b12;background:#fdf6df}
+.record-modal .field-derived{border:1px dashed #cddceb;border-radius:7px;background:#fbfdff;padding:6px 9px;min-height:34px;display:flex;align-items:center;font-size:12.5px;color:#234765;overflow-wrap:anywhere}
+.record-modal .field-derived.empty{color:#93a3b4;font-style:italic}
+.record-modal .case-grid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.record-modal .manager-check-detail .manager-check-values{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+@media (max-width:780px){.record-modal .modal-field.wide{grid-column:1/-1;min-width:0}}
 .modal-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 20px;border-top:1px solid var(--line);background:#fbfdff}
 .modal-actions .right{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .dadata-map-row{display:grid;grid-template-columns:minmax(210px,1fr) minmax(200px,1fr) minmax(180px,1fr);gap:10px;align-items:center;border:1px solid var(--line);border-radius:9px;background:#fff;padding:9px 11px;margin-bottom:8px}
@@ -1220,7 +1238,7 @@ body.modal-open{overflow:hidden}
 @media(max-width:650px){
   .modal-backdrop{padding:0}.modal{height:100vh;max-height:100vh;border-radius:0}
   .modal-head,.modal-main,.modal-actions{padding-left:14px;padding-right:14px}
-  .modal-fields,.record-modal .modal-fields{grid-template-columns:1fr}.record-modal .modal-field.wide{grid-column:1}.case-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.manager-check-detail .manager-check-values,.record-modal .manager-check-detail .manager-check-values{grid-template-columns:1fr}
+  .modal-fields,.record-modal .modal-fields{grid-template-columns:1fr}.record-modal .modal-field.wide{grid-column:1;min-width:0}.case-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.manager-check-detail .manager-check-values,.record-modal .manager-check-detail .manager-check-values{grid-template-columns:1fr}
   .inflection-head{display:block}.inflection-head .small-muted{text-align:left;max-width:none;margin-top:4px}
   .modal-actions{align-items:stretch;flex-direction:column}.modal-actions .right{justify-content:flex-end}
   .settings-grid,.html-editor-grid,.queue-review-main,.table-tools-grid{grid-template-columns:1fr}
@@ -1729,10 +1747,14 @@ let inflectRequestId = 0;
 let derivedManual = {nameDative:false, jobDative:false, initials:false, nameParts:false, salutation:false};
 let modalSourceEdited = {name:false,job:false};
 const MODAL_CORE_GROUPS = [
-  {title:'Адресат и обращение', fields:['Регион','Наименование (ЕГРЮЛ/лист)','Полное наименование','ФИО','ФИО ДП','Фамилия И.О.','Имя Отчество','Обращение']},
+  {title:'Адресат и обращение', fields:['Регион','Наименование (ЕГРЮЛ/лист)','Полное наименование','ФИО','Имя Отчество','ФИО ДП','Фамилия И.О.','Обращение']},
   {title:'Должность', fields:['Должность','Должность руководителя','Должность руководителя дательный']},
-  {title:'Реквизиты и связь', fields:['ИНН','КПП','ОГРН','Юридический адрес','Основной email','Доп./старые email','Официальный сайт']},
+  {title:'Реквизиты и связь', fields:['ИНН','КПП','ОГРН','Основной email','Официальный сайт','Юридический адрес','Доп./старые email']},
 ];
+// Поля, которые считаются автоматически: метка «АВТО» в подписи.
+const MODAL_AUTO_FIELDS = new Set(['ФИО ДП','Фамилия И.О.','Имя Отчество','Обращение','Должность руководителя дательный']);
+// Расчётные поля, которые удобнее показать как результат, а не как ввод.
+const MODAL_DERIVED_FIELDS = new Set(['Имя Отчество']);
 const CASE_LABELS_CHECK = [
   ['nominative','Именительный'],['genitive','Родительный'],
   ['accusative','Винительный'],['ablative','Творительный'],['prepositional','Предложный']
@@ -1983,8 +2005,8 @@ function modalFieldLabel(name) {
     'Фамилия И.О.':'Фамилия и инициалы',
     'Имя Отчество':'Имя и отчество для обращения',
     'Обращение':'Обращение',
-    'Должность':'Должность для обращения',
-    'Должность руководителя':'Полная должность руководителя из книги',
+    'Должность':'Должность в книге',
+    'Должность руководителя':'Полная должность руководителя',
     'Должность руководителя дательный':'Должность для письма — дательный падеж',
     'Юридический адрес':'Юридический адрес',
     'Основной email':'Основной email (получатель)',
@@ -1993,16 +2015,53 @@ function modalFieldLabel(name) {
   };
   return labels[name]||name;
 }
+// Короткие подписи: полное название остаётся в title, поэтому колонки не
+// растягиваются из-за двухстрочных заголовков.
+function modalShortLabel(name) {
+  const short={
+    'Наименование (ЕГРЮЛ/лист)':'Наименование по книге / ЕГРЮЛ',
+    'Полное наименование':'Полное наименование для письма',
+    'ФИО':'ФИО адресата',
+    'ФИО ДП':'ФИО ДП',
+    'Фамилия И.О.':'Фамилия И.О.',
+    'Имя Отчество':'Имя Отчество',
+    'Должность':'Должность в книге',
+    'Должность руководителя':'Полная должность руководителя',
+    'Должность руководителя дательный':'Должность — дательный падеж',
+    'Основной email':'Основной email',
+    'Доп./старые email':'Доп. / старые email (CC)'
+  };
+  return short[name]||modalFieldLabel(name);
+}
 function modalFieldMarkup(name, value) {
   const longField=['Полное наименование','Наименование (ЕГРЮЛ/лист)','Должность руководителя','Юридический адрес','Источник и примечания','Доп./старые email'].includes(name) || String(value??'').length>110;
+  const badge=MODAL_AUTO_FIELDS.has(name)
+    ? '<span class="field-badge auto">авто</span>'
+    : (['ФИО','Должность','Регион','ИНН','КПП','ОГРН'].includes(name) ? '<span class="field-badge source">источник</span>' : '');
+  const label=`<label title="${esc(modalFieldLabel(name))}">${esc(modalShortLabel(name))}${badge}</label>`;
+  if (MODAL_DERIVED_FIELDS.has(name)) {
+    return `<div class="modal-field${longField?' wide':''}">${label}<div class="field-derived${String(value??'').trim()?'':' empty'}" data-modal-derived="${esc(name)}">${String(value??'').trim()?esc(value):'посчитается по ФИО'}</div><input type="hidden" data-modal-field="${esc(name)}" value="${esc(value)}"></div>`;
+  }
   const field=longField
     ? `<textarea data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}">${esc(value)}</textarea>`
     : `<input type="text" data-modal-field="${esc(name)}" aria-label="${esc(modalFieldLabel(name))}" value="${esc(value)}" placeholder="Введите значение">`;
-  return `<div class="modal-field${longField?' wide':''}"><label title="${esc(modalFieldLabel(name))}">${esc(modalFieldLabel(name))}</label>${field}</div>`;
+  return `<div class="modal-field${longField?' wide':''}">${label}${field}</div>`;
+}
+// Расчётное поле показываем текстом, но значения читаем и пишем как обычно:
+// служебный input остаётся в разметке, поэтому readModalFields() не меняется.
+function syncDerivedFields() {
+  document.querySelectorAll('[data-modal-derived]').forEach(node=>{
+    const name=node.dataset.modalDerived;
+    const input=modalInput(name);
+    const value=(input?.value||'').trim();
+    node.textContent=value||'посчитается по ФИО';
+    node.classList.toggle('empty',!value);
+  });
 }
 function renderRecordFields(values) {
   const coreNames=new Set(MODAL_CORE_GROUPS.flatMap(group=>group.fields));
   $('modalCoreFields').innerHTML=MODAL_CORE_GROUPS.map(group=>`<section class="modal-section"><h3>${esc(group.title)}</h3><div class="modal-fields">${group.fields.map(name=>modalFieldMarkup(name,values[name]??'')).join('')}</div></section>`).join('');
+  syncDerivedFields();
   const extraNames=[...new Set([...(templateInfo.fields||[]),...Object.keys(values)])].filter(name=>!coreNames.has(name));
   $('modalExtraFields').innerHTML=extraNames.length
     ? `<div class="modal-fields">${extraNames.map(name=>modalFieldMarkup(name,values[name]??'')).join('')}</div>`
@@ -2067,6 +2126,7 @@ function renderRecipientInflections(result, applyChangedFields=false) {
     if (modalSourceEdited.name && !derivedManual.salutation && result.salutation) setModalField('Обращение',result.salutation);
     if (modalSourceEdited.job && !derivedManual.jobDative && result.jobRecognized) setModalField('Должность руководителя дательный',result.jobCases.dative);
   }
+  syncDerivedFields();
 }
 function updateInflections(sourceKind='') {
   if (!activeModalRecordId) return;
@@ -2115,6 +2175,7 @@ function openRecordCard(id) {
   $('modalCloseBtn').focus();
   document.querySelectorAll('[data-modal-field]').forEach(input=>input.addEventListener('input',()=>{
     const name=input.dataset.modalField;
+    syncDerivedFields();
     if(name==='ФИО' || (name==='Руководитель'&&!modalInput('ФИО')?.value.trim())) updateInflections('name');
     else if(name==='Должность' || (name==='Должность руководителя'&&!modalInput('Должность')?.value.trim())) updateInflections('job');
     else if(name==='ФИО ДП') derivedManual.nameDative=true;
