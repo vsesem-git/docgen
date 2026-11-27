@@ -28,6 +28,15 @@ define('DOCGEN_BACKUP_IMPORT_DIR', DOCGEN_STORAGE_DIR . '/backup-imports');
 define('DOCGEN_PROGRESS_DIR', DOCGEN_STORAGE_DIR . '/progress');
 define('DOCGEN_DATA_OVERRIDE_FILE', DOCGEN_STORAGE_DIR . '/records.json');
 define('DOCGEN_DEMO_OVERRIDES_FILE', DOCGEN_STORAGE_DIR . '/demo_overrides.json');
+// index.php объявляет эти константы для страницы. cron_send.php подключает
+// только этот файл, поэтому те же значения определяются здесь с защитой от
+// повторного объявления — иначе генерация рассылок в cron упадёт.
+defined('DATA_FILE') || define('DATA_FILE', __DIR__ . '/data/records.json');
+defined('DEMO_OVERRIDES_FILE') || define('DEMO_OVERRIDES_FILE', __DIR__ . '/data/demo_overrides.json');
+defined('SAMPLE_TEMPLATE') || define('SAMPLE_TEMPLATE', __DIR__ . '/samples/letter_example.docx');
+defined('DOWNLOAD_TTL_SECONDS') || define('DOWNLOAD_TTL_SECONDS', 86400);
+defined('MAX_TEMPLATE_BYTES') || define('MAX_TEMPLATE_BYTES', 20_000_000);
+defined('MAX_ROWS_PER_RUN') || define('MAX_ROWS_PER_RUN', 300);
 define('DOCGEN_DADATA_API_URL', 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party');
 define('DOCGEN_DADATA_BATCH_SIZE', 20);
 define('DOCGEN_TEMPLATE_INDEX', DOCGEN_TEMPLATES_DIR . '/index.json');
@@ -305,6 +314,16 @@ function docgenResolveTemplate(): array
         $id = 'sample-docx';
     }
     if ($id === 'sample-docx') {
+        // validateDocxPath() и SAMPLE_TEMPLATE объявлены в index.php. При прямом
+        // require этого файла (cron, тесты) берём образец сами, не падая на
+        // неопределённой функции.
+        if (!function_exists('validateDocxPath')) {
+            $samplePath = defined('SAMPLE_TEMPLATE') ? SAMPLE_TEMPLATE : __DIR__ . '/samples/letter_example.docx';
+            if (!is_file($samplePath)) {
+                throw new RuntimeException('Образец письма не найден.');
+            }
+            return ['id' => 'sample-docx', 'name' => 'Письмо-пример.docx', 'type' => 'docx', 'path' => $samplePath, 'sample' => true];
+        }
         validateDocxPath(SAMPLE_TEMPLATE);
         return ['id' => $id, 'name' => 'Письмо-пример.docx', 'type' => 'docx', 'path' => SAMPLE_TEMPLATE, 'sample' => true];
     }
@@ -2142,12 +2161,23 @@ function docgenSaveQueueItem(array $meta): void
     $id = (string) ($meta['id'] ?? '');
     $path = docgenQueuePath($id);
     docgenWriteJson($path . '/meta.json', $meta);
+    // Список перечитывается со сверки: письмо только что изменилось.
+    docgenQueueList(true);
 }
 
-function docgenQueueList(): array
+/**
+ * Все письма очереди. На 20 000 писем это 20 000 небольших файлов, поэтому
+ * список кэшируется на время одного процесса: cron за тик обращается к нему
+ * несколько раз (отправка, подсчёт пачек, прогресс рассылки).
+ */
+function docgenQueueList(bool $fresh = false): array
 {
+    static $cache = null;
+    if (!$fresh && is_array($cache)) {
+        return $cache;
+    }
     if (!is_dir(DOCGEN_QUEUE_DIR)) {
-        return [];
+        return $cache = [];
     }
     $items = [];
     foreach (scandir(DOCGEN_QUEUE_DIR) ?: [] as $id) {
@@ -2160,7 +2190,17 @@ function docgenQueueList(): array
         }
     }
     usort($items, static fn(array $a, array $b): int => strcmp((string) ($b['createdAt'] ?? ''), (string) ($a['createdAt'] ?? '')));
-    return array_slice($items, 0, 500);
+    return $cache = $items;
+}
+
+/**
+ * Свежая часть очереди для интерфейса. Отправка и подсчёты берут полный
+ * список, но браузеру незачем получать 20 000 meta.json сразу: в таблице
+ * очереди всё равно видно только последние письма.
+ */
+function docgenQueueRecent(int $limit = 500): array
+{
+    return array_slice(docgenQueueList(), 0, max(1, $limit));
 }
 
 function docgenBatchPath(string $id): string
@@ -5200,8 +5240,8 @@ function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): 
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['save_table_view', 'template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
-    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress', 'records', 'records_ids', 'record', 'table_view'];
+    $postActions = ['save_table_view', 'template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'mailing_create', 'mailing_action', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress', 'records', 'records_ids', 'record', 'table_view', 'mailing_tasks', 'mailing_task'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -5210,6 +5250,10 @@ function docgenDispatch(string $action): void
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте GET.'], 405);
     }
     switch ($action) {
+        case 'mailing_tasks':
+            docgenMailingTasksAction();
+        case 'mailing_task':
+            docgenMailingTaskAction();
         case 'table_view':
             sendJson(['ok' => true] + docgenTableView());
         case 'save_table_view':
@@ -5303,13 +5347,17 @@ function docgenDispatch(string $action): void
         case 'add_table_section':
             docgenAddTableSection();
         case 'queue':
-            sendJson(['ok' => true, 'items' => docgenQueueList(), 'batches' => docgenBatchList()]);
+            sendJson(['ok' => true, 'items' => docgenQueueRecent(), 'batches' => docgenBatchList()]);
         case 'queue_file':
             docgenQueueFile();
         case 'update_queue_item':
             docgenUpdateQueueItem();
         case 'send_queue_item':
             docgenSendQueueItem();
+        case 'mailing_create':
+            docgenMailingCreateAction();
+        case 'mailing_action':
+            docgenMailingAction();
         case 'review_batch':
             docgenReviewBatch();
         case 'change_batch_account':
@@ -5334,4 +5382,181 @@ function docgenDispatch(string $action): void
     }
 }
 
-?>
+/**
+ * Доступ к книге записей и разбор DOCX.
+ *
+ * Эти функции раньше жили в index.php — рядом с HTML-страницей. Фоновой
+ * генерации рассылок и cron-отправке они нужны без браузера, а index.php
+ * в CLI не подключается, поэтому переехали сюда: features.php грузится и
+ * веб-страницей, и cron_send.php.
+ */
+
+function loadJsonFile(string $path, array $fallback = []): array
+{
+    if (!is_file($path)) {
+        return $fallback;
+    }
+    $decoded = json_decode((string) file_get_contents($path), true);
+    return is_array($decoded) ? $decoded : $fallback;
+}
+
+function loadDataset(): array
+{
+    // A restored database lives in private storage and takes precedence over
+    // the read-only book shipped with the application.
+    $source = is_file(DOCGEN_DATA_OVERRIDE_FILE) ? DOCGEN_DATA_OVERRIDE_FILE : DATA_FILE;
+    return docgenMergeUserTableData(loadJsonFile($source, ['origin' => '', 'sheets' => [], 'records' => []]));
+}
+
+function baseFields(array $record): array
+{
+    static $manualValues = null;
+    static $savedEdits = null;
+    static $customColumns = null;
+    if ($manualValues === null) {
+        $manualValues = loadDemoOverrides();
+    }
+    if ($savedEdits === null) {
+        $savedEdits = loadRecordEdits();
+    }
+    $fields = recordFields($record);
+    $id = (string) ($record['id'] ?? '');
+    $manual = $manualValues[$id] ?? [];
+    if (is_array($manual)) {
+        foreach ($manual as $name => $value) {
+            if (!array_key_exists($name, $fields)) {
+                $fields[$name] = $value;
+            }
+        }
+    }
+    $edits = $savedEdits[$id] ?? [];
+    if (is_array($edits)) {
+        foreach ($edits as $name => $value) {
+            $fields[$name] = $value;
+        }
+    }
+    if ($customColumns === null) {
+        $customColumns = docgenTableData()['columns'];
+    }
+    foreach ($customColumns as $column) {
+        if (!array_key_exists($column, $fields)) {
+            $fields[$column] = '';
+        }
+    }
+    return $fields;
+}
+
+function scanDocxVariables(string $path): array
+{
+    $zip = new ZipArchive();
+    $opened = $zip->open($path);
+    if ($opened !== true || $zip->locateName('word/document.xml') === false) {
+        if ($opened === true) {
+            $zip->close();
+        }
+        throw new RuntimeException('Файл не похож на корректный DOCX-шаблон.');
+    }
+
+    $variables = [];
+    $hasLegacy = false;
+    $hasPhpWord = false;
+    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $name = $zip->getNameIndex($i);
+        if (!is_string($name) || !preg_match('#^word/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$#', $name)) {
+            continue;
+        }
+        $xml = $zip->getFromName($name);
+        if (!is_string($xml) || $xml === '') {
+            continue;
+        }
+        $dom = new DOMDocument();
+        $dom->preserveWhiteSpace = true;
+        $dom->formatOutput = false;
+        if (!@$dom->loadXML($xml, LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR)) {
+            continue;
+        }
+        $xpath = new DOMXPath($dom);
+        $xpath->registerNamespace('w', $wordNs);
+        foreach ($xpath->query('//w:p') as $paragraph) {
+            $text = '';
+            foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+                $text .= $textNode->textContent;
+            }
+            if ($text === '') {
+                continue;
+            }
+            if (preg_match_all('/\$\{([^{}]+)\}/u', $text, $matches)) {
+                $hasPhpWord = true;
+                foreach ($matches[1] as $variable) {
+                    $variable = trim($variable);
+                    if ($variable !== '' && !isUuidLike($variable)) {
+                        $variables[$variable] = true;
+                    }
+                }
+            }
+            if (preg_match_all('/(?<!\$)\{([^{}]+)\}/u', $text, $matches)) {
+                foreach ($matches[1] as $variable) {
+                    $variable = trim($variable);
+                    if ($variable !== '' && !isUuidLike($variable)) {
+                        $hasLegacy = true;
+                        $variables[$variable] = true;
+                    }
+                }
+            }
+        }
+    }
+    $zip->close();
+
+    $names = array_keys($variables);
+    return [
+        'fields' => $names,
+        'syntax' => $hasLegacy && $hasPhpWord ? 'mixed' : ($hasLegacy ? 'filldocuments' : ($hasPhpWord ? 'phpword' : 'none')),
+        'syntaxLabel' => $hasLegacy && $hasPhpWord ? 'Смешанный формат' : ($hasLegacy ? 'FillDocuments {поле}' : ($hasPhpWord ? 'PHPWord ${поле}' : 'переменные не найдены')),
+    ];
+}
+
+function loadDemoOverrides(): array
+{
+    $source = is_file(DOCGEN_DEMO_OVERRIDES_FILE) ? DOCGEN_DEMO_OVERRIDES_FILE : DEMO_OVERRIDES_FILE;
+    return loadJsonFile($source, []);
+}
+
+function loadRecordEdits(): array
+{
+    return loadJsonFile(RECORD_EDITS_FILE, []);
+}
+
+function isUuidLike(string $value): bool
+{
+    return (bool) preg_match('/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i', trim($value));
+}
+
+function cleanupTree(string $path): void
+{
+    if (!is_dir($path)) {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+        return;
+    }
+    foreach (scandir($path) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $child = $path . DIRECTORY_SEPARATOR . $entry;
+        if (is_dir($child)) {
+            cleanupTree($child);
+        } else {
+            @unlink($child);
+        }
+    }
+    @rmdir($path);
+}
+
+function recordFields(array $record): array
+{
+    $fields = $record['fields'] ?? [];
+    return is_array($fields) ? $fields : [];
+}

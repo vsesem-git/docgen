@@ -17,6 +17,7 @@ const MAX_ROWS_PER_RUN = 300;
 
 require __DIR__ . '/features.php';
 require __DIR__ . '/table_features.php';
+require __DIR__ . '/mailing_tasks.php';
 
 function sendJson(array $payload, int $status = 200): never
 {
@@ -25,72 +26,6 @@ function sendJson(array $payload, int $status = 200): never
     header('Cache-Control: no-store');
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
-}
-
-function loadJsonFile(string $path, array $fallback = []): array
-{
-    if (!is_file($path)) {
-        return $fallback;
-    }
-    $decoded = json_decode((string) file_get_contents($path), true);
-    return is_array($decoded) ? $decoded : $fallback;
-}
-
-function loadDataset(): array
-{
-    // A restored database lives in private storage and takes precedence over
-    // the read-only book shipped with the application.
-    $source = is_file(DOCGEN_DATA_OVERRIDE_FILE) ? DOCGEN_DATA_OVERRIDE_FILE : DATA_FILE;
-    return docgenMergeUserTableData(loadJsonFile($source, ['origin' => '', 'sheets' => [], 'records' => []]));
-}
-
-function loadDemoOverrides(): array
-{
-    $source = is_file(DOCGEN_DEMO_OVERRIDES_FILE) ? DOCGEN_DEMO_OVERRIDES_FILE : DEMO_OVERRIDES_FILE;
-    return loadJsonFile($source, []);
-}
-
-function loadRecordEdits(): array
-{
-    return loadJsonFile(RECORD_EDITS_FILE, []);
-}
-
-function baseFields(array $record): array
-{
-    static $manualValues = null;
-    static $savedEdits = null;
-    static $customColumns = null;
-    if ($manualValues === null) {
-        $manualValues = loadDemoOverrides();
-    }
-    if ($savedEdits === null) {
-        $savedEdits = loadRecordEdits();
-    }
-    $fields = recordFields($record);
-    $id = (string) ($record['id'] ?? '');
-    $manual = $manualValues[$id] ?? [];
-    if (is_array($manual)) {
-        foreach ($manual as $name => $value) {
-            if (!array_key_exists($name, $fields)) {
-                $fields[$name] = $value;
-            }
-        }
-    }
-    $edits = $savedEdits[$id] ?? [];
-    if (is_array($edits)) {
-        foreach ($edits as $name => $value) {
-            $fields[$name] = $value;
-        }
-    }
-    if ($customColumns === null) {
-        $customColumns = docgenTableData()['columns'];
-    }
-    foreach ($customColumns as $column) {
-        if (!array_key_exists($column, $fields)) {
-            $fields[$column] = '';
-        }
-    }
-    return $fields;
 }
 
 function preserveWordCase(string $original, string $inflected): string
@@ -431,87 +366,11 @@ function streamStoredDownload(): never
     exit;
 }
 
-function isUuidLike(string $value): bool
-{
-    return (bool) preg_match('/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i', trim($value));
-}
-
 /**
  * Scan Word text paragraphs only (not XML attributes), so GUIDs in image metadata
  * are not mistaken for template variables. Both FillDocuments {field} and PHPWord
  * ${field} forms are recognized.
  */
-function scanDocxVariables(string $path): array
-{
-    $zip = new ZipArchive();
-    $opened = $zip->open($path);
-    if ($opened !== true || $zip->locateName('word/document.xml') === false) {
-        if ($opened === true) {
-            $zip->close();
-        }
-        throw new RuntimeException('Файл не похож на корректный DOCX-шаблон.');
-    }
-
-    $variables = [];
-    $hasLegacy = false;
-    $hasPhpWord = false;
-    $wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
-
-    for ($i = 0; $i < $zip->numFiles; $i++) {
-        $name = $zip->getNameIndex($i);
-        if (!is_string($name) || !preg_match('#^word/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$#', $name)) {
-            continue;
-        }
-        $xml = $zip->getFromName($name);
-        if (!is_string($xml) || $xml === '') {
-            continue;
-        }
-        $dom = new DOMDocument();
-        $dom->preserveWhiteSpace = true;
-        $dom->formatOutput = false;
-        if (!@$dom->loadXML($xml, LIBXML_NONET | LIBXML_NOWARNING | LIBXML_NOERROR)) {
-            continue;
-        }
-        $xpath = new DOMXPath($dom);
-        $xpath->registerNamespace('w', $wordNs);
-        foreach ($xpath->query('//w:p') as $paragraph) {
-            $text = '';
-            foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
-                $text .= $textNode->textContent;
-            }
-            if ($text === '') {
-                continue;
-            }
-            if (preg_match_all('/\$\{([^{}]+)\}/u', $text, $matches)) {
-                $hasPhpWord = true;
-                foreach ($matches[1] as $variable) {
-                    $variable = trim($variable);
-                    if ($variable !== '' && !isUuidLike($variable)) {
-                        $variables[$variable] = true;
-                    }
-                }
-            }
-            if (preg_match_all('/(?<!\$)\{([^{}]+)\}/u', $text, $matches)) {
-                foreach ($matches[1] as $variable) {
-                    $variable = trim($variable);
-                    if ($variable !== '' && !isUuidLike($variable)) {
-                        $hasLegacy = true;
-                        $variables[$variable] = true;
-                    }
-                }
-            }
-        }
-    }
-    $zip->close();
-
-    $names = array_keys($variables);
-    return [
-        'fields' => $names,
-        'syntax' => $hasLegacy && $hasPhpWord ? 'mixed' : ($hasLegacy ? 'filldocuments' : ($hasPhpWord ? 'phpword' : 'none')),
-        'syntaxLabel' => $hasLegacy && $hasPhpWord ? 'Смешанный формат' : ($hasLegacy ? 'FillDocuments {поле}' : ($hasPhpWord ? 'PHPWord ${поле}' : 'переменные не найдены')),
-    ];
-}
-
 function validateDocxPath(string $path): void
 {
     if (!is_file($path) || filesize($path) > MAX_TEMPLATE_BYTES) {
@@ -566,12 +425,6 @@ function templateFromRequest(): array
     throw new RuntimeException('Загрузите DOCX-шаблон или выберите пример.');
 }
 
-function recordFields(array $record): array
-{
-    $fields = $record['fields'] ?? [];
-    return is_array($fields) ? $fields : [];
-}
-
 function buildFieldAnalysis(array $templateInfo, array $records, string $sourceKey = ''): array
 {
     $sourceRecords = array_values(array_filter($records, static function ($record) use ($sourceKey) {
@@ -592,28 +445,6 @@ function buildFieldAnalysis(array $templateInfo, array $records, string $sourceK
         ];
     }
     return $fields;
-}
-
-function cleanupTree(string $path): void
-{
-    if (!is_dir($path)) {
-        if (is_file($path)) {
-            @unlink($path);
-        }
-        return;
-    }
-    foreach (scandir($path) ?: [] as $entry) {
-        if ($entry === '.' || $entry === '..') {
-            continue;
-        }
-        $child = $path . DIRECTORY_SEPARATOR . $entry;
-        if (is_dir($child)) {
-            cleanupTree($child);
-        } else {
-            @unlink($child);
-        }
-    }
-    @rmdir($path);
 }
 
 function handleSaveRecord(): never
@@ -1061,6 +892,15 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .var-row input{width:13px;height:13px;margin:0;flex:none;cursor:pointer;accent-color:var(--brand)}
 .var-name{font-weight:650;color:var(--ink);white-space:nowrap}
 .var-row.off .var-name{text-decoration:line-through;color:#9a5a52}
+.mailing-task{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:11px 13px;margin-bottom:9px}
+.mailing-head{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:13.5px}
+.mailing-metrics{display:flex;gap:14px;flex-wrap:wrap;margin-top:7px;font-size:12.5px;color:var(--muted)}
+.mailing-metrics b{color:var(--ink)}
+.mailing-errors b{color:#b4453a}
+.mailing-bar{display:flex;height:7px;border-radius:999px;background:#e7eef5;overflow:hidden;margin-top:9px}
+.mailing-bar-sent{background:var(--brand);height:100%}
+.mailing-bar-ready{background:#8fc4a8;height:100%}
+.mailing-lasterror{margin-top:7px}
 .var-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}
 .var-tools .small-muted{flex:1;min-width:180px}
 .var-chip{cursor:pointer;background:#fff;border:1px solid #bfd2e6;border-radius:7px;padding:5px 9px;font-size:11.5px;color:#174a7e;font-family:inherit}
@@ -1467,6 +1307,7 @@ body.modal-open{overflow:hidden}
 
   <section class="toolbar">
     <button class="btn-primary" id="generateBtn" disabled>Сформировать PDF и подготовить очередь</button>
+    <button class="btn-ghost" id="createMailingBtn" type="button" title="Для баз больше 300 писем: документы генерируются в фоне, по мере отправки">Создать задачу рассылки</button>
     <button class="btn-ghost" id="checkManagersBtn" type="button" disabled>Сверить руководителей по ИНН</button>
     <button class="btn-ghost" id="refreshFromDadataBtn" type="button" disabled>Обновить через DaData</button>
     <button class="btn-ghost" id="selectFilteredBtn" type="button">Выбрать все по фильтру</button>
@@ -1570,6 +1411,10 @@ body.modal-open{overflow:hidden}
       <span class="pager"><button type="button" class="btn-ghost btn-small" id="prevPage">← Назад</button><span id="pageLabel"></span><button type="button" class="btn-ghost btn-small" id="nextPage">Далее →</button></span>
       <span>Можно отметить строки вручную или выбрать все записи, подходящие под фильтр.</span>
     </div>
+  </section>
+  <section class="queue-section" id="mailingTasks">
+    <div class="queue-head"><div><h2>Задачи рассылки</h2><p>Для больших баз: 4 000–20 000 писем. Создание задачи только запоминает отбор — документы генерируются в фоне порциями, по мере отправки. Так не нужно ждать час и не нужно держать 20 000 PDF на диске сразу. Разовые пачки до 300 писем формируются кнопкой «Сформировать» и появляются в очереди ниже.</p></div><div class="queue-tools"><span class="pill" id="mailingCount">Задачи загружаются…</span><button type="button" class="btn-ghost btn-small" id="refreshMailingBtn">Обновить</button></div></div>
+    <div id="mailingList" class="queue-list"><div class="empty-state">Загружаем задачи…</div></div>
   </section>
   <section class="queue-section" id="emailQueue">
     <div class="queue-head"><div><h2>Очередь писем</h2><p>Здесь только пачки, ожидающие ручной проверки. Сначала формируется очередь писем, потом — на этом экране — выбирается ящик, из которого пачка пойдёт: откройте аккордеон, проверьте письма, выберите отправителя и передайте пачку в ручную очередь или, с явным разрешением, в расписание. Остальные пачки — в <button type="button" class="link-button" data-open-manager>менеджере очереди</button>.</p></div><div class="queue-tools"><span class="pill" id="queueCount">Очередь загружается…</span><button type="button" class="btn-ghost btn-small" data-open-manager>Менеджер очереди</button><button type="button" class="btn-ghost btn-small" id="refreshQueueBtn">Обновить очередь</button></div></div>
@@ -1784,6 +1629,7 @@ let templateFile = null;
 let templateLibrary = [];
 let editingHtmlTemplateId = '';
 let queueItems = [];
+let mailingTasks = [];
 let reviewBatches = [];
 let activeQueueItemId = '';
 let activeQueuePreview = 'pdf';
@@ -2992,6 +2838,67 @@ async function refreshQueue() {
   $('queueCount').className='pill '+(reviewBatches.length?'warn':'ok');
   renderQueue();
 }
+function mailingStatus(task) {
+  const map={generating:['Генерируется','warn'],ready:['Готово к отправке','ok'],paused:['Генерация на паузе','warn'],failed:['Ошибка генерации','bad'],cancelled:['Отменена','']};
+  return map[task.status]||[task.status||'—',''];
+}
+function mailingBar(m,total){
+  if(!total)return '';
+  const part=Math.round(Number(m.ready||0)/total*100);
+  const done=Math.round(Number(m.sent||0)/total*100);
+  return `<div class="mailing-bar" title="Готово к отправке: ${Number(m.ready||0)} · отправлено: ${Number(m.sent||0)} из ${total}"><span class="mailing-bar-ready" style="width:${part}%"></span><span class="mailing-bar-sent" style="width:${done}%"></span></div>`;
+}
+function renderMailing(){
+  const list=$('mailingList');
+  if(!mailingTasks.length){
+    list.innerHTML='<div class="queue-empty">Задач рассылки нет. Для баз больше 300 писем создайте задачу кнопкой «Создать задачу рассылки» — документы сгенерируются в фоне, а не за один запрос.</div>';
+    $('mailingCount').textContent='Задач нет';$('mailingCount').className='pill';
+    return;
+  }
+  list.innerHTML=mailingTasks.map(task=>{
+    const m=task.metrics||{};
+    const [label,css]=mailingStatus(task);
+    const total=Number(task.plannedCount||0);
+    const errs=Number(task.errorCount||0);
+    const actions=[];
+    if(task.status==='generating')actions.push(`<button type="button" class="btn-ghost btn-small" data-mailing-op="pause" data-mailing-id="${esc(task.id)}">Пауза</button>`);
+    if(task.status==='paused'||task.status==='failed')actions.push(`<button type="button" class="btn-ghost btn-small" data-mailing-op="resume" data-mailing-id="${esc(task.id)}">Продолжить</button>`);
+    if(task.status==='generating'||task.status==='paused')actions.push(`<button type="button" class="btn-ghost btn-small" data-mailing-op="tick" data-mailing-id="${esc(task.id)}">Сгенерировать сейчас</button>`);
+    actions.push(`<button type="button" class="btn-ghost btn-small" data-mailing-op="delete" data-mailing-id="${esc(task.id)}">Удалить задачу</button>`);
+    return `<div class="mailing-task"><div class="mailing-head"><b>${esc(task.name||'Рассылка')}</b><span class="status-label ${css}">${label}</span><span class="small-muted">${esc(task.templateName||'')}</span></div>`
+      +`<div class="mailing-metrics"><span>Всего записей: <b>${total}</b></span><span>Готово писем: <b>${Number(m.ready||0)}</b></span><span>Отправлено: <b>${Number(m.sent||0)}</b></span><span>Ожидает генерации: <b>${Number(m.unresolved||0)}</b></span>${errs?`<span class="mailing-errors">Пропущено: <b>${errs}</b></span>`:''}</div>`
+      +mailingBar(m,total)
+      +(task.lastError?`<div class="small-muted mailing-lasterror">Последнее замечание: ${esc(task.lastError)}</div>`:'')
+      +`<div class="batch-review-actions">${actions.join('')}<span class="small-muted">Письма появляются в очереди пачками и отправляются по расписанию из выбранного ящика.</span></div></div>`;
+  }).join('');
+  list.querySelectorAll('[data-mailing-op]').forEach(button=>button.addEventListener('click',()=>mailingOp(button.dataset.mailingId,button.dataset.mailingOp)));
+  const active=mailingTasks.filter(task=>task.status==='generating').length;
+  const left=mailingTasks.reduce((sum,task)=>sum+Number((task.metrics||{}).unresolved||0),0);
+  $('mailingCount').textContent=active?`${active} в работе · ещё ${left} писем`:`Задач: ${mailingTasks.length}`;
+  $('mailingCount').className='pill '+(active?'warn':'ok');
+}
+async function refreshMailing(){
+  try {
+    const response=await fetch('?action=mailing_tasks',{cache:'no-store'});
+    const payload=await response.json();
+    if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось загрузить задачи рассылки.');
+    mailingTasks=payload.tasks||[];
+    renderMailing();
+  } catch(e) {
+    $('mailingList').innerHTML=`<div class="queue-empty">${esc(e.message||'Ошибка загрузки задач.')}</div>`;
+  }
+}
+async function mailingOp(id,op){
+  const fd=new FormData();fd.append('id',id);fd.append('op',op);
+  try {
+    const labels={pause:'Генерация приостановлена.',resume:'Генерация продолжится в ближайшую минуту.',tick:'Порция сгенерирована.',delete:'Задача удалена, письма в очереди остались.'};
+    await requestJson('?action=mailing_action',{method:'POST',headers:csrfHeaders(),body:fd},120000);
+    showToast(labels[op]||'Готово.','success');
+    await Promise.all([refreshMailing(),refreshQueue()]);
+  } catch(e) {
+    showToast(e.message||'Не удалось выполнить действие.','error');
+  }
+}
 function currentQueueItem() { return queueItems.find(item=>item.id===activeQueueItemId)||null; }
 function queueItemHasHtml(item) { return Boolean(item&&String(item.bodyHtml||'').trim()); }
 function queuePreviewTab(tab) {
@@ -3919,6 +3826,7 @@ async function init() {
     try { await loadLetterTemplate(); } catch(e) { $('letterFeedback').textContent=e.message||'Не удалось загрузить шаблон письма.'; }
     try { await loadDadataSettings(); } catch(e) { $('dadataFeedback').textContent=e.message||'Не удалось загрузить настройки DaData.'; }
     try { await refreshQueue(); } catch(e) { $('queueCount').textContent='Ошибка загрузки'; }
+    try { await refreshMailing(); } catch(e) { $('mailingCount').textContent='Ошибка загрузки'; }
     const reviewId=new URLSearchParams(location.search).get('review');
     if(reviewId&&queueItems.some(item=>item.id===reviewId))openQueueItem(reviewId);
     updateMapping();
@@ -3978,6 +3886,8 @@ document.addEventListener('keydown',event=>{if(event.key==='Escape')closeFacetPo
 $('prevPage').addEventListener('click',()=>{if(tableState.page>1)loadTablePage(tableState.page-1);});
 $('nextPage').addEventListener('click',()=>{if(tableState.page<tableState.pageCount)loadTablePage(tableState.page+1);});
 $('generateBtn').addEventListener('click',generate);
+$('createMailingBtn').addEventListener('click',createMailingTask);
+$('refreshMailingBtn').addEventListener('click',refreshMailing);
 $('checkManagersBtn').addEventListener('click',checkSelectedManagers);
 $('cancelManagerCheckBtn').addEventListener('click',()=>{managerCheckCancelRequested=true;$('managerCheckProgressText').textContent='Завершаем текущий пакет DaData; новые запросы больше не запускаются…';});
 $('refreshFromDadataBtn').addEventListener('click',fetchDadataForUpdate);

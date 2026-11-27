@@ -505,5 +505,85 @@ check($clean['widths'] === [], 'недопустимые ширины отбра
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');
 
+// 17. Задачи рассылки: план создаётся без генерации, прогресс считается по очереди.
+require_once __DIR__ . '/../mailing_tasks.php';
+$planIds = [];
+for ($i = 1; $i <= 7; $i++) {
+    $planIds[] = 'mail-' . $i;
+}
+$task = docgenMailingCreate([
+    'name' => 'Проверка плана',
+    'templateId' => 'sample-docx',
+    'ids' => $planIds,
+    'excludedFields' => [],
+    'letter' => [],
+]);
+check(($task['plannedCount'] ?? 0) === 7, 'задача запоминает весь отбор без генерации', (string) ($task['plannedCount'] ?? 0));
+check(($task['status'] ?? '') === 'generating', 'новая задача переходит в генерацию');
+check(is_file(docgenMailingTaskFile((string) $task['id'])), 'задача сохраняется на диск');
+$storedPlan = docgenMailingPlan((string) $task['id']);
+check(count((array) ($storedPlan['ids'] ?? [])) === 7, 'план хранит все id для фоновой генерации');
+
+// Письма задачи попадают в очередь с привязкой к задаче — по ней считается прогресс.
+foreach ($planIds as $position => $mailId) {
+    if ($position >= 3) {
+        break;
+    }
+    docgenSaveQueueItem([
+        'id' => str_pad((string) ($position + 1), 32, 'b', STR_PAD_LEFT),
+        'batchId' => '',
+        'mailingTaskId' => (string) $task['id'],
+        'recordId' => $mailId,
+        'status' => 'queued',
+        'to' => 'r@example.com',
+        'subject' => 'Тема',
+        'body' => 'Текст',
+        'bodyHtml' => '',
+        'createdAt' => date(DATE_ATOM),
+    ]);
+}
+$metrics = docgenMailingMetrics((string) $task['id']);
+check(($metrics['ready'] ?? 0) === 3, 'готовые письма задачи считаются по привязке', (string) ($metrics['ready'] ?? 0));
+check(($metrics['unresolved'] ?? -1) === 4, 'нерешённые письма = план минус готовые', (string) ($metrics['unresolved'] ?? -1));
+check(($metrics['planned'] ?? 0) === 7, 'план остаётся виден рядом с прогрессом');
+
+// Очередь не обрезается: отправка обязана видеть все письма, а не первые 500.
+$queueIds = [];
+for ($i = 1; $i <= 520; $i++) {
+    $queueIds[] = str_pad((string) $i, 32, 'c', STR_PAD_LEFT);
+    docgenSaveQueueItem([
+        'id' => end($queueIds),
+        'batchId' => '',
+        'recordId' => 'bulk-' . $i,
+        'status' => 'scheduled',
+        'to' => 'bulk' . $i . '@example.com',
+        'subject' => 'Тема',
+        'body' => 'Текст',
+        'bodyHtml' => '',
+        'createdAt' => date(DATE_ATOM),
+    ]);
+}
+$allScheduled = array_filter(docgenQueueList(true), static fn(array $item): bool => ($item['status'] ?? '') === 'scheduled');
+check(count($allScheduled) >= 520, 'список очереди не обрезается на 500 письмах', (string) count($allScheduled));
+$recent = docgenQueueRecent();
+check(count($recent) === 500, 'интерфейсу отдаются только свежие 500 писем', (string) count($recent));
+
+// Пауза останавливает генерацию, повторное включение её возвращает.
+$paused = docgenMailingTask((string) $task['id']);
+$paused['status'] = 'paused';
+docgenMailingSaveTask($paused);
+$tick = docgenMailingGenerateTick((string) $task['id']);
+check(($tick['reason'] ?? '') === 'paused', 'на паузе тик ничего не генерирует');
+$paused['status'] = 'cancelled';
+docgenMailingSaveTask($paused);
+$stopped = docgenMailingGenerateTick((string) $task['id']);
+check(($stopped['reason'] ?? '') === 'not_generating', 'отменённая задача не генерируется');
+
+// Удаление задачи убирает план, но не трогает письма в очереди.
+$queuedBefore = count(docgenQueueList(true));
+docgenMailingDelete((string) $task['id']);
+check(docgenMailingTask((string) $task['id']) === [], 'удалённая задача исчезает из списка');
+check(count(docgenQueueList(true)) === $queuedBefore, 'удаление задачи не удаляет письма очереди');
+
 echo $failures === 0 ? "OK: {$checks} checks passed\n" : "FAILED: {$failures} of {$checks}\n";
 exit($failures === 0 ? 0 : 1);
