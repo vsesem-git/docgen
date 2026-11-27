@@ -900,18 +900,32 @@ if ($action === 'save_record') {
     handleSaveRecord();
 }
 if ($action === 'data') {
+    // Только метаданные: на 20 000 записей полный набор весит ~30 МБ, и его
+    // нельзя отдавать браузеру при каждом открытии. Сами записи приходят
+    // страницами через ?action=records.
     $dataset = loadDataset();
     $records = $dataset['records'] ?? [];
-    foreach ($records as &$record) {
-        if (is_array($record)) {
-            $record['fields'] = baseFields($record);
+    $bySource = [];
+    $regions = [];
+    foreach ($records as $record) {
+        if (!is_array($record) || !isset($record['id'])) {
+            continue;
+        }
+        $key = (string) ($record['source_key'] ?? '');
+        $bySource[$key] = ($bySource[$key] ?? 0) + 1;
+        $fields = baseFields($record);
+        $region = is_scalar($fields['Регион'] ?? '') ? trim((string) $fields['Регион']) : '';
+        if ($region !== '') {
+            $regions[$region] = true;
         }
     }
-    unset($record);
     sendJson([
         'origin' => $dataset['origin'] ?? '',
         'sheets' => $dataset['sheets'] ?? [],
-        'records' => $records,
+        'records' => [],
+        'recordCount' => count($bySource) ? array_sum($bySource) : 0,
+        'bySource' => $bySource,
+        'regions' => array_keys($regions),
         'demoOverrides' => loadDemoOverrides(),
         'managerChecks' => (object) docgenManagerChecks(),
         'customColumns' => $dataset['customColumns'] ?? [],
@@ -1096,8 +1110,35 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .legend{display:flex;align-items:center;gap:8px;margin:0 0 9px;color:var(--muted);font-size:12px;flex-wrap:wrap}
 .table-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
 .table-wrap{overflow:auto;max-height:63vh;min-height:280px}
-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;min-width:950px}
-thead th{position:sticky;top:0;z-index:3;background:var(--head);color:#fff;text-align:left;padding:11px 10px;border-right:1px solid var(--head-line);font-size:11.5px;white-space:nowrap}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;min-width:950px;table-layout:fixed}
+#recordsTable.cols-fit{width:100%!important;table-layout:auto}
+#recordsTable.cols-fit td,#recordsTable.cols-fit th .th-label{white-space:normal}
+td.clip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+thead th{position:sticky;top:0;z-index:3;background:var(--head);color:#fff;text-align:left;padding:0;border-right:1px solid var(--head-line);font-size:11.5px;white-space:nowrap}
+.th-inner{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:9px 8px 9px 10px;min-height:34px}
+.th-label{overflow:hidden;text-overflow:ellipsis}
+.th-tools{display:flex;gap:2px;flex:none}
+.th-btn{border:0;background:rgba(255,255,255,.13);color:#fff;width:20px;height:20px;border-radius:4px;cursor:pointer;font-size:10px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+.th-btn:hover{background:rgba(255,255,255,.3)}
+.th-btn.active{background:#e8b33a;color:#3d2a00}
+.col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:4}
+.col-resizer:hover{background:rgba(255,255,255,.35)}
+body.col-resizing{cursor:col-resize;user-select:none}
+.filter-pop{position:fixed;z-index:60;width:270px;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 40px rgba(10,30,50,.22);padding:9px;font-size:12px;display:none}
+.filter-pop.open{display:block}
+.filter-pop input[type=search]{width:100%;height:28px;border:1px solid #cbd7e3;border-radius:6px;padding:0 8px;font:inherit;margin-bottom:7px}
+.filter-list{max-height:250px;overflow:auto;margin:0 -3px}
+.filter-opt{display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:6px;cursor:pointer;line-height:1.25}
+.filter-opt:hover{background:#f2f7fc}
+.filter-opt input{flex:none;margin:0}
+.filter-opt span{flex:1;min-width:0;overflow-wrap:anywhere}
+.filter-opt .cnt{flex:none;color:#8598ab;font-size:11px;font-variant-numeric:tabular-nums}
+.filter-actions{display:flex;gap:6px;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px solid #eef2f7}
+.tbl-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);background:#fbfcfe}
+.tbl-tools .small-muted{margin-left:auto}
+.chip-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:4px 9px;font:inherit;font-size:11.5px;color:#33506b;cursor:pointer}
+.chip-btn:hover{border-color:#b8cee1;background:#f5faff}
+.chip-btn.on{background:#e8f1fb;border-color:#9dc2e4;color:var(--brand)}
 thead th:first-child{width:42px;text-align:center;left:0;z-index:5}
 tbody td{padding:8px 10px;border-bottom:1px solid #e7edf3;vertical-align:middle;color:#24394f;background:#fff}
 tbody tr:nth-child(even) td{background:#fbfdff}tbody tr:hover td{background:#f1f7fd}tbody tr.selected td{background:#edf6ff}
@@ -1510,8 +1551,15 @@ body.modal-open{overflow:hidden}
   <div class="legend"><span class="badge active">Действует</span><span class="badge inactive">Не действует</span><span class="badge archive">Архивная запись</span><span class="manager-check-badge match">ФИО совпало</span><span class="manager-check-badge mismatch">ФИО отличается</span><span>Результаты DaData подсвечиваются в таблице; переданные сведения проверяйте вручную.</span></div>
 
   <section class="table-section">
+    <div class="tbl-tools" id="tableTools">
+      <button type="button" class="chip-btn" id="fitColumnsBtn" title="Растянуть столбцы по ширине окна">По ширине окна</button>
+      <button type="button" class="chip-btn" id="resetColumnsBtn" title="Вернуть исходные ширины столбцов">Сбросить ширины</button>
+      <button type="button" class="chip-btn" id="resetFiltersBtn" title="Снять все фильтры в шапке">Сбросить фильтры</button>
+      <span class="small-muted" id="tableToolsHint">Ширину столбца можно потянуть за правую границу заголовка; настройки запоминаются на сервере.</span>
+    </div>
     <div class="table-wrap" id="tableWrap" hidden>
       <table id="recordsTable">
+        <colgroup id="tableColgroup"></colgroup>
         <thead id="tableHead"></thead>
         <tbody id="tableBody"></tbody>
       </table>
@@ -1528,6 +1576,7 @@ body.modal-open{overflow:hidden}
     <div id="queueList" class="queue-list"><div class="empty-state">Загружаем очередь…</div></div>
   </section>
 </main>
+<div class="filter-pop" id="filterPop" role="dialog" aria-label="Фильтр по столбцу"></div>
 <div class="modal-backdrop" id="recordModal" hidden>
   <section class="modal record-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-head">
@@ -1699,6 +1748,34 @@ body.modal-open{overflow:hidden}
 const SAMPLE_TEMPLATE_INFO = <?= json_encode($sampleInfo, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 const CSRF_TOKEN = <?= json_encode(docgenCsrfToken(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
 const PAGE_SIZE = 30;
+// Колонки таблицы: ключ, подпись, ширина по умолчанию. Ширины и порядок
+// пользователь меняет мышкой; настройки хранятся на сервере (общие для всех).
+const TABLE_COLUMNS = [
+  {key:'Регион', label:'Регион', width:130, filterable:true, facet:'Регион'},
+  {key:'Адресат', label:'Адресат / ФИО руководителя', width:250},
+  {key:'Должность', label:'Должность', width:230, filterable:true, facet:'Должность'},
+  {key:'ИНН', label:'ИНН', width:110},
+  {key:'Сверка', label:'Сверка DaData', width:150, filterable:true, facet:'Сверка'},
+  {key:'Статус', label:'Статус', width:120, filterable:true, facet:'Статус ЕГРЮЛ'},
+  {key:'Карточка', label:'Карточка', width:100},
+];
+let tableState = {widths:{}, fit:false, facets:{}, page:1, pageCount:1, total:0, summary:null, facetsData:{}};
+// Карточка может быть открыта для записи не с текущей страницы: держим
+// загруженные по id записи здесь, чтобы card/сохранение/DaData их находили.
+const recordCache = new Map();
+function cacheRecords(list) { (list||[]).forEach(r => r && r.id && recordCache.set(r.id, r)); }
+function findRecord(id) { return recordCache.get(id) || (dataset.records||[]).find(r => r.id === id) || null; }
+async function fetchRecord(id) {
+  const cached = findRecord(id);
+  if (cached) return cached;
+  const response = await fetch(`?action=record&id=${encodeURIComponent(id)}`, {cache:'no-store'});
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) throw new Error(payload.error || 'Не удалось прочитать карточку.');
+  cacheRecords([payload.record]);
+  return payload.record;
+}
+let tableLoadToken = 0;
+let tableLoading = false;
 let dataset = {records: [], sheets: [], demoOverrides: {}, managerChecks: {}};
 let templateInfo = SAMPLE_TEMPLATE_INFO;
 let templateMode = 'saved';
@@ -1852,7 +1929,16 @@ async function confirmExcelImport() {
 }
 async function exportExcel() {
   const scope=$('excelExportScope').value;
-  const ids=scope==='all'?[]:(scope==='filtered'?getFilteredRecords().map(record=>record.id):[...selectedIds]);
+  let ids=[...selectedIds];
+  if(scope==='filtered'){
+    // Весь набор под фильтром живёт на сервере: запрашиваем только ID.
+    try{
+      const response=await fetch(`?action=records_ids&${tableQueryParams(1).toString()}`,{cache:'no-store'});
+      const payload=await response.json();
+      if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось получить записи по фильтру.');
+      ids=payload.ids||[];
+    }catch(error){showToast(error.message||'Ошибка выгрузки по фильтру.','error');return;}
+  }
   if(scope!=='all'&&!ids.length){showToast(scope==='selected'?'Отметьте строки для экспорта.':'По текущему фильтру нет записей.','error');return;}
   const button=$('exportExcelBtn');button.disabled=true;button.textContent='Готовим XLSX…';
   const form=new FormData();form.append('scope',scope==='all'?'all':'subset');if(scope!=='all')form.append('record_ids',JSON.stringify(ids));
@@ -1860,7 +1946,7 @@ async function exportExcel() {
     const response=await fetch('?action=export_excel',{method:'POST',headers:csrfHeaders(),body:form});
     if(!response.ok){let message='Не удалось сформировать Excel.';try{const body=await response.json();message=body.error||message;}catch{}throw new Error(message);}
     const blob=await response.blob();const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='Выгрузка_таблиц.xlsx';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-    showToast(`Книга XLSX сформирована: ${ids.length||dataset.records.length} записей.`,'success');
+    showToast(`Книга XLSX сформирована: ${ids.length||Number(tableState.total||0)} записей.`,'success');
   }catch(error){showToast(error.message||'Ошибка экспорта Excel.','error');}
   finally{button.disabled=false;button.textContent='Скачать книгу XLSX';}
 }
@@ -1928,10 +2014,12 @@ async function tableToolPost(action,values) {
 }
 async function reloadDatasetAfterTableChange(preferredSource='all') {
   const response=await fetch('?action=data',{cache:'no-store'});if(!response.ok)throw new Error('Не удалось обновить таблицу после изменения структуры.');
-  dataset=await response.json();managerChecks=dataset.managerChecks||{};selectedIds.clear();overrides={};populateSources();
+  const meta=await response.json();
+  dataset={...meta,records:[]};managerChecks=meta.managerChecks||{};selectedIds.clear();overrides={};recordCache.clear();populateSources();
   if(preferredSource&&[...sourceSelect.options].some(option=>option.value===preferredSource))sourceSelect.value=preferredSource;
-  updateRegionOptions(false);updateMapping();renderTable();
-  $('dbBadge').textContent=`${dataset.records.length.toLocaleString('ru-RU')} записей · демо-копия`;
+  updateRegionOptions(false);updateMapping();
+  await loadTablePage(1);
+  $('dbBadge').textContent=`${Number(meta.recordCount||0).toLocaleString('ru-RU')} записей · книга`;
 }
 async function addTableColumn() {
   const input=$('newTableColumn'),name=input.value.trim();if(!name){input.focus();showToast('Введите название новой колонки.','error');return;}
@@ -2155,9 +2243,12 @@ function updateInflections(sourceKind='') {
     }
   },sourceKind?220:0);
 }
-function openRecordCard(id) {
-  const record=dataset.records.find(item=>item.id===id);
-  if(!record) return;
+async function openRecordCard(id) {
+  let record=findRecord(id);
+  if(!record){
+    try{ record=await fetchRecord(id); }
+    catch(e){ showToast(e.message||'Не удалось открыть карточку.','error'); return; }
+  }
   activeModalRecordId=id;
   const values={...(record.fields||{}),...(overrides[id]||{})};
   for(const group of MODAL_CORE_GROUPS) for(const name of group.fields) if(values[name]===undefined) values[name]='';
@@ -2203,10 +2294,11 @@ async function saveRecordCard() {
     const response=await fetch('?action=save_record',{method:'POST',headers:csrfHeaders(),body:fd});
     const payload=await response.json();
     if(!response.ok||!payload.ok) throw new Error(payload.error||'Не удалось сохранить карточку.');
+    cacheRecords([payload.record]);
     const index=dataset.records.findIndex(item=>item.id===id);
     if(index>=0) dataset.records[index]=payload.record;
     delete overrides[id];
-    closeRecordCard();updateMapping();renderTable();
+    closeRecordCard();updateMapping();loadTablePage();
     showToast('Карточка сохранена. Эти данные будут использованы при формировании PDF и DOCX.','success');
   } catch(e) {
     showToast(e.message||'Ошибка сохранения карточки.','error');
@@ -2214,33 +2306,27 @@ async function saveRecordCard() {
     button.disabled=false;button.textContent=old;
   }
 }
+// В браузере лежит только текущая страница, поэтому «все записи набора» —
+// это счётчик с сервера, а не массив dataset.records.
 function activeSourceRecords() {
-  const key=sourceSelect.value;
-  return dataset.records.filter(r => key === 'all' || r.source_key === key);
+  return dataset.records || [];
+}
+function activeSourceCount() {
+  const key = sourceSelect.value;
+  return key === 'all' ? Number(tableState.total || 0) : Number((dataset.bySource||{})[key] || tableState.total || 0);
 }
 function updateRegionOptions(keepCurrent=true) {
   const old=keepCurrent ? regionSelect.value : '';
-  const records=activeSourceRecords();
-  const regions=[...new Set(records.map(r=>fieldValue(r,'Регион')).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ru'));
+  const regions=[...(dataset.regions||[])].sort((a,b)=>a.localeCompare(b,'ru'));
   regionSelect.innerHTML='<option value="all">Все регионы</option>'+regions.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('');
   if (regions.includes(old)) regionSelect.value=old;
   else if (sourceSelect.value==='guber' && regions.includes('Астраханская область')) regionSelect.value='Астраханская область';
   else regionSelect.value='all';
 }
+// Выборка целиком живёт на сервере (?action=records). Здесь — только
+// текущая страница, чтобы случайно не вернуть «весь набор из 30 строк».
 function getFilteredRecords() {
-  const source=sourceSelect.value;
-  const region=regionSelect.value;
-  const query=$('searchInput').value.trim().toLocaleLowerCase('ru');
-  return dataset.records.filter(r=>{
-    if (source!=='all' && r.source_key!==source) return false;
-    if (region!=='all' && fieldValue(r,'Регион')!==region) return false;
-    if (query) {
-      const f=r.fields||{};
-      const hay=[r.source, ...Object.values(f)].join(' ').toLocaleLowerCase('ru');
-      if (!hay.includes(query)) return false;
-    }
-    return true;
-  });
+  return dataset.records || [];
 }
 function getUnmappedFields() {
   const records=activeSourceRecords();
@@ -2329,80 +2415,239 @@ function updateManagerCheckButton() {
   button.title=!dadataConfigured?'Сначала сохраните API-ключ DaData в настройках.':'Проверка выполняется только вручную для отмеченных записей.';
   updateDadataRefreshButton();
 }
+function tableColumnWidth(key) {
+  const column = TABLE_COLUMNS.find(c => c.key === key);
+  return Number(tableState.widths[key] || column?.width || 130);
+}
+function tableQueryParams(extraPage) {
+  const params = new URLSearchParams();
+  params.set('page', String(extraPage || tableState.page || 1));
+  params.set('source', sourceSelect.value || 'all');
+  params.set('region', regionSelect.value || 'all');
+  const query = $('searchInput').value.trim();
+  if (query) params.set('query', query);
+  const facets = {};
+  Object.entries(tableState.facets).forEach(([column, values]) => {
+    if (Array.isArray(values) && values.length) facets[column] = values;
+    else if (Array.isArray(values) && values.length === 0) facets[column] = [];
+  });
+  if (Object.keys(facets).length) params.set('facets', JSON.stringify(facets));
+  return params;
+}
+// Страница книги приходит с сервера: браузер не держит 20 000 записей.
+async function loadTablePage(page) {
+  if (page) tableState.page = page;
+  const token = ++tableLoadToken;
+  tableLoading = true;
+  try {
+    const response = await fetch(`?action=records&${tableQueryParams().toString()}`, {cache:'no-store'});
+    if (!response.ok) throw new Error('Не удалось загрузить страницу книги.');
+    const payload = await response.json();
+    if (token !== tableLoadToken) return;   // ответ устарел — пришёл новый запрос
+    tableState.page = payload.page;
+    tableState.pageCount = payload.pageCount;
+    tableState.total = payload.total;
+    tableState.summary = payload.summary || null;
+    tableState.facetsData = payload.facets || {};
+    dataset.records = payload.records || [];
+    updateTableSummary();
+  } catch(e) {
+    if (token === tableLoadToken) showToast(e.message||'Ошибка загрузки книги.','error');
+  } finally {
+    if (token === tableLoadToken) tableLoading = false;
+  }
+  renderTable();
+}
+function updateTableSummary() {
+  const s = tableState.summary;
+  if (!s) return;
+  $('dbBadge').textContent = `${Number(s.total).toLocaleString('ru-RU')} записей · книга`;
+  $('dbBadge').className='pill ok';
+  $('filteredCount').textContent = String(s.filtered);
+  $('sourceCount').textContent = `${Number(s.total).toLocaleString('ru-RU')} записей в книге`;
+  const filtered = Number(s.filtered) !== Number(s.total);
+  $('tableToolsHint').textContent = filtered
+    ? `Отфильтровано ${s.filtered.toLocaleString('ru-RU')} из ${s.total.toLocaleString('ru-RU')} · ширину столбца тяните за границу заголовка`
+    : 'Ширину столбца можно потянуть за правую границу заголовка; настройки запоминаются на сервере.';
+}
+function renderColgroup() {
+  const table = $('recordsTable');
+  const cols = TABLE_COLUMNS.map(c => `<col>`).join('');
+  $('tableColgroup').innerHTML = `<col style="width:42px">` + cols;
+  if (tableState.fit) {
+    // «По ширине окна»: фиксированные ширины отключаем, браузер распределит сам.
+    $('tableColgroup').innerHTML = '';
+    table.classList.add('cols-fit');
+    table.style.width = '100%';
+    $('fitColumnsBtn').classList.add('on');
+    return;
+  }
+  table.classList.remove('cols-fit');
+  $('fitColumnsBtn').classList.remove('on');
+  const total = 42 + TABLE_COLUMNS.reduce((sum, c) => sum + tableColumnWidth(c.key), 0);
+  table.style.width = total + 'px';
+}
+function tableHeaderCell(col) {
+  const active = Array.isArray(tableState.facets[col.facet]) ? tableState.facets[col.facet].length : null;
+  const filterBtn = col.filterable
+    ? `<button type="button" class="th-btn ${active!==null?'active':''}" data-facet="${esc(col.facet)}" title="Фильтр по столбцу${active!==null?` · выбрано ${active}`:''}">▾</button>`
+    : '';
+  return `<th data-col="${esc(col.key)}" style="${tableState.fit?'':'width:'+tableColumnWidth(col.key)+'px'}">
+    <div class="th-inner"><span class="th-label" title="${esc(col.label)}">${esc(col.label)}</span><span class="th-tools">${filterBtn}</span></div>
+    <div class="col-resizer" data-resize="${esc(col.key)}" title="Потяните, чтобы изменить ширину"></div></th>`;
+}
 function renderTable() {
-  if (!dataset.records.length) return;
-  const filtered=getFilteredRecords();
-  const pageCount=Math.max(1,Math.ceil(filtered.length/PAGE_SIZE));
-  pageNumber=Math.min(pageNumber,pageCount);
-  const start=(pageNumber-1)*PAGE_SIZE;
-  const pageRows=filtered.slice(start,start+PAGE_SIZE);
-  const unknownFields=getUnmappedFields();
-  const customColumns=(dataset.customColumns||[]).filter(name=>!unknownFields.includes(name));
-  const headers=`<tr><th><input class="check" type="checkbox" id="checkPage" title="Выбрать ${pageRows.length} записей только на этой странице; всего в выборке ${filtered.length}"></th><th>Регион</th><th>Адресат / ФИО руководителя</th><th>Должность</th><th>ИНН</th><th>Сверка DaData</th><th>Статус</th><th>Карточка</th>${customColumns.map(name=>`<th>${esc(name)}</th>`).join('')}${unknownFields.map(f=>`<th>Ручное поле: ${esc(f)}</th>`).join('')}</tr>`;
-  $('tableHead').innerHTML=headers;
-  tableBody.innerHTML=pageRows.map(r=>{
-    const f=r.fields||{}; const id=r.id;
-    const person=fieldValue(r,'Руководитель')||fieldValue(r,'ФИО')||'—';
-    const position=fieldValue(r,'Должность руководителя')||fieldValue(r,'Должность')||'—';
-    const region=fieldValue(r,'Регион')||'—';
-    const inn=fieldValue(r,'ИНН')||'—';
-    const managerCheck=getManagerCheck(r);
-    const nameMismatch=['name_mismatch','both_mismatch'].includes(managerCheck?.status);
-    const positionMismatch=['position_mismatch','both_mismatch'].includes(managerCheck?.status);
-    const rowClasses=[selectedIds.has(id)?'selected':'',nameMismatch?'manager-name-mismatch':'',positionMismatch?'manager-position-mismatch':''].filter(Boolean).join(' ');
-    const check=selectedIds.has(id)?'checked':'';
-    const nameTitle=nameMismatch?`DaData: ${managerCheck.managerName||'ФИО не получено'}`:'';
-    const nameNote=nameMismatch?`<span class="manager-name-note">DaData: ${esc(managerCheck.managerName||'не указано')}</span>`:'';
-    const positionNote=positionMismatch?`<span class="manager-position-note">DaData: ${esc(managerCheck.managerPost||'не указана')}</span>`:'';
-    const extraColumns=customColumns.map(name=>`<td title="${esc(fieldValue(r,name))}">${esc(fieldValue(r,name)||'—')}</td>`).join('');
-    const manual=unknownFields.map(name=>{
-      const preset=(dataset.demoOverrides?.[id]||{})[name]??'';
-      const current=(overrides[id]||{})[name]??(fieldValue(r,name)||preset);
-      const bookName=fieldValue(r,'Наименование (ЕГРЮЛ/лист)');
-      const fallback=name==='Полное наименование'&&bookName?` · пустое значение → ${bookName}`:'';
-      const sourceNote=id==='guber-0037' && name==='Полное наименование' ? ' · из PDF-примера' : '';
-      const placeholder=name==='Полное наименование'&&bookName?bookName:'Введите значение';
-      return `<td><input class="manual-input" type="text" data-record-id="${esc(id)}" data-manual-field="${esc(name)}" value="${esc(current)}" placeholder="${esc(placeholder)}" title="Нет одноимённой колонки; задайте значение явно${esc(fallback)}${esc(sourceNote)}"></td>`;
-    }).join('');
-    return `<tr class="${rowClasses}" data-id="${esc(id)}"><td><input class="check row-check" type="checkbox" data-id="${esc(id)}" ${check} aria-label="Выбрать ${esc(person)}"></td><td><div class="cell-main">${esc(region)}</div><div class="cell-sub">${esc(r.source)}</div></td><td><div class="cell-main"${nameTitle?` title="${esc(nameTitle)}"`:''}>${esc(person)}</div>${nameNote}<div class="cell-sub">${esc(fieldValue(r,'Фамилия И.О.'))}</div></td><td>${esc(position)}${positionNote}</td><td>${esc(inn)}</td><td>${managerCheckBadgeMarkup(managerCheck)}</td><td>${statusBadge(r)}</td><td><button type="button" class="btn-ghost btn-small edit-record" data-edit-id="${esc(id)}">Карточка</button></td>${extraColumns}${manual}</tr>`;
+  const pageRows = dataset.records || [];
+  renderColgroup();
+  const headers = `<tr><th class="col-check"><input class="check" type="checkbox" id="checkPage" title="Выбрать записи на этой странице"></th>`
+    + TABLE_COLUMNS.map(tableHeaderCell).join('') + `</tr>`;
+  $('tableHead').innerHTML = headers;
+  tableBody.innerHTML = pageRows.map(r => {
+    const id = r.id;
+    const person = fieldValue(r,'Руководитель')||fieldValue(r,'ФИО')||'—';
+    const position = fieldValue(r,'Должность руководителя')||fieldValue(r,'Должность')||'—';
+    const region = fieldValue(r,'Регион')||'—';
+    const inn = fieldValue(r,'ИНН')||'—';
+    const managerCheck = getManagerCheck(r);
+    const nameMismatch = ['name_mismatch','both_mismatch'].includes(managerCheck?.status);
+    const positionMismatch = ['position_mismatch','both_mismatch'].includes(managerCheck?.status);
+    const rowClasses = [selectedIds.has(id)?'selected':'', nameMismatch?'manager-name-mismatch':'', positionMismatch?'manager-position-mismatch':''].filter(Boolean).join(' ');
+    const check = selectedIds.has(id)?'checked':'';
+    const nameTitle = nameMismatch?`DaData: ${managerCheck.managerName||'ФИО не получено'}`:'';
+    const nameNote = nameMismatch?`<span class="manager-name-note">DaData: ${esc(managerCheck.managerName||'не указано')}</span>`:'';
+    const positionNote = positionMismatch?`<span class="manager-position-note">DaData: ${esc(managerCheck.managerPost||'не указана')}</span>`:'';
+    return `<tr class="${rowClasses}" data-id="${esc(id)}">
+      <td><input class="check row-check" type="checkbox" data-id="${esc(id)}" ${check} aria-label="Выбрать ${esc(person)}"></td>
+      <td class="clip" title="${esc(region)}"><div class="cell-main">${esc(region)}</div><div class="cell-sub">${esc(r.source||'')}</div></td>
+      <td class="clip" title="${esc(person)}${nameTitle?' · '+esc(nameTitle):''}"><div class="cell-main">${esc(person)}</div>${nameNote}<div class="cell-sub">${esc(fieldValue(r,'Фамилия И.О.'))}</div></td>
+      <td class="clip" title="${esc(position)}">${esc(position)}${positionNote}</td>
+      <td>${esc(inn)}</td>
+      <td>${managerCheckBadgeMarkup(managerCheck)}</td>
+      <td>${statusBadge(r)}</td>
+      <td><button type="button" class="btn-ghost btn-small edit-record" data-edit-id="${esc(id)}">Карточка</button></td>
+    </tr>`;
   }).join('');
-  $('tableWrap').hidden=pageRows.length===0;
-  $('emptyState').hidden=pageRows.length>0;
-  $('tableFoot').hidden=pageRows.length===0;
-  if (pageRows.length===0) $('emptyState').innerHTML='<div class="big">По заданным условиям ничего не найдено</div><div>Измените источник, регион или поисковую строку.</div>';
-  const shownStart=filtered.length?start+1:0;
-  const shownEnd=Math.min(start+PAGE_SIZE,filtered.length);
-  $('footShown').textContent=`Показано ${shownStart}–${shownEnd} из ${filtered.length}`;
-  $('pageLabel').textContent=`Страница ${pageNumber} из ${pageCount}`;
-  $('prevPage').disabled=pageNumber<=1;
-  $('nextPage').disabled=pageNumber>=pageCount;
-  $('filteredCount').textContent=String(filtered.length);
-  $('selectedCount').textContent=String(selectedIds.size);
-  $('sourceCount').textContent=`${activeSourceRecords().length.toLocaleString('ru-RU')} записей в текущем наборе`;
-  $('pageSelectionHint').textContent=`Галочка в шапке — только эта страница (${pageRows.length}).`;
-  $('selectFilteredBtn').textContent=`Выбрать все по фильтру (${filtered.length})`;
-  $('generateBtn').disabled=selectedIds.size===0 || (templateInfo.fields||[]).length===0;
-  $('generateBtn').textContent=selectedIds.size===1?'Сформировать PDF и поставить письмо в очередь':`Сформировать PDF для ${selectedIds.size} отмеченных записей и поставить в очередь`;
+  $('tableWrap').hidden = pageRows.length === 0;
+  $('emptyState').hidden = pageRows.length > 0;
+  $('tableFoot').hidden = pageRows.length === 0;
+  if (pageRows.length === 0) $('emptyState').innerHTML = '<div class="big">По заданным условиям ничего не найдено</div><div>Измените источник, регион, поиск или фильтры в шапке.</div>';
+  const page = tableState.page, pageCount = tableState.pageCount, total = tableState.total;
+  const start = (page-1)*PAGE_SIZE;
+  $('footShown').textContent = total ? `Показано ${start+1}–${Math.min(start+PAGE_SIZE, total)} из ${total.toLocaleString('ru-RU')}` : 'Ничего не найдено';
+  $('pageLabel').textContent = `Страница ${page} из ${pageCount.toLocaleString('ru-RU')}`;
+  $('prevPage').disabled = page <= 1;
+  $('nextPage').disabled = page >= pageCount;
+  $('selectedCount').textContent = String(selectedIds.size);
+  $('pageSelectionHint').textContent = `Галочка в шапке — только эта страница (${pageRows.length}).`;
+  $('selectFilteredBtn').textContent = `Выбрать все по фильтру (${total.toLocaleString('ru-RU')})`;
+  $('generateBtn').disabled = selectedIds.size===0 || (templateInfo.fields||[]).length===0;
+  $('generateBtn').textContent = selectedIds.size===1?'Сформировать PDF и поставить письмо в очередь':`Сформировать PDF для ${selectedIds.size} отмеченных записей и поставить в очередь`;
   updateManagerCheckButton();
-  const pageAll=pageRows.length>0 && pageRows.every(r=>selectedIds.has(r.id));
-  const checkPage=$('checkPage'); if(checkPage) checkPage.checked=pageAll;
+  const pageAll = pageRows.length>0 && pageRows.every(r=>selectedIds.has(r.id));
+  const checkPage=$('checkPage'); if(checkPage) checkPage.checked = pageAll;
   $('tableBody').querySelectorAll('.row-check').forEach(box=>box.addEventListener('change',()=>{
     const id=box.dataset.id;
     if(box.checked) selectedIds.add(id); else selectedIds.delete(id);
     renderTable();
   }));
   $('tableBody').querySelectorAll('.edit-record').forEach(button=>button.addEventListener('click',()=>openRecordCard(button.dataset.editId)));
-  $('tableBody').querySelectorAll('.manual-input').forEach(input=>input.addEventListener('input',()=>{
-    const id=input.dataset.recordId, field=input.dataset.manualField;
-    if(!overrides[id]) overrides[id]={};
-    overrides[id][field]=input.value;
-    input.closest('tr')?.classList.toggle('selected',selectedIds.has(id));
-  }));
-  if(checkPage) checkPage.addEventListener('change',()=>{
-    pageRows.forEach(r=>checkPage.checked?selectedIds.add(r.id):selectedIds.delete(r.id));
+  $('tableHead').querySelectorAll('[data-facet]').forEach(button=>button.addEventListener('click',event=>openFacetPopover(button.dataset.facet, button)));
+  $('tableHead').querySelectorAll('.col-resizer').forEach(node=>node.addEventListener('mousedown',startColumnResize));
+  $('checkPage')?.addEventListener('change',event=>{
+    if(event.target.checked) pageRows.forEach(r=>selectedIds.add(r.id));
+    else pageRows.forEach(r=>selectedIds.delete(r.id));
     renderTable();
-    showToast(`${checkPage.checked?'Выбраны':'Сняты'} ${pageRows.length} записей на текущей странице. Всего в выборке ${filtered.length}; для всех нажмите «Выбрать все по фильтру».`);
   });
+}
+// ---------- Фильтры в шапке ----------
+function facetLabel(column, value) {
+  if (column === 'Сверка') return ({ok:'Совпало',name_mismatch:'ФИО отличается',position_mismatch:'Должность отличается',both_mismatch:'ФИО и должность',not_found:'Не найдено',error:'Ошибка',ambiguous:'Неоднозначно'})[value]||'Не проверено';
+  if (column === 'Статус ЕГРЮЛ') return ({active:'Действует',inactive:'Не действует',archive:'Архив'})[value]||value;
+  return value || '— пусто —';
+}
+function closeFacetPopover() { $('filterPop').classList.remove('open'); }
+async function openFacetPopover(column, anchor) {
+  const pop = $('filterPop');
+  if (pop.classList.contains('open') && pop.dataset.column === column) { closeFacetPopover(); return; }
+  pop.dataset.column = column;
+  const selectedValues = Array.isArray(tableState.facets[column]) ? new Set(tableState.facets[column]) : null;
+  const values = tableState.facetsData[column] || [];
+  const render = (searchTerm) => {
+    const needle = (searchTerm||'').toLocaleLowerCase('ru');
+    const list = values.filter(v => !needle || facetLabel(column, v.value).toLocaleLowerCase('ru').includes(needle));
+    $('filterList').innerHTML = list.length ? list.map(v => `<label class="filter-opt"><input type="checkbox" data-value="${esc(v.value)}" ${selectedValues===null||selectedValues.has(v.value)?'checked':''}><span>${esc(facetLabel(column, v.value))}</span><span class="cnt">${v.count}</span></label>`).join('') : '<div class="small-muted" style="padding:6px">Ничего не найдено</div>';
+    $('filterList').querySelectorAll('input[data-value]').forEach(box=>box.addEventListener('change',()=>{
+      const all = [...$('filterList').querySelectorAll('input[data-value]')];
+      const checked = all.filter(item=>item.checked).map(item=>item.dataset.value);
+      // Ничего не отмечено — показываем пустую выборку, как в Excel.
+      tableState.facets[column] = checked.length === all.length && all.length === values.length ? null : checked;
+      if (tableState.facets[column] === null) delete tableState.facets[column];
+      closeFacetPopover();
+      loadTablePage(1);
+    }));
+  };
+  pop.innerHTML = `<input type="search" id="filterSearch" placeholder="Поиск значений…" autocomplete="off">
+    <div class="filter-list" id="filterList"></div>
+    <div class="filter-actions"><button type="button" class="chip-btn" id="filterAllBtn">Выделить все</button><button type="button" class="chip-btn" id="filterNoneBtn">Снять все</button></div>`;
+  render('');
+  $('filterSearch').addEventListener('input',event=>render(event.target.value));
+  $('filterAllBtn').addEventListener('click',()=>{ delete tableState.facets[column]; closeFacetPopover(); loadTablePage(1); });
+  $('filterNoneBtn').addEventListener('click',()=>{ tableState.facets[column] = []; closeFacetPopover(); loadTablePage(1); });
+  const rect = anchor.getBoundingClientRect();
+  pop.style.left = Math.min(window.innerWidth - 285, Math.max(8, rect.left - 240)) + 'px';
+  pop.style.top = (rect.bottom + 4) + 'px';
+  pop.classList.add('open');
+  $('filterSearch').focus();
+}
+// ---------- Ресайз столбцов ----------
+let columnResize = null;
+function startColumnResize(event) {
+  if (tableState.fit) { showToast('Сначала выключите режим «По ширине окна».','error'); return; }
+  const key = event.currentTarget.dataset.resize;
+  const th = event.currentTarget.closest('th');
+  columnResize = {key, startX: event.clientX, startWidth: th.getBoundingClientRect().width};
+  document.body.classList.add('col-resizing');
+  document.addEventListener('mousemove', onColumnResize);
+  document.addEventListener('mouseup', stopColumnResize);
+  event.preventDefault();
+}
+function onColumnResize(event) {
+  if (!columnResize) return;
+  const width = Math.max(60, Math.round(columnResize.startWidth + (event.clientX - columnResize.startX)));
+  tableState.widths[columnResize.key] = width;
+  renderColgroup();
+  const th = $('tableHead').querySelector(`th[data-col="${columnResize.key}"]`);
+  if (th) th.style.width = width + 'px';
+  const cols = $('tableColgroup').querySelectorAll('col');
+  const index = TABLE_COLUMNS.findIndex(c => c.key === columnResize.key);
+  if (cols[index+1]) cols[index+1].style.width = width + 'px';
+}
+function stopColumnResize() {
+  if (!columnResize) return;
+  columnResize = null;
+  document.body.classList.remove('col-resizing');
+  document.removeEventListener('mousemove', onColumnResize);
+  document.removeEventListener('mouseup', stopColumnResize);
+  saveTableSettings();
+}
+async function saveTableSettings() {
+  try {
+    const fd = new FormData();
+    fd.append('widths', JSON.stringify(tableState.widths));
+    fd.append('fit', tableState.fit ? '1' : '0');
+    await fetch('?action=save_table_view', {method:'POST', headers:csrfHeaders(), body:fd});
+  } catch(e) { /* настройки вида не критичны: интерфейс работает и с умолчаниями */ }
+}
+async function loadTableSettings() {
+  try {
+    const response = await fetch('?action=table_view', {cache:'no-store'});
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (payload?.ok && payload.widths && typeof payload.widths === 'object') {
+      tableState.widths = payload.widths;
+      tableState.fit = Boolean(payload.fit);
+    }
+  } catch(e) { /* остаются ширины по умолчанию */ }
 }
 function populateSources() {
   const options=['<option value="all">Все наборы</option>'];
@@ -3447,7 +3692,7 @@ async function runManagerCheckIds(ids, askConfirmation=true) {
       completed+=Number(payload.processed||0);
       $('managerCheckProgressText').textContent=`DaData: обработано ${completed} из ${unique.length}. Запросы выполняются вручную, по пакетам.`;
       renderTable();
-      if(activeModalRecordId){const activeRecord=dataset.records.find(row=>row.id===activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
+      if(activeModalRecordId){const activeRecord=findRecord(activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
       if(payload.stop){stopReason=String(payload.stopReason||'DaData остановила пакет.');break;}
     }
     const checked=[...updatedIds].map(id=>managerChecks[id]).filter(Boolean);
@@ -3465,7 +3710,7 @@ async function runManagerCheckIds(ids, askConfirmation=true) {
     showToast(e.message||'Ошибка сверки DaData.','error');
   } finally {
     managerCheckRunning=false;$('managerCheckProgress').classList.remove('show');updateManagerCheckButton();renderTable();
-    if(activeModalRecordId){const activeRecord=dataset.records.find(row=>row.id===activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
+    if(activeModalRecordId){const activeRecord=findRecord(activeModalRecordId);if(activeRecord)renderManagerCheckDetail(activeRecord);}
   }
 }
 function checkSelectedManagers() {
@@ -3636,6 +3881,7 @@ async function saveDadataCards() {
     const payload=await response.json();
     if(!response.ok||!payload.ok)throw new Error(payload.error||'Не удалось сохранить карточки.');
     (payload.records||[]).forEach(record=>{
+      cacheRecords([record]);
       const index=dataset.records.findIndex(item=>item.id===record.id);
       if(index>=0)dataset.records[index]=record;
       delete overrides[record.id];
@@ -3651,15 +3897,20 @@ async function saveDadataCards() {
 
 async function init() {
   try {
+    // Метаданные (наборы, регионы, счётчики) — без самих записей.
     const response=await fetch('?action=data',{cache:'no-store'});
     if (!response.ok) throw new Error('Не удалось загрузить демо-набор.');
-    dataset=await response.json();
-    managerChecks=dataset.managerChecks||{};
+    const meta=await response.json();
+    dataset={...meta,records:[]};
+    managerChecks=meta.managerChecks||{};
     overrides={};
     populateSources();
-    $('dbBadge').textContent=`${dataset.records.length.toLocaleString('ru-RU')} записей · демо-копия`;
+    updateRegionOptions(false);
+    $('dbBadge').textContent=`${Number(meta.recordCount||0).toLocaleString('ru-RU')} записей · книга`;
     $('dbBadge').className='pill ok';
     $('emptyState').innerHTML='<div class="big">Выберите адресатов для формирования</div><div>По умолчанию показаны все наборы и регионы; начальный выбор пуст, чтобы случайно не сформировать или не отправить всю базу.</div>';
+    await loadTableSettings();
+    await loadTablePage(1);
     try { await loadTemplates(); } catch(e) { showToast(e.message||'Не удалось загрузить шаблоны.','error'); }
     try { await loadSmtpSettings(); } catch(e) { $('smtpFeedback').textContent=e.message||'Не удалось загрузить SMTP-настройки.'; }
     try { await loadLetterTemplate(); } catch(e) { $('letterFeedback').textContent=e.message||'Не удалось загрузить шаблон письма.'; }
@@ -3667,20 +3918,62 @@ async function init() {
     try { await refreshQueue(); } catch(e) { $('queueCount').textContent='Ошибка загрузки'; }
     const reviewId=new URLSearchParams(location.search).get('review');
     if(reviewId&&queueItems.some(item=>item.id===reviewId))openQueueItem(reviewId);
-    updateMapping(); renderTable();
+    updateMapping();
   } catch(e) {
     $('dbBadge').className='pill bad'; $('dbBadge').textContent='Ошибка данных';
     $('emptyState').innerHTML=`<div class="big">Не удалось загрузить демо-данные</div><div>${esc(e.message||'Проверьте ответ сервера.')}</div>`;
     showToast(e.message||'Ошибка загрузки данных.','error');
   }
 }
-sourceSelect.addEventListener('change',()=>{pageNumber=1;updateRegionOptions(false);updateMapping();renderTable();});
-regionSelect.addEventListener('change',()=>{pageNumber=1;renderTable();});
-$('searchInput').addEventListener('input',()=>{pageNumber=1;renderTable();});
-$('selectFilteredBtn').addEventListener('click',()=>{getFilteredRecords().forEach(r=>selectedIds.add(r.id));renderTable();showToast(`Выбраны все записи по фильтру (${getFilteredRecords().length}).`);});
+sourceSelect.addEventListener('change',()=>{tableState.page=1;updateRegionOptions(false);updateMapping();loadTablePage(1);});
+regionSelect.addEventListener('change',()=>{tableState.page=1;loadTablePage(1);});
+let searchTimer=null;
+$('searchInput').addEventListener('input',()=>{
+  clearTimeout(searchTimer);
+  // Пауза 250 мс: не отправляем запрос на каждую букву.
+  searchTimer=setTimeout(()=>{tableState.page=1;loadTablePage(1);},250);
+});
+$('selectFilteredBtn').addEventListener('click',async()=>{
+  const button=$('selectFilteredBtn');
+  const old=button.textContent;
+  button.disabled=true;button.textContent='Отмечаем…';
+  try{
+    const response=await fetch(`?action=records_ids&${tableQueryParams(1).toString()}`,{cache:'no-store'});
+    if(!response.ok)throw new Error('Не удалось получить список записей по фильтру.');
+    const payload=await response.json();
+    (payload.ids||[]).forEach(id=>selectedIds.add(id));
+    renderTable();
+    showToast(`Выбраны все записи по фильтру (${Number(payload.total||0).toLocaleString('ru-RU')}).`);
+  }catch(e){
+    showToast(e.message||'Ошибка выбора по фильтру.','error');
+  }finally{
+    button.disabled=false;button.textContent=old;
+  }
+});
 $('clearSelectionBtn').addEventListener('click',()=>{selectedIds.clear();renderTable();});
-$('prevPage').addEventListener('click',()=>{if(pageNumber>1){pageNumber--;renderTable();}});
-$('nextPage').addEventListener('click',()=>{pageNumber++;renderTable();});
+$('fitColumnsBtn').addEventListener('click',()=>{
+  tableState.fit=!tableState.fit;
+  renderColgroup(); renderTable(); saveTableSettings();
+});
+$('resetColumnsBtn').addEventListener('click',()=>{
+  tableState.widths={}; tableState.fit=false;
+  renderTable(); saveTableSettings();
+  showToast('Ширины столбцов сброшены к исходным.');
+});
+$('resetFiltersBtn').addEventListener('click',()=>{
+  tableState.facets={};
+  loadTablePage(1);
+  showToast('Фильтры в шапке сняты.');
+});
+document.addEventListener('click',event=>{
+  const pop=$('filterPop');
+  if(!pop.classList.contains('open'))return;
+  if(pop.contains(event.target)||event.target.closest('[data-facet]'))return;
+  closeFacetPopover();
+});
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closeFacetPopover();});
+$('prevPage').addEventListener('click',()=>{if(tableState.page>1)loadTablePage(tableState.page-1);});
+$('nextPage').addEventListener('click',()=>{if(tableState.page<tableState.pageCount)loadTablePage(tableState.page+1);});
 $('generateBtn').addEventListener('click',generate);
 $('checkManagersBtn').addEventListener('click',checkSelectedManagers);
 $('cancelManagerCheckBtn').addEventListener('click',()=>{managerCheckCancelRequested=true;$('managerCheckProgressText').textContent='Завершаем текущий пакет DaData; новые запросы больше не запускаются…';});

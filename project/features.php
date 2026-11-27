@@ -5135,8 +5135,8 @@ function docgenCronSend(?string $accountId = null, bool $spawnWorkers = false): 
 
 function docgenDispatch(string $action): void
 {
-    $postActions = ['template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
-    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress'];
+    $postActions = ['save_table_view', 'template_excluded', 'save_template', 'rename_template', 'copy_template', 'replace_template_file', 'delete_template', 'analyze', 'generate', 'save_smtp_settings', 'add_smtp_account', 'delete_smtp_account', 'save_letter_template', 'test_smtp', 'save_dadata_settings', 'check_managers', 'dadata_fetch', 'save_records_bulk', 'update_queue_item', 'send_queue_item', 'review_batch', 'cancel_batch', 'retry_batch', 'pause_batch', 'resume_batch', 'delete_batch', 'move_batch', 'save_mailing_settings', 'preview_excel_import', 'commit_excel_import', 'export_excel', 'add_table_column', 'add_table_section', 'backup_export', 'backup_preview', 'backup_import'];
+    $getActions = ['templates', 'template_content', 'smtp_settings', 'letter_template', 'mailing_settings', 'dadata_settings', 'queue', 'queue_file', 'download', 'generate_progress', 'records', 'records_ids', 'record', 'table_view'];
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
     if (in_array($action, $postActions, true) && $method !== 'POST') {
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте POST.'], 405);
@@ -5145,6 +5145,16 @@ function docgenDispatch(string $action): void
         sendJson(['ok' => false, 'error' => 'Для этого действия используйте GET.'], 405);
     }
     switch ($action) {
+        case 'table_view':
+            sendJson(['ok' => true] + docgenTableView());
+        case 'save_table_view':
+            docgenSaveTableView();
+        case 'record':
+            docgenRecordById((string) ($_GET['id'] ?? ''));
+        case 'records':
+            docgenRecordsPage();
+        case 'records_ids':
+            docgenRecordsIds();
         case 'templates':
             sendJson(['ok' => true, 'templates' => docgenTemplateList()]);
         case 'save_template':

@@ -29,6 +29,7 @@ register_shutdown_function(static function () use ($storage): void {
 
 chdir(dirname(__DIR__));
 require __DIR__ . '/../features.php';
+require __DIR__ . '/../table_features.php';
 
 $failures = 0;
 $checks = 0;
@@ -439,6 +440,67 @@ $htmlOut = (string) file_get_contents($htmlSource);
 check(!str_contains($htmlOut, '{Телефон}'), 'в HTML-документе нет кода отключённой переменной', $htmlOut);
 check(str_contains($htmlOut, 'Уважаемый'), 'включённые переменные подставлены');
 @unlink($htmlSource);
+
+// 16. Серверная выборка книги: страницы, фильтры и счётчики.
+$testRecords = [];
+for ($i = 0; $i < 95; $i++) {
+    $testRecords[] = [
+        'id' => 'rec-' . $i,
+        'source' => 'Книга',
+        'source_key' => $i % 2 === 0 ? 'guber' : 'test',
+        'kind' => '',
+        'fields' => [
+            'Регион' => $i % 3 === 0 ? 'Москва' : 'Татарстан',
+            'ИНН' => '7700000' . $i,
+            'Должность' => 'Начальник отдела ' . ($i % 5),
+            'Статус ЕГРЮЛ' => $i % 7 === 0 ? 'Не действует' : 'Действует',
+        ],
+    ];
+}
+$payload = docgenRecordsPayload(['records' => $testRecords], [], ['source' => 'all', 'region' => 'all', 'query' => '', 'facets' => []], 1);
+check($payload['total'] === 95, 'все записи учтены в выборке');
+check(count($payload['records']) === 30, 'на страницу отдаётся ровно 30 записей');
+check($payload['pageCount'] === 4, 'число страниц считается от общего количества');
+check(docgenRecordsPayload(['records' => $testRecords], [], [], 99)['page'] === 4, 'номер страницы ограничен последней');
+
+$page3 = docgenRecordsPayload(['records' => $testRecords], [], [], 3);
+check($page3['records'][0]['id'] === 'rec-60', 'третья страница начинается с 61-й записи', (string) ($page3['records'][0]['id'] ?? ''));
+
+$bySource = docgenRecordsPayload(['records' => $testRecords], [], ['source' => 'guber'], 1);
+check($bySource['total'] === 48, 'фильтр по источнику применяется на сервере', (string) $bySource['total']);
+
+$byQuery = docgenRecordsPayload(['records' => $testRecords], [], ['query' => '770000077'], 1);
+check($byQuery['total'] === 1, 'поиск по полям находит запись', (string) $byQuery['total']);
+check(docgenRecordsPayload(['records' => $testRecords], [], ['query' => '7700000077'], 1)['total'] === 0, 'поиск не находит несуществующий ИНН');
+
+$byRegion = docgenRecordsPayload(['records' => $testRecords], [], ['facets' => ['Регион' => ['Москва']]], 1);
+check($byRegion['total'] === 32, 'фильтр по региону из шапки работает', (string) $byRegion['total']);
+
+$noRegion = docgenRecordsPayload(['records' => $testRecords], [], ['facets' => ['Регион' => []]], 1);
+check($noRegion['total'] === 0, 'пустой набор галочек даёт пустую выборку, как в Excel');
+
+$regionFacet = [];
+foreach ($byRegion['facets']['Регион'] as $entry) {
+    $regionFacet[$entry['value']] = $entry['count'];
+}
+check(($regionFacet['Москва'] ?? 0) === 32, 'счётчик региона не учитывает собственный фильтр', (string) ($regionFacet['Москва'] ?? 0));
+check(($regionFacet['Татарстан'] ?? 0) === 63, 'в счётчике видны и отфильтрованные значения', (string) ($regionFacet['Татарстан'] ?? 0));
+
+$statusFacet = [];
+foreach ($byRegion['facets']['Статус ЕГРЮЛ'] as $entry) {
+    $statusFacet[$entry['value']] = $entry['count'];
+}
+check(($statusFacet['inactive'] ?? 0) === 5, 'статус «не действует» группируется отдельно', (string) ($statusFacet['inactive'] ?? 0));
+check(($statusFacet['active'] ?? 0) === 27, 'счётчик действующих считается по остальным записям', (string) ($statusFacet['active'] ?? 0));
+
+// Настройки вида: ширины столбцов общие и переживают перезагрузку.
+docgenWriteJson(docgenTableViewFile(), ['widths' => ['Регион' => '180', 'ИНН' => 120], 'fit' => true, 'updatedAt' => date(DATE_ATOM)]);
+$view = docgenTableView();
+check(($view['widths']['Регион'] ?? 0) === 180, 'ширина столбца сохраняется числом');
+check($view['fit'] === true, 'режим «по ширине окна» сохраняется');
+docgenWriteJson(docgenTableViewFile(), ['widths' => ['Регион' => 20, 'ИНН' => 5000], 'fit' => false]);
+$clean = docgenTableView();
+check($clean['widths'] === [], 'недопустимые ширины отбрасываются');
 
 // 7. Backup includes the per-template letter config.
 check(isset(docgenBackupFileMap(false)['templates/letters.json']), 'letters.json is in the backup');

@@ -298,7 +298,7 @@ function docgenExportExcel(): never
     foreach ($groups as $group) {
         $rows = [];
         foreach ($group['records'] as $record) {
-            $fields = baseFields($record);
+            $fields = docgenRecordFieldMap($record);
             $rows[] = array_merge(
                 [(string) ($record['id'] ?? ''), (string) $group['name'], (string) ($record['kind'] ?? '')],
                 array_map(static fn(string $column) => $fields[$column] ?? '', $columns)
@@ -1171,4 +1171,346 @@ function docgenAddTableSection(): never
         sendJson(['ok' => false, 'error' => $e->getMessage()], 500);
     }
     sendJson(['ok' => true, 'section' => $section, 'message' => 'Раздел добавлен. Чтобы добавить строки, импортируйте XLSX-лист с этим названием.']);
+}
+
+/**
+ * Поиск по книге на 20 000+ записей.
+ *
+ * Браузер больше не получает весь набор: он присылает фильтры и номер
+ * страницы, а сервер отдаёт ровно одну страницу, счётчики для фильтров и
+ * короткую сводку. Проверка «все поля содержат подстроку» по 27 полям на
+ * 20 000 записей — это ~540 000 сравнений на каждый ввод, поэтому поиск
+ * и фильтры выполняются один раз здесь, а не в браузере.
+ */
+const DOCGEN_RECORDS_PAGE_SIZE = 30;
+
+/** Поля, которые видит пользователь в шапке таблицы (без служебных). */
+function docgenRecordFacetColumns(): array
+{
+    return ['Регион', 'Должность', 'Статус ЕГРЮЛ', 'Сверка'];
+}
+
+/** Привести запись к тому виду, который ждёт браузер: поля уже с правками. */
+function docgenRecordForClient(array $record, array $managerChecks): array
+{
+    $id = (string) ($record['id'] ?? '');
+    return [
+        'id' => $id,
+        'source' => (string) ($record['source'] ?? ''),
+        'source_key' => (string) ($record['source_key'] ?? ''),
+        'kind' => (string) ($record['kind'] ?? ''),
+        'fields' => baseFields($record),
+        'managerCheck' => $managerChecks[$id] ?? null,
+    ];
+}
+
+/**
+ * Поля записи с правками карточки. baseFields() объявлена в index.php,
+ * поэтому при прямом подключении модуля (тесты, служебные скрипты) берём
+ * поля как есть — так модуль остаётся самостоятельным.
+ */
+function docgenRecordFieldMap(array $record): array
+{
+    if (function_exists('baseFields')) {
+        return baseFields($record);
+    }
+    $fields = $record['fields'] ?? [];
+    return is_array($fields) ? $fields : [];
+}
+
+/**
+ * Один проход по книге: считаем поля записи, строку поиска и значения
+ * фильтров заранее. baseFields() дорогая (правки карточки, ручные поля,
+ * колонки пользователя), поэтому на 20 000 записей её нельзя вызывать
+ * внутри каждой проверки — иначе поиск считается за секунды.
+ *
+ * @return list<array{record: array, id: string, source: string, source_key: string, kind: string, fields: array, haystack: string, facets: array}>
+ */
+function docgenPrepareRecords(array $records, array $managerChecks): array
+{
+    $out = [];
+    foreach ($records as $record) {
+        if (!is_array($record) || !isset($record['id'])) {
+            continue;
+        }
+        $id = (string) $record['id'];
+        $fields = docgenRecordFieldMap($record);
+        $haystack = mb_strtolower((string) ($record['source'] ?? ''), 'UTF-8');
+        foreach ($fields as $value) {
+            if (is_scalar($value)) {
+                $haystack .= ' ' . mb_strtolower((string) $value, 'UTF-8');
+            }
+        }
+        $statusRaw = mb_strtolower((string) ($fields['Статус ЕГРЮЛ'] ?? ''), 'UTF-8');
+        $kind = (string) ($record['kind'] ?? '');
+        $facets = [
+            'Регион' => trim((string) ($fields['Регион'] ?? '')),
+            'Должность' => trim((string) ($fields['Должность'] ?? '')),
+            'Статус ЕГРЮЛ' => $kind === 'Архив'
+                ? 'archive'
+                : (mb_strpos($statusRaw, 'не действ') !== false ? 'inactive' : 'active'),
+            'Сверка' => (string) (($managerChecks[$id] ?? [])['status'] ?? 'none'),
+        ];
+        $out[] = [
+            'record' => $record,
+            'id' => $id,
+            'source' => (string) ($record['source'] ?? ''),
+            'source_key' => (string) ($record['source_key'] ?? ''),
+            'kind' => $kind,
+            'fields' => $fields,
+            'haystack' => $haystack,
+            'facets' => $facets,
+        ];
+    }
+    return $out;
+}
+
+/**
+ * Отбор подготовленных записей: источник, регион, поиск и фильтры шапки.
+ * Пустой список значений в фильтре означает «ничего не выбрано» — пустая
+ * выборка, как «Выделить все» без галочек в Excel.
+ */
+function docgenFilterPrepared(array $prepared, array $filters): array
+{
+    $source = (string) ($filters['source'] ?? 'all');
+    $region = (string) ($filters['region'] ?? 'all');
+    $query = mb_strtolower(trim((string) ($filters['query'] ?? '')), 'UTF-8');
+    $selected = [];
+    $facets = is_array($filters['facets'] ?? null) ? $filters['facets'] : [];
+    foreach ($facets as $column => $values) {
+        if (is_array($values)) {
+            $selected[(string) $column] = array_fill_keys(array_map('strval', $values), true);
+        }
+    }
+
+    $out = [];
+    foreach ($prepared as $item) {
+        if ($source !== 'all' && $item['source_key'] !== $source) {
+            continue;
+        }
+        if ($region !== 'all' && $item['facets']['Регион'] !== $region) {
+            continue;
+        }
+        if ($query !== '' && mb_strpos($item['haystack'], $query) === false) {
+            continue;
+        }
+        $keep = true;
+        foreach ($selected as $column => $set) {
+            if (!isset($item['facets'][$column]) || !isset($set[$item['facets'][$column]])) {
+                $keep = false;
+                break;
+            }
+        }
+        if ($keep) {
+            $out[] = $item;
+        }
+    }
+    return $out;
+}
+
+/**
+ * Счётчики для фильтров в шапке. Для каждой колонки значения считаются с
+ * учётом всех остальных фильтров, но без учёта самой колонки — так видно,
+ * сколько строк останется, если доотметить это значение.
+ */
+function docgenFacetsFor(array $prepared, array $filters): array
+{
+    $result = [];
+    foreach (docgenRecordFacetColumns() as $column) {
+        $without = $filters;
+        $without['facets'] = is_array($without['facets'] ?? null) ? $without['facets'] : [];
+        unset($without['facets'][$column]);
+        $counts = [];
+        foreach (docgenFilterPrepared($prepared, $without) as $item) {
+            $value = $item['facets'][$column] ?? '';
+            $counts[$value] = ($counts[$value] ?? 0) + 1;
+        }
+        $values = [];
+        foreach ($counts as $value => $count) {
+            $values[] = ['value' => (string) $value, 'count' => $count];
+        }
+        if ($column === 'Регион') {
+            usort($values, static fn(array $a, array $b): int => strcoll($a['value'], $b['value']));
+        } else {
+            usort($values, static fn(array $a, array $b): int => $b['count'] <=> $a['count'] ?: strcmp($a['value'], $b['value']));
+        }
+        $result[$column] = $values;
+    }
+    return $result;
+}
+
+/** Данные для клиента: одна страница, счётчики фильтров и сводка. */
+function docgenRecordsPayload(array $dataset, array $managerChecks, array $filters, int $page): array
+{
+    $records = array_values(array_filter($dataset['records'] ?? [], static fn($item): bool => is_array($item) && isset($item['id'])));
+    $prepared = docgenPrepareRecords($records, $managerChecks);
+    $filtered = docgenFilterPrepared($prepared, $filters);
+    $total = count($filtered);
+    $pageSize = DOCGEN_RECORDS_PAGE_SIZE;
+    $pageCount = max(1, (int) ceil($total / $pageSize));
+    $page = max(1, min($page, $pageCount));
+    $offset = ($page - 1) * $pageSize;
+    $pageItems = array_slice($filtered, $offset, $pageSize);
+    $mismatch = 0;
+    $regions = [];
+    foreach ($prepared as $item) {
+        if ($item['facets']['Регион'] !== '') {
+            $regions[$item['facets']['Регион']] = true;
+        }
+    }
+    foreach ($filtered as $item) {
+        if ($item['facets']['Сверка'] !== 'none' && $item['facets']['Сверка'] !== 'ok') {
+            $mismatch++;
+        }
+    }
+    $bySource = [];
+    foreach ($prepared as $item) {
+        $bySource[$item['source_key']] = ($bySource[$item['source_key']] ?? 0) + 1;
+    }
+    return [
+        'page' => $page,
+        'pageCount' => $pageCount,
+        'pageSize' => $pageSize,
+        'total' => $total,
+        'records' => array_map(static function (array $item): array {
+            return [
+                'id' => $item['id'],
+                'source' => $item['source'],
+                'source_key' => $item['source_key'],
+                'kind' => $item['kind'],
+                'fields' => $item['fields'],
+            ];
+        }, $pageItems),
+        'facets' => docgenFacetsFor($prepared, $filters),
+        'summary' => [
+            'total' => count($prepared),
+            'filtered' => $total,
+            'bySource' => $bySource,
+            'regions' => array_keys($regions),
+            'mismatch' => $mismatch,
+        ],
+    ];
+}
+
+/**
+ * Страница книги для браузера. GET-параметры:
+ *   page=3
+ *   source=guber | all
+ *   region=Красноярский край | all
+ *   query=миац
+ *   facets={"Регион":["Красноярский край"],"Сверка":["name_mismatch"]}
+ */
+function docgenRecordsPage(): never
+{
+    $filters = docgenRequestFilters();
+    $page = max(1, (int) ($_GET['page'] ?? 1));
+    $payload = docgenRecordsPayload(loadDataset(), docgenManagerChecks(), $filters, $page);
+    unset($payload['ids']);
+    $payload['ok'] = true;
+    sendJson($payload);
+}
+
+/**
+ * Все ID под текущим фильтром — для кнопки «Выбрать все по фильтру».
+ * Один JSON-массив: на 20 000 записей это ~500 КБ, и это дешевле, чем
+ * держать в браузере весь набор с полями.
+ */
+function docgenRecordsIds(): never
+{
+    $records = loadDataset()['records'] ?? [];
+    $records = array_values(array_filter($records, static fn($item): bool => is_array($item) && isset($item['id'])));
+    $prepared = docgenPrepareRecords($records, docgenManagerChecks());
+    $filtered = docgenFilterPrepared($prepared, docgenRequestFilters());
+    sendJson([
+        'ok' => true,
+        'total' => count($filtered),
+        'ids' => array_column($filtered, 'id'),
+    ]);
+}
+
+/** Разобрать фильтры из GET: источник, регион, поиск, значения из шапки. */
+function docgenRequestFilters(): array
+{
+    $facets = [];
+    $raw = (string) ($_GET['facets'] ?? '');
+    if ($raw !== '') {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            foreach ($decoded as $column => $values) {
+                if (is_array($values)) {
+                    $facets[(string) $column] = array_values(array_filter(
+                        array_map('strval', $values),
+                        static fn(string $value): bool => $value !== ''
+                    ));
+                }
+            }
+        }
+    }
+    return [
+        'source' => (string) ($_GET['source'] ?? 'all'),
+        'region' => (string) ($_GET['region'] ?? 'all'),
+        'query' => (string) ($_GET['query'] ?? ''),
+        'facets' => $facets,
+    ];
+}
+
+/** Файл настроек вида таблицы: ширины столбцов и режим «по ширине окна». */
+const DOCGEN_TABLE_VIEW_FILE_NAME = '/table-view.json';
+
+function docgenTableViewFile(): string
+{
+    return DOCGEN_SETTINGS_DIR . DOCGEN_TABLE_VIEW_FILE_NAME;
+}
+
+/** Настройки вида общие для всех, кто открывает приложение. */
+function docgenTableView(): array
+{
+    $data = docgenReadJson(docgenTableViewFile(), []);
+    $widths = is_array($data['widths'] ?? null) ? $data['widths'] : [];
+    $clean = [];
+    foreach ($widths as $key => $width) {
+        $value = (int) $width;
+        if ($value >= 40 && $value <= 900) {
+            $clean[(string) $key] = $value;
+        }
+    }
+    return ['widths' => $clean, 'fit' => !empty($data['fit'])];
+}
+
+function docgenSaveTableView(): never
+{
+    $widths = json_decode((string) ($_POST['widths'] ?? '{}'), true);
+    if (!is_array($widths)) {
+        $widths = [];
+    }
+    $clean = [];
+    foreach ($widths as $key => $width) {
+        $value = (int) $width;
+        if (is_string($key) && $key !== '' && $value >= 40 && $value <= 900) {
+            $clean[$key] = $value;
+        }
+    }
+    docgenWriteJson(docgenTableViewFile(), [
+        'widths' => $clean,
+        'fit' => (string) ($_POST['fit'] ?? '0') === '1',
+        'updatedAt' => date(DATE_ATOM),
+    ]);
+    sendJson(['ok' => true, 'widths' => $clean, 'fit' => (string) ($_POST['fit'] ?? '0') === '1']);
+}
+
+/** Одна карточка по id: нужна, когда запись не на текущей странице. */
+function docgenRecordById(string $id): void
+{
+    foreach (loadDataset()['records'] ?? [] as $record) {
+        if (is_array($record) && (string) ($record['id'] ?? '') === $id) {
+            sendJson(['ok' => true, 'record' => [
+                'id' => $id,
+                'source' => (string) ($record['source'] ?? ''),
+                'source_key' => (string) ($record['source_key'] ?? ''),
+                'kind' => (string) ($record['kind'] ?? ''),
+                'fields' => docgenRecordFieldMap($record),
+            ]]);
+        }
+    }
+    sendJson(['ok' => false, 'error' => 'Запись не найдена в книге.'], 404);
 }
