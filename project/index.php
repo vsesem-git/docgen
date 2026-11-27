@@ -1053,16 +1053,16 @@ button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 .mapping-head strong{font-size:13px}.mapping-body{padding:0 14px 12px;display:flex;gap:7px;flex-wrap:wrap}
 .map-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:5px 8px;background:#fafcff;font-size:11.5px;color:var(--muted)}
 .map-chip b{color:var(--ink);font-weight:650}.map-chip .state{font-size:10.5px;font-weight:750;color:var(--ok)}.map-chip.manual{background:#fff9ec;border-color:#f0d9a8}.map-chip.manual .state{color:var(--warn)}
-.var-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:7px;margin:11px 0 0}
-.var-row{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdff;font-size:12.5px}
-.var-row.off{background:#fdf6f5;border-color:#eec9c4}
-.var-row label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;flex:1;min-width:0}
-.var-row input{width:auto;height:auto;margin:2px 0 0;flex:none}
-.var-name{font-weight:650;color:var(--ink);overflow-wrap:anywhere}
-.var-state{font-size:11px;color:var(--muted);display:block}
+.var-list{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 0}
+.var-row{display:inline-flex;align-items:center;padding:0;border:1px solid var(--line);border-radius:999px;background:#fbfdff;font-size:12px;line-height:1}
+.var-row:hover{border-color:#b8cee1}
+.var-row.off{background:#fdf2f0;border-color:#e8bdb7}
+.var-row label{display:inline-flex;align-items:center;gap:6px;padding:6px 10px 6px 8px;cursor:pointer;min-width:0}
+.var-row input{width:13px;height:13px;margin:0;flex:none;cursor:pointer;accent-color:var(--brand)}
+.var-name{font-weight:650;color:var(--ink);white-space:nowrap}
 .var-row.off .var-name{text-decoration:line-through;color:#9a5a52}
-.var-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
-.var-tools .small-muted{flex:1;min-width:200px}
+.var-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}
+.var-tools .small-muted{flex:1;min-width:180px}
 .var-chip{cursor:pointer;background:#fff;border:1px solid #bfd2e6;border-radius:7px;padding:5px 9px;font-size:11.5px;color:#174a7e;font-family:inherit}
 .var-chip:hover,.var-chip:focus-visible{background:#eaf3fc;border-color:var(--brand);outline:none}
 .letter-vars{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
@@ -2353,13 +2353,16 @@ function updateMapping() {
     const state=complete?'колонка книги':(count?`частично · ${count}/${records.length}`:'ручное поле');
     return `<span class="map-chip ${complete?'':'manual'}"><b>${esc(name)}</b><span class="state">${state}</span></span>`;
   }).join('');
+  // Каждая переменная — компактный чип в общей строке: отключённая галочка
+  // означает «код удалить из документа», включённая — «подставить значение».
   const rows=fields.map(name=>{
     const off=excluded.has(name);
-    return `<div class="var-row ${off?'off':''}"><label><input type="checkbox" data-var-exclude="${esc(name)}" ${off?'checked':''}><span><span class="var-name">${'{'+esc(name)+'}'}</span><span class="var-state">${off?'код будет удалён из документа':'подставляется значением из данных'}</span></span></label></div>`;
+    const hint=off?'Код будет удалён из документа':'Подставляется значением из данных';
+    return `<span class="var-row ${off?'off':''}"><label title="${esc(hint)}"><input type="checkbox" data-var-exclude="${esc(name)}" ${off?'checked':''} aria-label="${esc(name)}: ${esc(hint)}"><span class="var-name">${'{'+esc(name)+'}'}</span></label></span>`;
   }).join('');
   const offCount=fields.filter(name=>excluded.has(name)).length;
   $('mappingBody').innerHTML=chips+`<span class="small-muted" style="align-self:center">${fields.length} полей · ${counts.filter((count,index)=>records.length>0&&count===records.length).length} полностью сопоставлено</span>`
-    +'<div style="width:100%;margin-top:12px"><b class="small-muted">Отключить заполнение отдельных переменных</b><span class="small-muted" style="display:block;margin-top:3px">Снимите отметку — код не будет заменяться значением, а удалится из документа вместе с пустыми скобками и запятыми. Сам шаблон не меняется.</span></div>'
+    +'<div style="width:100%;margin-top:11px"><b class="small-muted">Отключить заполнение отдельных переменных</b><span class="small-muted"> · снимите отметку — код удалится из документа вместе с пустыми скобками и запятыми; сам шаблон не меняется</span></div>'
     +`<div class="var-list">${rows}</div>`
     +`<div class="var-tools"><span class="small-muted" id="varExcludeFeedback">${offCount?(offCount+' отключено · значения по ним не требуются'):'Все переменные подставляются'}</span><button type="button" class="btn-ghost btn-small" id="varExcludeAllBtn">Отключить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeNoneBtn">Включить все</button><button type="button" class="btn-ghost btn-small" id="varExcludeSaveBtn">Сохранить для шаблона</button></div>`;
   const list=$('mappingBody').querySelector('.var-list');
