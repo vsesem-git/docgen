@@ -585,5 +585,27 @@ docgenMailingDelete((string) $task['id']);
 check(docgenMailingTask((string) $task['id']) === [], 'удалённая задача исчезает из списка');
 check(count(docgenQueueList(true)) === $queuedBefore, 'удаление задачи не удаляет письма очереди');
 
+// 18. Отправленное письмо освобождает диск, но остаётся в журнале.
+$sentId = str_pad('d', 32, 'd', STR_PAD_LEFT);
+$sentDir = docgenQueuePath($sentId);
+docgenEnsureDir($sentDir);
+file_put_contents($sentDir . '/document.pdf', '%PDF-1.4');
+file_put_contents($sentDir . '/document.docx', 'PK');
+docgenSaveQueueItem([
+    'id' => $sentId,
+    'batchId' => '',
+    'recordId' => 'cleanup-1',
+    'status' => 'sent',
+    'to' => 'x@example.com',
+    'subject' => 'Тема',
+    'body' => 'Текст',
+    'bodyHtml' => '',
+    'createdAt' => date(DATE_ATOM),
+]);
+check(is_file($sentDir . '/document.pdf'), 'до очистки PDF на месте');
+check(docgenCleanupSentFiles($sentDir) === true, 'очистка сообщает об успехе');
+check(!is_file($sentDir . '/document.pdf') && !is_file($sentDir . '/document.docx'), 'PDF и DOCX удалены после отправки');
+check((docgenReadQueueItem($sentId)['status'] ?? '') === 'sent', 'запись журнала сохраняется после очистки');
+
 echo $failures === 0 ? "OK: {$checks} checks passed\n" : "FAILED: {$failures} of {$checks}\n";
 exit($failures === 0 ? 0 : 1);

@@ -2263,6 +2263,23 @@ function docgenPersistBatch(array $batch): void
     docgenSaveBatch($batch);
 }
 
+/**
+ * Удаляет PDF и DOCX отправленного письма. meta.json остаётся: журнал
+ * должен помнить, что и когда ушло. Возвращает true, только если файлов
+ * действительно не осталось.
+ */
+function docgenCleanupSentFiles(string $dir): bool
+{
+    $ok = true;
+    foreach (['document.pdf', 'document.docx'] as $name) {
+        $path = $dir . '/' . $name;
+        if (is_file($path) && !@unlink($path)) {
+            $ok = false;
+        }
+    }
+    return $ok;
+}
+
 function docgenRemoveTree(string $path): void
 {
     if (is_link($path) || is_file($path)) {
@@ -4659,6 +4676,9 @@ function docgenDeliverPreparedItem(array $meta, string $dir, string $pdfPath, ar
         $current['sentAt'] = date(DATE_ATOM);
         $current['lastError'] = '';
         $current['reviewedAt'] = date(DATE_ATOM);
+        // Файлы отправленного письма больше не нужны: на 20 000 писем это
+        // несколько гигабайт. meta.json остаётся как запись в журнале.
+        $current['filesCleaned'] = docgenCleanupSentFiles($dir);
         docgenSaveQueueItem($current);
         // Manual and scheduled letters share the provider quota, so both are
         // counted against the mailbox daily cap.
