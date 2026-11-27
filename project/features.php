@@ -3060,40 +3060,21 @@ function docgenGenerate(): never
             continue;
         }
         $record = $byId[$id];
-        $fields = baseFields($record);
-        $rowOverrides = isset($overrides[$id]) && is_array($overrides[$id]) ? $overrides[$id] : [];
-        $fields = array_merge($fields, $rowOverrides);
-        // The manual letter name is optional: an empty value falls back to the
-        // organization name from the book. Never infer it from DaData.
-        $fields['Полное наименование'] = docgenManualFullName($fields);
-        $cardLabel = trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? $id));
-        if ((string) ($fields['Регион'] ?? '') !== '') {
-            $cardLabel = (string) $fields['Регион'] . ' · ' . $cardLabel;
-        }
-        $progress('documents', $processed, 'Карточка ' . $processed . '/' . $totalSteps . ' — подготовка документа', $cardLabel);
-        $values = [];
-        $missing = [];
-        foreach ($requiredFields as $fieldName) {
-            $value = $fields[$fieldName] ?? '';
-            if (!is_scalar($value) || trim((string) $value) === '') {
-                $missing[] = $fieldName;
-            } else {
-                $values[$fieldName] = trim((string) $value);
-            }
-        }
-        if ($missing) {
-            $errors[] = ['id' => $id, 'region' => (string) ($fields['Регион'] ?? ''), 'reason' => 'Не заполнены поля: ' . implode(', ', $missing)];
-            continue;
-        }
         $sourceNumber++;
         $extension = $template['type'] === 'docx' ? 'docx' : 'html';
         $sourcePath = $sourceDir . '/doc_' . str_pad((string) $sourceNumber, 4, '0', STR_PAD_LEFT) . '.' . $extension;
         try {
-            docgenBuildDocumentSource($template, $templateInfo, $values, $sourcePath);
-            $fields['__resolvedValues'] = $values;
+            $fields = docgenPrepareDocument($record, $template, $templateInfo, $requiredFields, $overrides, $sourcePath);
+            $cardLabel = trim((string) ($fields['Наименование (ЕГРЮЛ/лист)'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? $id));
+            if ((string) ($fields['Регион'] ?? '') !== '') {
+                $cardLabel = (string) $fields['Регион'] . ' · ' . $cardLabel;
+            }
+            $progress('documents', $processed, 'Карточка ' . $processed . '/' . $totalSteps . ' — документ готов', $cardLabel);
             $prepared[] = ['id' => $id, 'record' => $record, 'fields' => $fields, 'sourcePath' => $sourcePath, 'number' => $sourceNumber];
+        } catch (InvalidArgumentException $e) {
+            $errors[] = ['id' => $id, 'region' => (string) (baseFields($record)['Регион'] ?? ''), 'reason' => $e->getMessage()];
         } catch (Throwable $e) {
-            $errors[] = ['id' => $id, 'region' => (string) ($fields['Регион'] ?? ''), 'reason' => 'Ошибка генерации документа: ' . $e->getMessage()];
+            $errors[] = ['id' => $id, 'region' => (string) (baseFields($record)['Регион'] ?? ''), 'reason' => 'Ошибка генерации документа: ' . $e->getMessage()];
         }
     }
     if (!$prepared) {
@@ -3118,34 +3099,6 @@ function docgenGenerate(): never
         }
     }
 
-    // Ящик здесь не выбирается: очередь формируется без отправителя, а ящик
-    // оператор назначает на этапе проверки пачки (docgenReviewBatch).
-    // One template = document + its own letter layout (HTML design, recipients,
-    // name, subject, text). Templates without a saved copy use common defaults.
-    $letterTemplateId = (string) ($template['id'] ?? '');
-    if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
-        $letterTemplateId = '';
-    }
-    $letter = docgenTemplateLetterSettings($letterTemplateId);
-    // A one-off DOCX has no saved template yet: the design typed in this window
-    // must still reach its letters instead of being silently replaced.
-    if ($letterTemplateId === '' && (string) ($template['id'] ?? '') === '__upload__') {
-        $draft = json_decode((string) ($_POST['letterDraft'] ?? ''), true);
-        if (is_array($draft)) {
-            $fields = [];
-            foreach (['filenamePattern', 'toPattern', 'ccPattern', 'subjectPattern', 'bodyPattern', 'htmlPattern', 'htmlTextPattern'] as $key) {
-                if (isset($draft[$key]) && is_scalar($draft[$key])) {
-                    $fields[$key] = (string) $draft[$key];
-                }
-            }
-            if ($fields) {
-                $letter = array_merge($letter, $fields, ['own' => false]);
-                if (trim((string) ($letter['subjectPattern'] ?? '')) === '') {
-                    $letter['subjectPattern'] = (string) docgenLetterTemplateDefaults()['subjectPattern'];
-                }
-            }
-        }
-    }
     $batchId = bin2hex(random_bytes(16));
     docgenEnsureDir(docgenBatchPath($batchId));
     $sourceNames = [];
@@ -3166,127 +3119,25 @@ function docgenGenerate(): never
         sendJson(['ok' => false, 'error' => 'Не удалось собрать ZIP с документами.'], 500);
     }
     $usedArchiveNames = [];
+    // Настройки письма (тема, получатели, дизайн) общие для всей пачки.
+    [$letter, $letterTemplateId] = docgenLetterForTemplate($template);
     $queuedStep = 0;
-    $progress('queue', 0, 'Собираем письма в очередь и ZIP…');
     foreach ($prepared as $item) {
         $queuedStep++;
         $sourcePath = $item['sourcePath'];
         $pdfPath = $pdfDir . '/' . pathinfo($sourcePath, PATHINFO_FILENAME) . '.pdf';
-        $fields = $item['fields'];
-        $values = $fields['__resolvedValues'];
-        unset($fields['__resolvedValues']);
-        $region = (string) ($fields['Регион'] ?? 'Без региона');
-        $person = (string) ($fields['Фамилия И.О.'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? 'Адресат');
-        $progress('queue', $queuedStep, 'Очередь ' . $queuedStep . '/' . $totalSteps . ' — ' . $region, $region . ' · ' . $person);
-        $inn = (string) ($fields['ИНН'] ?? '');
-        $emailValues = array_merge($fields, $values);
-        $templateBaseName = docgenTemplateBaseName((string) $template['name']);
-        $emailValues['Наименование файла'] = $templateBaseName;
-        $emailValues['наименование файла'] = $templateBaseName;
-        $filenamePattern = docgenReplaceCodes((string) $letter['filenamePattern'], $emailValues);
-        $filenamePattern = trim((string) (preg_replace('/\s+[—–-]\s*$/u', '', trim($filenamePattern)) ?? $filenamePattern));
-        $baseName = $filenamePattern !== ''
-            ? safeFilename($filenamePattern)
-            : safeFilename($region . ' — ' . $person . ($inn !== '' ? ' — ' . $inn : ' — ' . $item['id']));
-        if (is_file($pdfPath) && filesize($pdfPath) > 0) {
-            $queueId = bin2hex(random_bytes(16));
-            $queuePath = DOCGEN_QUEUE_DIR . '/' . $queueId;
-            try {
-                docgenEnsureDir($queuePath);
-                if (!copy($pdfPath, $queuePath . '/document.pdf')) {
-                    throw new RuntimeException('Не удалось сохранить PDF в очереди.');
-                }
-                $hasDocx = $template['type'] === 'docx' && is_file($sourcePath);
-                if ($hasDocx && !copy($sourcePath, $queuePath . '/document.docx')) {
-                    throw new RuntimeException('Не удалось сохранить DOCX в очереди.');
-                }
-                $toPattern = trim((string) $letter['toPattern']);
-                $ccPattern = trim((string) $letter['ccPattern']);
-                $toSource = $toPattern !== '' ? docgenReplaceCodes($toPattern, $emailValues) : (string) ($fields['Основной email'] ?? '');
-                $ccSource = $ccPattern !== '' ? docgenReplaceCodes($ccPattern, $emailValues) : (string) ($fields['Доп./старые email'] ?? '');
-                $to = docgenEmailAddresses($toSource);
-                $cc = docgenEmailAddresses($ccSource);
-                $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
-                $cc = array_values(array_filter($cc, static fn(string $email): bool => !isset($toKeys[mb_strtolower($email, 'UTF-8')])));
-                $subject = docgenReplaceCodes((string) $letter['subjectPattern'], $emailValues);
-                // Bodies for multipart/alternative: plain text first, then the
-                // HTML design (when set) as the rich alternative.
-                $body = docgenReplaceCodes(docgenLetterTextAlternative($letter), $emailValues);
-                $bodyHtml = '';
-                if (trim((string) ($letter['htmlPattern'] ?? '')) !== '') {
-                    $bodyHtml = docgenReplaceCodes((string) $letter['htmlPattern'], $emailValues);
-                    docgenValidateLetterHtml($bodyHtml, $emailValues);
-                    if (trim($body) === '') {
-                        $body = trim(docgenLetterHtmlToText($bodyHtml));
-                    }
-                }
-                if (trim($body) === '' && $bodyHtml === '') {
-                    throw new RuntimeException('Письмо пустое: заполните текст письма или HTML-дизайн.');
-                }
-                // A generated-only text part still works, but the operator must see it.
-                $htmlFallback = $bodyHtml !== ''
-                    && trim((string) ($letter['bodyPattern'] ?? '')) === ''
-                    && trim((string) ($letter['htmlTextPattern'] ?? '')) === '';
-                $meta = [
-                    'id' => $queueId,
-                    'batchId' => $batchId,
-                    'recordId' => $item['id'],
-                    'region' => $region,
-                    'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
-                    'position' => (string) ($fields['Должность'] ?? $fields['Должность руководителя'] ?? ''),
-                    'templateName' => (string) $template['name'],
-                    'smtpAccountId' => '',
-                    'smtpAccountLabel' => '',
-                    'filename' => $baseName,
-                    'to' => implode('; ', $to),
-                    'cc' => implode('; ', $cc),
-                    'sourcePrimaryEmail' => (string) ($fields['Основной email'] ?? ''),
-                    'sourceAdditionalEmails' => (string) ($fields['Доп./старые email'] ?? ''),
-                    'subject' => trim(preg_replace('/[\r\n]+/u', ' ', $subject) ?? $subject),
-                    'body' => $body,
-                    'bodyHtml' => $bodyHtml,
-                    'htmlFallback' => $htmlFallback,
-                    'templateId' => (string) ($template['id'] ?? ''),
-                    'letterTemplateId' => $letterTemplateId,
-                    'hasDocx' => $hasDocx,
-                    'status' => 'queued',
-                    'lastError' => count($to) ? '' : 'В исходной записи не найден корректный основной email. Заполните получателя перед отправкой.',
-                    'createdAt' => date(DATE_ATOM),
-                    'sentAt' => null,
-                    'reviewedAt' => null,
-                ];
-                docgenSaveQueueItem($meta);
-                $queueCreated++;
-                if ($batchSubject === '') {
-                    $batchSubject = trim((string) ($meta['subject'] ?? ''));
-                }
-            } catch (Throwable $e) {
-                cleanupTree($queuePath);
-                $errors[] = ['id' => $item['id'], 'region' => $region, 'reason' => 'Не удалось добавить письмо в очередь: ' . $e->getMessage()];
+        $region = (string) ($item['fields']['Регион'] ?? '');
+        $progress('queue', $queuedStep, 'Очередь ' . $queuedStep . '/' . $totalSteps . ' — ' . $region, (string) ($item['id'] ?? ''));
+        try {
+            $queued = docgenQueueLetter($item, $template, $letter, $letterTemplateId, $pdfPath, $batchId);
+            $queueCreated++;
+            if ($batchSubject === '') {
+                $batchSubject = trim((string) (docgenReadQueueItem($queued['id'])['subject'] ?? ''));
             }
-            $zipName = $baseName . '.pdf';
-            if (isset($usedArchiveNames[$zipName])) {
-                $zipName = safeFilename($region . ' — ' . $person . ' — ' . $item['id']) . '.pdf';
-            }
-            $usedArchiveNames[$zipName] = true;
-            $archive->addFile($pdfPath, $zipName);
-            if ($template['type'] === 'docx' && is_file($sourcePath)) {
-                $docxName = pathinfo($zipName, PATHINFO_FILENAME) . '.docx';
-                if (isset($usedArchiveNames[$docxName])) {
-                    $docxName = safeFilename($region . ' — ' . $person . ' — ' . $item['id']) . '.docx';
-                }
-                $usedArchiveNames[$docxName] = true;
-                $archive->addFile($sourcePath, $docxName);
-            }
+            docgenAddToArchive($archive, $usedArchiveNames, $queued, $template);
             $downloadedDocuments++;
-        } elseif ($template['type'] === 'docx' && is_file($sourcePath)) {
-            // Preserve the DOCX output even if LibreOffice could not create its PDF.
-            $docxName = $baseName . '.docx';
-            if (isset($usedArchiveNames[$docxName])) {
-                $docxName = safeFilename($region . ' — ' . $person . ' — ' . $item['id']) . '.docx';
-            }
-            $usedArchiveNames[$docxName] = true;
-            $archive->addFile($sourcePath, $docxName);
+        } catch (Throwable $e) {
+            $errors[] = ['id' => $item['id'], 'region' => $region, 'reason' => $e->getMessage()];
         }
     }
     if ($errors) {
@@ -3359,6 +3210,220 @@ function docgenGenerate(): never
         'queueUrl' => '#emailQueue',
     ]);
 }
+
+/**
+ * Настройки письма для шаблона: тема, получатели, текст и HTML-дизайн.
+ * Один шаблон = документ + его собственное оформление письма. Шаблон без
+ * сохранённой копии берёт общие значения. Одноразовый DOCX без сохранённого
+ * шаблона всё равно должен получить дизайн, набранный в этом окне.
+ */
+function docgenLetterForTemplate(array $template): array
+{
+    $letterTemplateId = (string) ($template['id'] ?? '');
+    if ($letterTemplateId === '__upload__' || $letterTemplateId === 'sample-docx') {
+        $letterTemplateId = '';
+    }
+    $letter = docgenTemplateLetterSettings($letterTemplateId);
+    if ($letterTemplateId === '' && (string) ($template['id'] ?? '') === '__upload__') {
+        $draft = json_decode((string) ($_POST['letterDraft'] ?? '{}'), true);
+        if (is_array($draft)) {
+            $fields = [];
+            foreach (['filenamePattern', 'toPattern', 'ccPattern', 'subjectPattern', 'bodyPattern', 'htmlPattern', 'htmlTextPattern'] as $key) {
+                if (isset($draft[$key]) && is_scalar($draft[$key])) {
+                    $fields[$key] = (string) $draft[$key];
+                }
+            }
+            if ($fields) {
+                $letter = array_merge($letter, $fields, ['own' => false]);
+                if (trim((string) ($letter['subjectPattern'] ?? '')) === '') {
+                    $letter['subjectPattern'] = (string) docgenLetterTemplateDefaults()['subjectPattern'];
+                }
+            }
+        }
+    }
+    return [$letter, $letterTemplateId];
+}
+
+/**
+ * Готовит документ по одной карточке: проверяет обязательные поля и собирает
+ * исходник (DOCX/HTML) с подставленными значениями. Общая часть для разовой
+ * генерации из браузера и для фоновой задачи рассылки.
+ */
+function docgenPrepareDocument(array $record, array $template, array $templateInfo, array $requiredFields, array $overrides, string $sourcePath): array
+{
+    $id = (string) ($record['id'] ?? '');
+    $fields = baseFields($record);
+    $rowOverrides = isset($overrides[$id]) && is_array($overrides[$id]) ? $overrides[$id] : [];
+    $fields = array_merge($fields, $rowOverrides);
+    // Ручное название письма необязательно: пустое значение откатывается к
+    // названию организации из книги. Никогда не выводим его из DaData.
+    $fields['Полное наименование'] = docgenManualFullName($fields);
+    $missing = [];
+    $values = [];
+    foreach ($requiredFields as $fieldName) {
+        $value = $fields[$fieldName] ?? '';
+        if (!is_scalar($value) || trim((string) $value) === '') {
+            $missing[] = $fieldName;
+        } else {
+            $values[$fieldName] = trim((string) $value);
+        }
+    }
+    if ($missing) {
+        throw new InvalidArgumentException('Не заполнены поля: ' . implode(', ', $missing));
+    }
+    docgenBuildDocumentSource($template, $templateInfo, $values, $sourcePath);
+    $fields['__resolvedValues'] = $values;
+    return $fields;
+}
+
+/**
+ * Ставит одно письмо в очередь: копирует готовый PDF (и DOCX) в папку письма
+ * и записывает meta.json. Вынесено из docgenGenerate(), чтобы одинаково
+ * работать и для разовой генерации, и для фонового воркера.
+ */
+/**
+ * Ставит одно письмо в очередь: копирует готовый PDF (и DOCX) в папку письма
+ * и записывает meta.json. Вынесено из docgenGenerate(), чтобы одинаково
+ * работать и для разовой генерации, и для фонового воркера.
+ *
+ * Возвращает сведения о письме, нужные вызывающему коду: id для проверки
+ * пачки и имя файла для ZIP с документами.
+ */
+function docgenQueueLetter(array $item, array $template, array $letter, string $letterTemplateId, string $pdfPath, string $batchId): array
+{
+    $sourcePath = (string) ($item['sourcePath'] ?? '');
+    if (!is_file($pdfPath) || filesize($pdfPath) === 0) {
+        throw new RuntimeException('Не удалось сформировать PDF.');
+    }
+    $queueId = bin2hex(random_bytes(16));
+    $queuePath = DOCGEN_QUEUE_DIR . '/' . $queueId;
+    docgenEnsureDir($queuePath);
+    try {
+        if (!copy($pdfPath, $queuePath . '/document.pdf')) {
+            throw new RuntimeException('Не удалось сохранить PDF в очереди.');
+        }
+        $hasDocx = $template['type'] === 'docx' && is_file($sourcePath);
+        if ($hasDocx && !copy($sourcePath, $queuePath . '/document.docx')) {
+            throw new RuntimeException('Не удалось сохранить DOCX в очереди.');
+        }
+
+        $fields = $item['fields'];
+        $values = $fields['__resolvedValues'] ?? [];
+        unset($fields['__resolvedValues']);
+        $region = (string) ($fields['Регион'] ?? 'Без региона');
+        $person = (string) ($fields['Фамилия И.О.'] ?? $fields['ФИО'] ?? $fields['Руководитель'] ?? 'Адресат');
+        $inn = (string) ($fields['ИНН'] ?? '');
+        $emailValues = array_merge($fields, $values);
+        $templateBaseName = docgenTemplateBaseName((string) $template['name']);
+        $emailValues['Наименование файла'] = $templateBaseName;
+        $emailValues['наименование файла'] = $templateBaseName;
+        $filenamePattern = docgenReplaceCodes((string) $letter['filenamePattern'], $emailValues);
+        $filenamePattern = trim((string) (preg_replace('/\s+[—–-]\s*$/u', '', trim($filenamePattern)) ?? $filenamePattern));
+        $baseName = $filenamePattern !== ''
+            ? safeFilename($filenamePattern)
+            : safeFilename($region . ' — ' . $person . ($inn !== '' ? ' — ' . $inn : ' — ' . $item['id']));
+
+        $toPattern = trim((string) $letter['toPattern']);
+        $ccPattern = trim((string) $letter['ccPattern']);
+        $toSource = $toPattern !== '' ? docgenReplaceCodes($toPattern, $emailValues) : (string) ($fields['Основной email'] ?? '');
+        $ccSource = $ccPattern !== '' ? docgenReplaceCodes($ccPattern, $emailValues) : (string) ($fields['Доп./старые email'] ?? '');
+        $to = docgenEmailAddresses($toSource);
+        $cc = docgenEmailAddresses($ccSource);
+        $toKeys = array_fill_keys(array_map(static fn(string $email): string => mb_strtolower($email, 'UTF-8'), $to), true);
+        $cc = array_values(array_filter($cc, static fn(string $email): bool => !isset($toKeys[mb_strtolower($email, 'UTF-8')])));
+        $subject = docgenReplaceCodes((string) $letter['subjectPattern'], $emailValues);
+        // Bodies for multipart/alternative: plain text first, then the
+        // HTML design (when set) as the rich alternative.
+        $body = docgenReplaceCodes(docgenLetterTextAlternative($letter), $emailValues);
+        $bodyHtml = '';
+        if (trim((string) ($letter['htmlPattern'] ?? '')) !== '') {
+            $bodyHtml = docgenReplaceCodes((string) $letter['htmlPattern'], $emailValues);
+            docgenValidateLetterHtml($bodyHtml, $emailValues);
+            if (trim($body) === '') {
+                $body = trim(docgenLetterHtmlToText($bodyHtml));
+            }
+        }
+        if (trim($body) === '' && $bodyHtml === '') {
+            throw new RuntimeException('Письмо пустое: заполните текст письма или HTML-дизайн.');
+        }
+        // A generated-only text part still works, but the operator must see it.
+        $htmlFallback = $bodyHtml !== ''
+            && trim((string) ($letter['bodyPattern'] ?? '')) === ''
+            && trim((string) ($letter['htmlTextPattern'] ?? '')) === '';
+        $meta = [
+            'id' => $queueId,
+            'batchId' => $batchId,
+            'recordId' => $item['id'],
+            'region' => $region,
+            'recipientName' => (string) ($fields['ФИО'] ?? $fields['Руководитель'] ?? ''),
+            'position' => (string) ($fields['Должность'] ?? $fields['Должность руководителя'] ?? ''),
+            'templateName' => (string) $template['name'],
+            'smtpAccountId' => '',
+            'smtpAccountLabel' => '',
+            'filename' => $baseName,
+            'to' => implode('; ', $to),
+            'cc' => implode('; ', $cc),
+            'sourcePrimaryEmail' => (string) ($fields['Основной email'] ?? ''),
+            'sourceAdditionalEmails' => (string) ($fields['Доп./старые email'] ?? ''),
+            'subject' => trim(preg_replace('/[\r\n]+/u', ' ', $subject) ?? $subject),
+            'body' => $body,
+            'bodyHtml' => $bodyHtml,
+            'htmlFallback' => $htmlFallback,
+            'templateId' => (string) ($template['id'] ?? ''),
+            'letterTemplateId' => $letterTemplateId,
+            'hasDocx' => $hasDocx,
+            'status' => 'queued',
+            'lastError' => count($to) ? '' : 'В исходной записи не найден корректный основной email. Заполните получателя перед отправкой.',
+            'createdAt' => date(DATE_ATOM),
+            'sentAt' => null,
+            'reviewedAt' => null,
+        ];
+        docgenSaveQueueItem($meta);
+        return [
+            'id' => $queueId,
+            'pdfPath' => $pdfPath,
+            'sourcePath' => $sourcePath,
+            'baseName' => $baseName,
+            'region' => $region,
+            'person' => $person,
+            'recordId' => (string) ($item['id'] ?? ''),
+            'subject' => (string) ($meta['subject'] ?? ''),
+        ];
+    } catch (Throwable $e) {
+        cleanupTree($queuePath);
+        throw new RuntimeException($e->getMessage(), 0, $e);
+    }
+}
+
+
+/**
+ * Кладёт PDF (и DOCX) письма в ZIP «Пакет документов». Имена разводятся,
+ * если у двух адресатов совпало название файла.
+ */
+function docgenAddToArchive(ZipArchive $archive, array &$usedNames, array $queued, array $template): void
+{
+    $region = (string) ($queued['region'] ?? '');
+    $person = (string) ($queued['person'] ?? '');
+    $recordId = (string) ($queued['recordId'] ?? '');
+    $baseName = (string) ($queued['baseName'] ?? '');
+    $pdfPath = (string) ($queued['pdfPath'] ?? '');
+    $sourcePath = (string) ($queued['sourcePath'] ?? '');
+    $zipName = $baseName . '.pdf';
+    if (isset($usedNames[$zipName])) {
+        $zipName = safeFilename($region . ' — ' . $person . ' — ' . $recordId) . '.pdf';
+    }
+    $usedNames[$zipName] = true;
+    $archive->addFile($pdfPath, $zipName);
+    if (($template['type'] ?? '') === 'docx' && is_file($sourcePath)) {
+        $docxName = pathinfo($zipName, PATHINFO_FILENAME) . '.docx';
+        if (isset($usedNames[$docxName])) {
+            $docxName = safeFilename($region . ' — ' . $person . ' — ' . $recordId) . '.docx';
+        }
+        $usedNames[$docxName] = true;
+        $archive->addFile($sourcePath, $docxName);
+    }
+}
+
 
 function docgenSaveTemplate(): never
 {
